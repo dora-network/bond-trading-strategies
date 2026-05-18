@@ -39,3 +39,7 @@ start-mcp-server:
 
 start-price-daemon:
 	go run ./cmd/price-daemon -ws-url "$(WS_URL)" -db-url "$(DATABASE_URL)" -api-key "$(DORA_API_KEY)" -asset-id "$(ASSET_ID)" -order-books "$(ORDER_BOOK_IDS)" -since "$(SINCE)" -reconnect-delay "$(RECONNECT_DELAY)" -http-addr "$(PRICE_DAEMON_HTTP_ADDR)"
+
+.PHONY: build
+build:
+	docker build -f Dockerfile -t github.com/dora-network/bond-strategy-server-mcp:latest .
