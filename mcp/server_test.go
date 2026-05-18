@@ -1,0 +1,408 @@
+package mcpserver_test
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/dora-network/bond-trading-strategies/testutils"
+	"github.com/govalues/decimal"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/mcptest"
+	"github.com/mark3labs/mcp-go/server"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	mcpserver "github.com/dora-network/bond-trading-strategies/mcp"
+)
+
+func newTestClient(t *testing.T) *mcptest.Server {
+	t.Helper()
+	strategySrv := newStrategyMockServer(t)
+	mcpSrv := mcpserver.New("", "", strategySrv.URL)
+	toolMap := mcpSrv.ListTools()
+	srvTools := make([]server.ServerTool, 0, len(toolMap))
+	for _, st := range toolMap {
+		srvTools = append(srvTools, *st)
+	}
+	ts, err := mcptest.NewServer(t, srvTools...)
+	require.NoError(t, err)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func newStrategyMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/strategies":
+			_, _ = w.Write([]byte(`{"items":[{"type":"copytrading","status":"not_implemented","description":"Copy trades from a followed trader subject to limits.","config_fields":[{"name":"followed_trader","type":"string(uuid)","description":"Trader UUID to mirror. Required.","required":true},{"name":"min_order_size","type":"integer","description":"Minimum copied order size. Must be non-negative.","required":false},{"name":"max_order_size","type":"integer","description":"Maximum copied order size. Must be greater than or equal to min_order_size.","required":false},{"name":"allowed_bonds","type":"array[string(uuid)]","description":"Optional allowlist of bond UUIDs. Empty means all bonds are eligible.","required":false}],"supports_run":false,"supports_backtest":false},{"type":"mean_reversion","status":"available","description":"Rolling z-score mean reversion strategy.","config_fields":[{"name":"lookback_window","type":"integer","description":"Rolling observation window. Must be at least 2.","required":false,"default":20},{"name":"entry_z_score","type":"number","description":"Entry threshold for opening positions. Must be greater than 0.","required":false,"default":2},{"name":"exit_z_score","type":"number","description":"Exit threshold for closing positions as spreads revert. Must be non-negative.","required":false,"default":0.5},{"name":"stop_loss_z_score","type":"number","description":"Stop-loss threshold for closing losing positions. Must be non-negative.","required":false,"default":3.5},{"name":"min_std_dev","type":"number","description":"Minimum spread volatility required before trading. Must be non-negative.","required":false,"default":0.0005},{"name":"max_position_size","type":"number","description":"Maximum fraction of capital allocated per trade. Must be in (0,1].","required":false,"default":1}],"supports_run":true,"supports_backtest":true}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/dora/orderbooks":
+			_, _ = w.Write([]byte(`{"items":[{"id":"book-1","display_name":"UST 10Y / USD","base_asset_id":"asset-base","quote_asset_id":"asset-quote","status":"ACTIVE"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/dora/user":
+			_, _ = w.Write([]byte(`{"id":"user-123"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenors":
+			_, _ = w.Write([]byte(`{"items":[{"code":"1M","description":"1 Month Treasury"},{"code":"10Y","description":"10 Year Treasury"},{"code":"30Y","description":"30 Year Treasury"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs":
+			_, _ = w.Write([]byte(`{"items":[{"id":"11111111-1111-1111-1111-111111111111","strategy_type":"mean_reversion","status":"running","created_at":"2026-04-24T12:00:00Z","updated_at":"2026-04-24T12:00:00Z"},{"id":"55555555-5555-5555-5555-555555555555","strategy_type":"mean_reversion","status":"paused","created_at":"2026-04-24T11:00:00Z","updated_at":"2026-04-24T11:30:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			if body["strategy_type"] == "copytrading" {
+				w.WriteHeader(http.StatusNotImplemented)
+				_, _ = w.Write([]byte(`{"error":"strategy_type \"copytrading\" is not implemented"}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"22222222-2222-2222-2222-222222222222","strategy_type":"mean_reversion","status":"running","created_at":"2026-04-24T12:00:00Z","updated_at":"2026-04-24T12:00:00Z","config":{"lookback_window":20}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/22222222-2222-2222-2222-222222222222":
+			_, _ = w.Write([]byte(`{"id":"22222222-2222-2222-2222-222222222222","strategy_type":"mean_reversion","status":"running","created_at":"2026-04-24T12:00:00Z","updated_at":"2026-04-24T12:00:00Z","config":{"lookback_window":20}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/55555555-5555-5555-5555-555555555555":
+			_, _ = w.Write([]byte(`{"id":"55555555-5555-5555-5555-555555555555","strategy_type":"mean_reversion","status":"paused","created_at":"2026-04-24T11:00:00Z","updated_at":"2026-04-24T11:30:00Z","config":{"lookback_window":30,"entry_z_score":1.5},"error":"waiting for manual resume"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/22222222-2222-2222-2222-222222222222/pause":
+			_, _ = w.Write([]byte(`{"id":"22222222-2222-2222-2222-222222222222","strategy_type":"mean_reversion","status":"paused","created_at":"2026-04-24T12:00:00Z","updated_at":"2026-04-24T12:01:00Z","config":{"lookback_window":20}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/22222222-2222-2222-2222-222222222222/resume":
+			_, _ = w.Write([]byte(`{"id":"22222222-2222-2222-2222-222222222222","strategy_type":"mean_reversion","status":"running","created_at":"2026-04-24T12:00:00Z","updated_at":"2026-04-24T12:02:00Z","config":{"lookback_window":20}}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/runs/22222222-2222-2222-2222-222222222222":
+			_, _ = w.Write([]byte(`{"id":"22222222-2222-2222-2222-222222222222","strategy_type":"mean_reversion","status":"stopped","created_at":"2026-04-24T12:00:00Z","updated_at":"2026-04-24T12:03:00Z","stopped_at":"2026-04-24T12:03:00Z","config":{"lookback_window":20}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backtests":
+			_, _ = w.Write([]byte(`{"items":[{"id":"33333333-3333-3333-3333-333333333333","strategy_type":"mean_reversion","status":"running","created_at":"2026-04-24T12:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/backtests":
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			if body["strategy_type"] == "copytrading" {
+				w.WriteHeader(http.StatusNotImplemented)
+				_, _ = w.Write([]byte(`{"error":"strategy_type \"copytrading\" is not implemented"}`))
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"44444444-4444-4444-4444-444444444444","strategy_type":"mean_reversion","status":"running","created_at":"2026-04-24T12:00:00Z","start":"2026-04-01T00:00:00Z","end":"2026-04-02T00:00:00Z","config":{"lookback_window":20}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backtests/44444444-4444-4444-4444-444444444444":
+			_, _ = w.Write([]byte(`{"id":"44444444-4444-4444-4444-444444444444","strategy_type":"mean_reversion","status":"completed","created_at":"2026-04-24T12:00:00Z","completed_at":"2026-04-24T12:01:00Z","start":"2026-04-01T00:00:00Z","end":"2026-04-02T00:00:00Z","config":{"lookback_window":20},"result":{"closed_trades":[],"total_pnl":"0","win_count":0,"loss_count":0,"max_drawdown":"0","sharpe_ratio":"0"}}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/backtests/44444444-4444-4444-4444-444444444444":
+			_, _ = w.Write([]byte(`{"id":"44444444-4444-4444-4444-444444444444","strategy_type":"mean_reversion","status":"cancelled","created_at":"2026-04-24T12:00:00Z","completed_at":"2026-04-24T12:01:00Z","start":"2026-04-01T00:00:00Z","end":"2026-04-02T00:00:00Z","config":{"lookback_window":20},"error":"backtest cancelled"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func callTool(t *testing.T, ts *mcptest.Server, name string, args map[string]any) *mcp.CallToolResult {
+	t.Helper()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = name
+	req.Params.Arguments = args
+
+	result, err := ts.Client().CallTool(context.Background(), req)
+	require.NoError(t, err)
+	return result
+}
+
+func textContent(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+	require.NotEmpty(t, result.Content, "expected non-empty content")
+	tc, ok := result.Content[0].(mcp.TextContent)
+	require.True(t, ok, "expected TextContent, got %T", result.Content[0])
+	return tc.Text
+}
+
+func TestStrategyList(t *testing.T) {
+	ts := newTestClient(t)
+	result := callTool(t, ts, "strategy_list", nil)
+	require.False(t, result.IsError)
+	text := textContent(t, result)
+	assert.Contains(t, text, "mean_reversion")
+	assert.Contains(t, text, "copytrading")
+	assert.Contains(t, text, "config_fields")
+	assert.Contains(t, text, "lookback_window")
+	assert.Contains(t, text, "followed_trader")
+}
+
+func TestStrategyDORATools(t *testing.T) {
+	ts := newTestClient(t)
+
+	orderbooks := callTool(t, ts, "strategy_dora_orderbooks", nil)
+	require.False(t, orderbooks.IsError)
+	orderbooksText := textContent(t, orderbooks)
+	assert.Contains(t, orderbooksText, "book-1")
+	assert.Contains(t, orderbooksText, "UST 10Y / USD")
+
+	user := callTool(t, ts, "strategy_dora_user", nil)
+	require.False(t, user.IsError)
+	assert.Contains(t, textContent(t, user), "user-123")
+}
+
+func TestStrategyTenors(t *testing.T) {
+	ts := newTestClient(t)
+
+	result := callTool(t, ts, "strategy_tenors", nil)
+	require.False(t, result.IsError)
+	text := textContent(t, result)
+	assert.Contains(t, text, "1M")
+	assert.Contains(t, text, "10Y")
+	assert.Contains(t, text, "30Y")
+	assert.Contains(t, text, "10 Year Treasury")
+}
+
+func TestStrategyRunLifecycle(t *testing.T) {
+	ts := newTestClient(t)
+
+	create := callTool(t, ts, "strategy_run_create", map[string]any{
+		"strategy_type": "mean_reversion",
+		"config":        map[string]any{"lookback_window": 20},
+	})
+	require.False(t, create.IsError)
+	assert.Contains(t, textContent(t, create), "22222222-2222-2222-2222-222222222222")
+
+	get := callTool(t, ts, "strategy_run_get", map[string]any{"id": "22222222-2222-2222-2222-222222222222"})
+	require.False(t, get.IsError)
+	assert.Contains(t, textContent(t, get), "running")
+
+	list := callTool(t, ts, "strategy_run_list", nil)
+	require.False(t, list.IsError)
+	assert.Contains(t, textContent(t, list), "11111111-1111-1111-1111-111111111111")
+
+	pause := callTool(t, ts, "strategy_run_pause", map[string]any{"id": "22222222-2222-2222-2222-222222222222"})
+	require.False(t, pause.IsError)
+	assert.Contains(t, textContent(t, pause), "paused")
+
+	resume := callTool(t, ts, "strategy_run_resume", map[string]any{"id": "22222222-2222-2222-2222-222222222222"})
+	require.False(t, resume.IsError)
+	assert.Contains(t, textContent(t, resume), "running")
+
+	stop := callTool(t, ts, "strategy_run_stop", map[string]any{"id": "22222222-2222-2222-2222-222222222222"})
+	require.False(t, stop.IsError)
+	assert.Contains(t, textContent(t, stop), "stopped")
+}
+
+func TestStrategyRunQuestions(t *testing.T) {
+	ts := newTestClient(t)
+
+	status := callTool(t, ts, "strategy_run_status", nil)
+	require.False(t, status.IsError)
+	statusText := textContent(t, status)
+	assert.Contains(t, statusText, "Found 2 strategy runs")
+	assert.Contains(t, statusText, "1 running")
+	assert.Contains(t, statusText, "1 paused")
+	assert.Contains(t, statusText, "11111111-1111-1111-1111-111111111111")
+
+	pausedOnly := callTool(t, ts, "strategy_run_status", map[string]any{"status": "paused"})
+	require.False(t, pausedOnly.IsError)
+	pausedText := textContent(t, pausedOnly)
+	assert.Contains(t, pausedText, "Found 1 strategy runs")
+	assert.Contains(t, pausedText, "55555555-5555-5555-5555-555555555555")
+
+	describe := callTool(t, ts, "strategy_run_describe", map[string]any{"id": "55555555-5555-5555-5555-555555555555"})
+	require.False(t, describe.IsError)
+	detailText := textContent(t, describe)
+	assert.Contains(t, detailText, "Run 55555555-5555-5555-5555-555555555555")
+	assert.Contains(t, detailText, "Status: paused")
+	assert.Contains(t, detailText, "Config: entry_z_score=1.5, lookback_window=30")
+	assert.Contains(t, detailText, "Error: waiting for manual resume")
+}
+
+func TestStrategyBacktestLifecycle(t *testing.T) {
+	ts := newTestClient(t)
+
+	create := callTool(t, ts, "strategy_backtest_create", map[string]any{
+		"strategy_type": "mean_reversion",
+		"config":        map[string]any{"lookback_window": 20},
+		"start":         "2026-04-01T00:00:00Z",
+		"end":           "2026-04-02T00:00:00Z",
+	})
+	require.False(t, create.IsError)
+	assert.Contains(t, textContent(t, create), "44444444-4444-4444-4444-444444444444")
+
+	get := callTool(t, ts, "strategy_backtest_get", map[string]any{"id": "44444444-4444-4444-4444-444444444444"})
+	require.False(t, get.IsError)
+	assert.Contains(t, textContent(t, get), "completed")
+
+	list := callTool(t, ts, "strategy_backtest_list", nil)
+	require.False(t, list.IsError)
+	assert.Contains(t, textContent(t, list), "33333333-3333-3333-3333-333333333333")
+
+	cancel := callTool(t, ts, "strategy_backtest_cancel", map[string]any{"id": "44444444-4444-4444-4444-444444444444"})
+	require.False(t, cancel.IsError)
+	assert.Contains(t, textContent(t, cancel), "cancelled")
+}
+
+func TestStrategyCopyTradingNotImplemented(t *testing.T) {
+	ts := newTestClient(t)
+
+	run := callTool(t, ts, "strategy_run_create", map[string]any{
+		"strategy_type": "copytrading",
+		"config": map[string]any{
+			"followed_trader": "11111111-1111-1111-1111-111111111111",
+			"min_order_size":  1,
+			"max_order_size":  2,
+		},
+	})
+	assert.True(t, run.IsError)
+	assert.Contains(t, textContent(t, run), "not implemented")
+
+	backtest := callTool(t, ts, "strategy_backtest_create", map[string]any{
+		"strategy_type": "copytrading",
+		"config": map[string]any{
+			"followed_trader": "11111111-1111-1111-1111-111111111111",
+			"min_order_size":  1,
+			"max_order_size":  2,
+		},
+		"start": "2026-04-01T00:00:00Z",
+		"end":   "2026-04-02T00:00:00Z",
+	})
+	assert.True(t, backtest.IsError)
+	assert.Contains(t, textContent(t, backtest), "not implemented")
+}
+
+func TestFREDFetchSeriesNoAPIKey(t *testing.T) {
+	ts := newTestClient(t)
+
+	result := callTool(t, ts, "fred_fetch_series", map[string]any{
+		"series_id": "DGS10",
+	})
+	assert.True(t, result.IsError)
+	assert.Contains(t, textContent(t, result), "FRED API key")
+}
+
+func TestFREDFetchLatestNoAPIKey(t *testing.T) {
+	ts := newTestClient(t)
+
+	result := callTool(t, ts, "fred_fetch_latest", map[string]any{
+		"series_id": "DGS10",
+	})
+	assert.True(t, result.IsError)
+	assert.Contains(t, textContent(t, result), "FRED API key")
+}
+
+func TestFREDFetchYieldCurveNoAPIKey(t *testing.T) {
+	ts := newTestClient(t)
+
+	result := callTool(t, ts, "fred_fetch_yield_curve", map[string]any{
+		"date": "2024-01-05",
+	})
+	assert.True(t, result.IsError)
+	assert.Contains(t, textContent(t, result), "FRED API key")
+}
+
+func TestFREDFetchHistoricalYieldsNoAPIKey(t *testing.T) {
+	ts := newTestClient(t)
+
+	result := callTool(t, ts, "fred_fetch_historical_yields", map[string]any{
+		"tenor":      10.0,
+		"start_date": "2024-01-01",
+	})
+	assert.True(t, result.IsError)
+	assert.Contains(t, textContent(t, result), "FRED API key")
+}
+
+func TestFREDInterpolateYield(t *testing.T) {
+	ts := newTestClient(t)
+
+	curve := map[string]any{
+		"Date": "2024-01-05T00:00:00Z",
+		"Points": []map[string]any{
+			{"Tenor": 2.0, "Yield": 0.04},
+			{"Tenor": 10.0, "Yield": 0.05},
+		},
+	}
+
+	result := callTool(t, ts, "fred_interpolate_yield", map[string]any{
+		"curve": curve,
+		"tenor": 6.0,
+	})
+	require.False(t, result.IsError, textContent(t, result))
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(textContent(t, result)), &resp))
+	want := decimal.MustNew(45, 3)
+	yieldStr, _ := resp["yield"].(string)
+	got, _ := decimal.Parse(yieldStr)
+	assert.True(t, want.Equal(got))
+}
+
+func TestFREDBenchmarkYield(t *testing.T) {
+	ts := newTestClient(t)
+
+	curve := map[string]any{
+		"Date": "2024-01-05T00:00:00Z",
+		"Points": []map[string]any{
+			{"Tenor": 1.0, "Yield": 0.04},
+			{"Tenor": 10.0, "Yield": 0.05},
+		},
+	}
+
+	result := callTool(t, ts, "fred_benchmark_yield", map[string]any{
+		"curve":         curve,
+		"ref_date":      "2024-01-05",
+		"maturity_date": "2025-01-05",
+	})
+	require.False(t, result.IsError, textContent(t, result))
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(textContent(t, result)), &resp))
+	assert.Contains(t, resp, "benchmark_yield")
+	assert.Contains(t, resp, "tenor_years")
+
+	want := decimal.MustNew(4, 2)
+	benchmarkStr, _ := resp["benchmark_yield"].(string)
+	got, _ := decimal.Parse(benchmarkStr)
+	assert.True(t, testutils.InDelta(t, got, want, decimal.MustNew(1, 4)))
+}
+
+func TestFREDBenchmarkYieldMissingDate(t *testing.T) {
+	ts := newTestClient(t)
+
+	result := callTool(t, ts, "fred_benchmark_yield", map[string]any{
+		"curve":         map[string]any{"Points": []any{}},
+		"ref_date":      "",
+		"maturity_date": "2025-01-05",
+	})
+	assert.True(t, result.IsError)
+}
+
+func TestToolsListContainsExpectedTools(t *testing.T) {
+	ts := newTestClient(t)
+
+	res, err := ts.Client().ListTools(context.Background(), mcp.ListToolsRequest{})
+	require.NoError(t, err)
+
+	names := make(map[string]bool, len(res.Tools))
+	for _, tool := range res.Tools {
+		names[tool.Name] = true
+	}
+
+	expected := []string{
+		"strategy_list",
+		"strategy_dora_orderbooks",
+		"strategy_dora_user",
+		"strategy_tenors",
+		"strategy_run_create",
+		"strategy_run_get",
+		"strategy_run_list",
+		"strategy_run_status",
+		"strategy_run_describe",
+		"strategy_run_pause",
+		"strategy_run_resume",
+		"strategy_run_stop",
+		"strategy_backtest_create",
+		"strategy_backtest_get",
+		"strategy_backtest_list",
+		"strategy_backtest_cancel",
+		"fred_fetch_series",
+		"fred_fetch_latest",
+		"fred_fetch_yield_curve",
+		"fred_fetch_historical_yields",
+		"fred_interpolate_yield",
+		"fred_benchmark_yield",
+	}
+	for _, name := range expected {
+		assert.True(t, names[name], "expected tool %q to be registered", name)
+	}
+	assert.False(t, names["fred_backtest_from_series"])
+}

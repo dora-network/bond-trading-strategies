@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "bond-trading-strategies": {
+      "url": "http://localhost:8080/sse",
+      "lifecycle": "lazy",
+      "directTools": true
+    }
+  }
+}

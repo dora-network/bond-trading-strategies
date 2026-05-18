@@ -1,0 +1,1042 @@
+package http_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"testing"
+	"time"
+
+	"github.com/dora-network/bond-trading-strategies/prices"
+	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
+	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
+	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/google/uuid"
+	"github.com/govalues/decimal"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestHandlerListsStrategies(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Items []strategyhttp.StrategySummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Items, 2)
+	assert.Equal(t, "copytrading", resp.Items[0].Type)
+	assert.Equal(t, "not_implemented", resp.Items[0].Status)
+	require.Len(t, resp.Items[0].ConfigFields, 4)
+	assert.Equal(t, "followed_trader", resp.Items[0].ConfigFields[0].Name)
+	assert.True(t, resp.Items[0].ConfigFields[0].Required)
+	assert.Equal(t, "array[string(uuid)]", resp.Items[0].ConfigFields[3].Type)
+	assert.Equal(t, "mean_reversion", resp.Items[1].Type)
+	assert.Equal(t, "available", resp.Items[1].Status)
+	require.Len(t, resp.Items[1].ConfigFields, 10)
+	assert.Equal(t, "lookback_window", resp.Items[1].ConfigFields[0].Name)
+	assert.Equal(t, float64(20), resp.Items[1].ConfigFields[0].Default)
+	assert.Equal(t, "order_book_id", resp.Items[1].ConfigFields[6].Name)
+	assert.Equal(t, "tenor", resp.Items[1].ConfigFields[7].Name)
+	assert.Equal(t, float64(1), resp.Items[1].ConfigFields[8].Default)
+	assert.Equal(t, float64(1), resp.Items[1].ConfigFields[9].Default)
+}
+
+func TestHandlerListsTenors(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/tenors", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Items []strategyhttp.TenorSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Items, 11)
+	assert.Equal(t, "1M", resp.Items[0].Code)
+	assert.Equal(t, "1 Month Treasury", resp.Items[0].Description)
+	assert.Equal(t, "10Y", resp.Items[8].Code)
+	assert.Equal(t, "10 Year Treasury", resp.Items[8].Description)
+	assert.Equal(t, "30Y", resp.Items[10].Code)
+	assert.Equal(t, "30 Year Treasury", resp.Items[10].Description)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/tenors", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestHandlerListsDORAOrderBooks(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{
+			listOrderBooks: func(ctx context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
+				return []strategyhttp.DORAOrderBookSummary{{
+					ID:           "book-1",
+					DisplayName:  "UST 10Y / USD",
+					BaseAssetID:  "asset-base",
+					QuoteAssetID: "asset-quote",
+					Status:       "ACTIVE",
+				}}, nil
+			},
+		}),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dora/orderbooks", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Items []strategyhttp.DORAOrderBookSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Items, 1)
+	assert.Equal(t, "book-1", resp.Items[0].ID)
+	assert.Equal(t, "UST 10Y / USD", resp.Items[0].DisplayName)
+	assert.Equal(t, "asset-base", resp.Items[0].BaseAssetID)
+	assert.Equal(t, "asset-quote", resp.Items[0].QuoteAssetID)
+	assert.Equal(t, "ACTIVE", resp.Items[0].Status)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/dora/orderbooks", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestHandlerReturnsDORAOrderBookError(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{
+			listOrderBooks: func(ctx context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
+				return nil, fmt.Errorf("boom")
+			},
+		}),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dora/orderbooks", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "list DORA order books: boom")
+}
+
+func TestHandlerGetsDORAUser(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(ctx context.Context) (string, error) {
+				return "user-123", nil
+			},
+		}),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dora/user", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp strategyhttp.DORAUserSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "user-123", resp.ID)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/dora/user", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestHandlerReturnsDORAUserError(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(ctx context.Context) (string, error) {
+				return "", fmt.Errorf("boom")
+			},
+		}),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dora/user", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unauthorised")
+}
+
+func TestHandlerCreateAndGetBacktest(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	resultCh := make(chan types.BacktestResult, 1)
+	backtestID := uuid.Must(uuid.NewV7())
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(ctx context.Context, strat strategycore.Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
+			return backtestID, resultCh, nil
+		},
+	}
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time { return now }),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-test-1", nil
+			},
+		}),
+	)
+
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window":   20,
+			"entry_z_score":     2.0,
+			"exit_z_score":      0.5,
+			"stop_loss_z_score": 3.5,
+			"min_std_dev":       0.0005,
+			"max_position_size": 1.0,
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	}
+
+	rec := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, 1, svc.RunBacktestCallCount())
+
+	var accepted strategyhttp.BacktestDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+	assert.JSONEq(t, `{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`, string(accepted.Config))
+	assert.Equal(t, "user-test-1", accepted.DORAUserID)
+
+	resultCh <- types.BacktestResult{
+		ClosedTrades: []types.ClosedTrade{{
+			BondID:       "BOND-1",
+			OpenTime:     now.Add(-2 * time.Hour),
+			CloseTime:    now.Add(-time.Hour),
+			Signal:       types.SignalBuy,
+			ExitSignal:   types.SignalHold,
+			EntrySpread:  decimal.MustNew(12, 3),
+			ExitSpread:   decimal.MustNew(8, 3),
+			EntryZScore:  decimal.MustNew(20, 1),
+			ExitZScore:   decimal.MustNew(5, 1),
+			PositionSize: decimal.MustNew(5, 1),
+			PnL:          decimal.MustNew(2, 3),
+			EntryPrice:   decimal.MustNew(100, 0),
+			ExitPrice:    decimal.MustNew(102, 0),
+			Quantity:     decimal.MustNew(5, 0),
+		}},
+		TotalPnL:    decimal.MustNew(2, 3),
+		WinCount:    1,
+		LossCount:   0,
+		MaxDrawdown: decimal.Zero,
+		SharpeRatio: decimal.MustNew(11, 1),
+	}
+
+	require.Eventually(t, func() bool {
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return false
+		}
+		var detail strategyhttp.BacktestDetail
+		if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+			return false
+		}
+		return detail.Status == "completed" && detail.Result != nil
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestHandlerRejectsNotImplementedBacktest(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+	rec := performJSONRequest(t, handler, "/v1/backtests", map[string]any{
+		"strategy_type": "copytrading",
+		"config": map[string]any{
+			"followed_trader": uuid.Must(uuid.NewV7()).String(),
+			"min_order_size":  1,
+			"max_order_size":  2,
+		},
+		"start": time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		"end":   time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+	})
+	require.Equal(t, http.StatusNotImplemented, rec.Code)
+}
+
+func TestHandlerCancelBacktest(t *testing.T) {
+	t.Parallel()
+
+	backtestID := uuid.Must(uuid.NewV7())
+	resultCh := make(chan types.BacktestResult)
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(ctx context.Context, strat strategycore.Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
+			return backtestID, resultCh, nil
+		},
+	}
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-test-1", nil
+			},
+		}),
+	)
+
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window":   20,
+			"entry_z_score":     2.0,
+			"exit_z_score":      0.5,
+			"stop_loss_z_score": 3.5,
+			"min_std_dev":       0.0005,
+			"max_position_size": 1.0,
+		},
+		"start": time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		"end":   time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+	}
+	performJSONRequest(t, handler, "/v1/backtests", body)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/backtests/"+backtestID.String(), nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 1, svc.StopBacktestCallCount())
+	var detail strategyhttp.BacktestDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+	assert.Equal(t, "cancelled", detail.Status)
+}
+
+func TestHandlerListBacktests(t *testing.T) {
+	t.Parallel()
+
+	firstID := uuid.Must(uuid.NewV7())
+	secondID := uuid.Must(uuid.NewV7())
+	resultCh1 := make(chan types.BacktestResult)
+	resultCh2 := make(chan types.BacktestResult)
+	call := 0
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(ctx context.Context, strat strategycore.Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
+			call++
+			if call == 1 {
+				return firstID, resultCh1, nil
+			}
+			return secondID, resultCh2, nil
+		},
+	}
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time {
+			now = now.Add(time.Second)
+			return now
+		}),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-test-1", nil
+			},
+		}),
+	)
+
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window": 20,
+			"entry_z_score":   2.0,
+			"exit_z_score":    0.5,
+		},
+		"start": time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		"end":   time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+	}
+	performJSONRequest(t, handler, "/v1/backtests", body)
+	performJSONRequest(t, handler, "/v1/backtests", body)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Items []strategyhttp.BacktestSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Items, 2)
+	assert.Equal(t, secondID, resp.Items[0].ID)
+	assert.Equal(t, firstID, resp.Items[1].ID)
+}
+
+func TestHandlerCreateAndControlRun(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.Must(uuid.NewV7())
+	svc := &strategyfakes.FakeService{
+		RunStrategyStub: func(ctx context.Context, strat strategycore.Strategy) (uuid.UUID, error) {
+			return runID, nil
+		},
+	}
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time {
+			now = now.Add(time.Second)
+			return now
+		}),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window": 20,
+			"entry_z_score":   2.0,
+			"exit_z_score":    0.5,
+			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+			"tenor":           "10Y",
+			"initial_balance": 5.5,
+			"leverage":        2.0,
+		},
+	}
+	rec := performJSONRequest(t, handler, "/v1/runs", body)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, 1, svc.RunStrategyCallCount())
+
+	var created strategyhttp.RunDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	assert.Equal(t, "test-user", created.DORAUserID)
+	cfg, _ := body["config"].(map[string]any)
+	orderBookID, _ := cfg["order_book_id"].(string)
+	assert.JSONEq(t, fmt.Sprintf(`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"order_book_id":%q,"tenor":"10Y","initial_balance":5.5,"leverage":2}`,
+		orderBookID,
+	), string(created.Config))
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/pause", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 1, svc.PauseStrategyCallCount())
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/resume", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 1, svc.ResumeStrategyCallCount())
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/runs/"+runID.String(), nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 1, svc.StopStrategyCallCount())
+
+	var detail strategyhttp.RunDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+	assert.Equal(t, "stopped", detail.Status)
+	assert.NotNil(t, detail.StoppedAt)
+}
+
+func TestHandlerRejectsNotImplementedRun(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+	rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+		"strategy_type": "copytrading",
+		"config": map[string]any{
+			"followed_trader": uuid.Must(uuid.NewV7()).String(),
+			"min_order_size":  1,
+			"max_order_size":  2,
+		},
+	})
+	require.Equal(t, http.StatusNotImplemented, rec.Code)
+}
+
+func TestHandlerListRuns(t *testing.T) {
+	t.Parallel()
+
+	firstID := uuid.Must(uuid.NewV7())
+	secondID := uuid.Must(uuid.NewV7())
+	call := 0
+	svc := &strategyfakes.FakeService{
+		RunStrategyStub: func(ctx context.Context, strat strategycore.Strategy) (uuid.UUID, error) {
+			call++
+			if call == 1 {
+				return firstID, nil
+			}
+			return secondID, nil
+		},
+	}
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time {
+			now = now.Add(time.Second)
+			return now
+		}),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window": 20,
+			"entry_z_score":   2.0,
+			"exit_z_score":    0.5,
+		},
+	}
+	performJSONRequest(t, handler, "/v1/runs", body)
+	performJSONRequest(t, handler, "/v1/runs", body)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Items []strategyhttp.RunSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Items, 2)
+	assert.Equal(t, secondID, resp.Items[0].ID)
+	assert.Equal(t, firstID, resp.Items[1].ID)
+}
+
+func TestHandlerRestoreRuns(t *testing.T) {
+	t.Parallel()
+
+	runningID := uuid.Must(uuid.NewV7())
+	pausedID := uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	store := &memoryRunStore{
+		runs: map[uuid.UUID]*strategyhttp.RunDetail{
+			runningID: {
+				RunSummary: strategyhttp.RunSummary{
+					ID:           runningID,
+					DORAUserID:   "test-user",
+					StrategyType: "mean_reversion",
+					Status:       "running",
+					CreatedAt:    now,
+					UpdatedAt:    now,
+				},
+				Config: json.RawMessage(`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`),
+			},
+			pausedID: {
+				RunSummary: strategyhttp.RunSummary{
+					ID:           pausedID,
+					DORAUserID:   "test-user",
+					StrategyType: "mean_reversion",
+					Status:       "paused",
+					CreatedAt:    now.Add(-time.Minute),
+					UpdatedAt:    now.Add(-time.Minute),
+				},
+				Config: json.RawMessage(`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`),
+			},
+		},
+	}
+
+	svc := strategycore.NewService()
+	pricesHandler := prices.New(prices.Config{})
+	handlerAny := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithRunStore(store),
+		strategyhttp.WithPricesHandler(pricesHandler),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+	restorer, ok := handlerAny.(interface{ RestoreRuns(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreRuns(context.Background()))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Items []strategyhttp.RunSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Items, 2)
+	ids := []uuid.UUID{resp.Items[0].ID, resp.Items[1].ID}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	expected := []uuid.UUID{pausedID, runningID}
+	sort.Slice(expected, func(i, j int) bool { return expected[i].String() < expected[j].String() })
+	assert.Equal(t, expected, ids)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+pausedID.String()+"/resume", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var detail strategyhttp.RunDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+	assert.Equal(t, "running", detail.Status)
+	assert.Equal(t, "running", store.runs[pausedID].Status)
+}
+
+func TestHandlerRestoreBacktests(t *testing.T) {
+	t.Parallel()
+
+	completedID := uuid.Must(uuid.NewV7())
+	failedID := uuid.Must(uuid.NewV7())
+	otherUserID := "user-other"
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	completedAt := now.Add(30 * time.Second)
+	store := &memoryBacktestStore{
+		backtests: map[uuid.UUID]*strategyhttp.BacktestDetail{
+			completedID: {
+				BacktestSummary: strategyhttp.BacktestSummary{
+					ID:           completedID,
+					DORAUserID:   "user-test-1",
+					StrategyType: "mean_reversion",
+					Status:       "completed",
+					CreatedAt:    now,
+					CompletedAt:  &completedAt,
+				},
+				Config: json.RawMessage(`{"lookback_window":20}`),
+				Start:  now.Add(-time.Hour),
+				End:    now,
+				Result: &strategyhttp.BacktestResult{
+					TotalPnL:    "0.05",
+					WinCount:    3,
+					LossCount:   1,
+					MaxDrawdown: "0.01",
+					SharpeRatio: "1.5",
+				},
+			},
+			failedID: {
+				BacktestSummary: strategyhttp.BacktestSummary{
+					ID:           failedID,
+					DORAUserID:   "user-test-1",
+					StrategyType: "mean_reversion",
+					Status:       "failed",
+					CreatedAt:    now.Add(-time.Minute),
+					CompletedAt:  &completedAt,
+				},
+				Config: json.RawMessage(`{"lookback_window":10}`),
+				Start:  now.Add(-2 * time.Hour),
+				End:    now.Add(-time.Hour),
+				Error:  "something went wrong",
+			},
+			uuid.Must(uuid.NewV7()): {
+				BacktestSummary: strategyhttp.BacktestSummary{
+					ID:           uuid.Must(uuid.NewV7()),
+					DORAUserID:   otherUserID,
+					StrategyType: "mean_reversion",
+					Status:       "completed",
+					CreatedAt:    now.Add(-2 * time.Hour),
+					CompletedAt:  &completedAt,
+				},
+				Config: json.RawMessage(`{"lookback_window":5}`),
+				Start:  now.Add(-3 * time.Hour),
+				End:    now.Add(-2 * time.Hour),
+			},
+		},
+	}
+
+	svc := strategycore.NewService()
+	pricesHandler := prices.New(prices.Config{})
+	handlerAny := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithBacktestStore(store),
+		strategyhttp.WithPricesHandler(pricesHandler),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-test-1", nil
+			},
+		}),
+	)
+	restorer, ok := handlerAny.(interface{ RestoreBacktests(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreBacktests(context.Background()))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Items []strategyhttp.BacktestSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Items, 2)
+	ids := []uuid.UUID{resp.Items[0].ID, resp.Items[1].ID}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	expected := []uuid.UUID{failedID, completedID}
+	sort.Slice(expected, func(i, j int) bool { return expected[i].String() < expected[j].String() })
+	assert.Equal(t, expected, ids)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+completedID.String(), nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var btDetail strategyhttp.BacktestDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &btDetail))
+	assert.Equal(t, "completed", btDetail.Status)
+	assert.Equal(t, "0.05", btDetail.Result.TotalPnL)
+	assert.Equal(t, 3, btDetail.Result.WinCount)
+}
+
+func TestHandlerBacktestOwnership(t *testing.T) {
+	t.Parallel()
+
+	btID := uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	store := &memoryBacktestStore{
+		backtests: map[uuid.UUID]*strategyhttp.BacktestDetail{
+			btID: {
+				BacktestSummary: strategyhttp.BacktestSummary{
+					ID:           btID,
+					DORAUserID:   "user-alice",
+					StrategyType: "mean_reversion",
+					Status:       "completed",
+					CreatedAt:    now,
+				},
+				Config: json.RawMessage(`{"lookback_window":20}`),
+				Start:  now.Add(-time.Hour),
+				End:    now,
+			},
+		},
+	}
+
+	svc := strategycore.NewService()
+	pricesHandler := prices.New(prices.Config{})
+	handlerAny := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithBacktestStore(store),
+		strategyhttp.WithPricesHandler(pricesHandler),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-bob", nil
+			},
+		}),
+	)
+	restorer, ok := handlerAny.(interface{ RestoreBacktests(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreBacktests(context.Background()))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+btID.String(), nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/backtests/"+btID.String(), nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHandlerValidationErrors(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+
+	rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+		"strategy_type": "unsupported",
+		"config":        map[string]any{},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs/not-a-uuid", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = performJSONRequest(t, handler, "/v1/runs", map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"initial_balance": 0,
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "config.initial_balance must be greater than 0")
+}
+
+func performJSONRequest(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+type memoryRunStore struct {
+	runs map[uuid.UUID]*strategyhttp.RunDetail
+}
+
+type doraClientFunc struct {
+	listOrderBooks func(context.Context) ([]strategyhttp.DORAOrderBookSummary, error)
+	getUserID      func(context.Context) (string, error)
+}
+
+func (f doraClientFunc) ListOrderBooks(ctx context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
+	if f.listOrderBooks == nil {
+		return nil, fmt.Errorf("not implemented")
+	}
+	return f.listOrderBooks(ctx)
+}
+
+func (f doraClientFunc) GetUserID(ctx context.Context) (string, error) {
+	if f.getUserID == nil {
+		return "test-user", nil
+	}
+	return f.getUserID(ctx)
+}
+
+func (s *memoryRunStore) LoadRuns(ctx context.Context) ([]*strategyhttp.RunDetail, error) {
+	out := make([]*strategyhttp.RunDetail, 0, len(s.runs))
+	for _, run := range s.runs {
+		copyRun := *run
+		copyRun.Config = append([]byte(nil), run.Config...)
+		out = append(out, &copyRun)
+	}
+	return out, nil
+}
+
+func (s *memoryRunStore) SaveRun(ctx context.Context, detail *strategyhttp.RunDetail) error {
+	if s.runs == nil {
+		s.runs = make(map[uuid.UUID]*strategyhttp.RunDetail)
+	}
+	copyRun := *detail
+	copyRun.Config = append([]byte(nil), detail.Config...)
+	s.runs[detail.ID] = &copyRun
+	return nil
+}
+
+func (s *memoryRunStore) String() string {
+	return fmt.Sprintf("memoryRunStore(%d)", len(s.runs))
+}
+
+type memoryBacktestStore struct {
+	backtests map[uuid.UUID]*strategyhttp.BacktestDetail
+}
+
+func (s *memoryBacktestStore) LoadBacktests(ctx context.Context) ([]*strategyhttp.BacktestDetail, error) {
+	out := make([]*strategyhttp.BacktestDetail, 0, len(s.backtests))
+	for _, bt := range s.backtests {
+		copyBT := *bt
+		copyBT.Config = append([]byte(nil), bt.Config...)
+		out = append(out, &copyBT)
+	}
+	return out, nil
+}
+
+func (s *memoryBacktestStore) SaveBacktest(ctx context.Context, detail *strategyhttp.BacktestDetail) error {
+	if s.backtests == nil {
+		s.backtests = make(map[uuid.UUID]*strategyhttp.BacktestDetail)
+	}
+	copyBT := *detail
+	copyBT.Config = append([]byte(nil), detail.Config...)
+	s.backtests[detail.ID] = &copyBT
+	return nil
+}
+
+func TestHandlerRunOwnership(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	store := &memoryRunStore{
+		runs: map[uuid.UUID]*strategyhttp.RunDetail{
+			runID: {
+				RunSummary: strategyhttp.RunSummary{
+					ID:           runID,
+					DORAUserID:   "user-alice",
+					StrategyType: "mean_reversion",
+					Status:       "running",
+					CreatedAt:    now,
+					UpdatedAt:    now,
+				},
+				Config: json.RawMessage(`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`),
+			},
+		},
+	}
+
+	svc := strategycore.NewService()
+	pricesHandler := prices.New(prices.Config{})
+	handlerAny := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithRunStore(store),
+		strategyhttp.WithPricesHandler(pricesHandler),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-bob", nil
+			},
+		}),
+	)
+	restorer, ok := handlerAny.(interface{ RestoreRuns(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreRuns(context.Background()))
+
+	// GET by ID: 403 — bob can tell the run exists but cannot access it
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs/"+runID.String(), nil)
+	req.Header.Set("Authorization", "ApiKey bob-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	// LIST: bob sees zero items (alice's run is filtered out)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs", nil)
+	req.Header.Set("Authorization", "ApiKey bob-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var listResp struct {
+		Items []strategyhttp.RunSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listResp))
+	assert.Empty(t, listResp.Items)
+
+	// DELETE (stop): 404 — hides existence from wrong user on mutations
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/runs/"+runID.String(), nil)
+	req.Header.Set("Authorization", "ApiKey bob-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	// POST pause: 404
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/pause", nil)
+	req.Header.Set("Authorization", "ApiKey bob-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	// POST resume: 404
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/resume", nil)
+	req.Header.Set("Authorization", "ApiKey bob-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestHandlerRequiresAuth(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{
+			listOrderBooks: func(context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
+				return nil, nil
+			},
+			getUserID: func(context.Context) (string, error) {
+				return "user-x", nil
+			},
+		}),
+	)
+
+	v1Endpoints := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/v1/strategies"},
+		{http.MethodGet, "/v1/tenors"},
+		{http.MethodGet, "/v1/dora/orderbooks"},
+		{http.MethodGet, "/v1/dora/user"},
+		{http.MethodGet, "/v1/backtests"},
+		{http.MethodGet, "/v1/runs"},
+	}
+
+	for _, ep := range v1Endpoints {
+		t.Run(ep.method+" "+ep.path+" missing header", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(context.Background(), ep.method, ep.path, nil)
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusUnauthorized, rec.Code)
+			assert.Contains(t, rec.Body.String(), "missing Authorization header")
+		})
+
+		t.Run(ep.method+" "+ep.path+" unsupported scheme", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(context.Background(), ep.method, ep.path, nil)
+			req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusUnauthorized, rec.Code)
+			assert.Contains(t, rec.Body.String(), "unsupported scheme")
+		})
+	}
+
+	// /healthz must not require authentication.
+	t.Run("healthz no auth", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil)
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	// ApiKey scheme is accepted.
+	t.Run("ApiKey scheme accepted", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
+		req.Header.Set("Authorization", "ApiKey my-secret-key")
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	// Bearer scheme is accepted.
+	t.Run("Bearer scheme accepted", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
+		req.Header.Set("Authorization", "Bearer eyJhbGciOiJSUzI1NiJ9.test.sig")
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+}

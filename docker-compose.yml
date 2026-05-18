@@ -1,0 +1,61 @@
+services:
+  strategy-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      secrets:
+        - github_token
+    image: bond-trading-strategies-mcp:latest
+    ports:
+      - "8081:8081"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      WS_URL: ${WS_URL:-wss://dev.dora.co}
+    entrypoint:
+      - "/app/strategy-server"
+    command:
+      - "-addr"
+      - ":8081"
+      - "-db-url"
+      - "${DATABASE_URL}"
+      - "-ws-url"
+      - "${WS_URL:-wss://dev.dora.co}"
+      - "-api-key"
+      - "${DORA_API_KEY:-}"
+      - "-dora-base-url"
+      - "${DORA_BASE_URL:-https://dev.dora.co}"
+      - "-fred-api-key"
+      - "${FRED_API_KEY:-}"
+    restart: unless-stopped
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      secrets:
+        - github_token
+    image: bond-trading-strategies-mcp:latest
+    ports:
+      - "8080:8080"
+    depends_on:
+      - strategy-server
+    environment:
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      STRATEGY_BASE_URL: ${STRATEGY_BASE_URL:-http://strategy-server:8081}
+      DORA_API_KEY: ${DORA_API_KEY:-}
+    entrypoint:
+      - "/app/mcp-server"
+    command:
+      - "-addr"
+      - ":8080"
+      - "-base-url"
+      - "${BASE_URL:-http://localhost:8080}"
+      - "-strategy-base-url"
+      - "${STRATEGY_BASE_URL:-http://strategy-server:8081}"
+      - "-fred-api-key"
+      - "${FRED_API_KEY:-}"
+    restart: unless-stopped
+
+secrets:
+  github_token:
+    file: .secrets/github_token

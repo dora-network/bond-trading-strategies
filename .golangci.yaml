@@ -1,0 +1,165 @@
+version: "2"
+run:
+  concurrency: 4
+  go: "1.24"
+  issues-exit-code: 1
+  tests: true
+  allow-parallel-runners: false
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - dogsled
+    - dupl
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - forcetypeassert
+    - funlen
+    - gochecknoglobals
+    - gochecknoinits
+    #    - goconst
+    - goprintffuncname
+    - gosec
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - mnd
+    - nakedret
+    - noctx
+    - nolintlint
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - tagliatelle
+    - unconvert
+    - unparam
+    - unused
+    - wastedassign
+    - whitespace
+  settings:
+    dogsled:
+      max-blank-identifiers: 2
+    dupl:
+      threshold: 100
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        - io/ioutil.ReadFile
+        - io.Copy(*bytes.Buffer)
+        - io.Copy(os.Stdout)
+        - (http.ResponseWriter).Write
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    exhaustive:
+      check:
+        - switch
+        - map
+      default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^print.*$
+        - pattern: fmt\.Print.*
+    funlen:
+      lines: 100
+      statements: 100
+    goconst:
+      min-len: 2
+      min-occurrences: 2
+    gocritic:
+      disabled-checks:
+        - dupImport
+        - ifElseChain
+        - octalLiteral
+        - whyNoLint
+        - wrapperFunc
+        - hugeParam
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+    gosec:
+      config:
+        G101:
+          pattern: '(?i)(.*)?password|passwd|secret.*=.*".*"|token.*=.*".*"'
+          entropy_threshold: 80.0
+          file_entropy_threshold: 0.85
+    lll:
+      line-length: 140
+    misspell:
+      locale: UK
+      ignore-rules:
+        - strat
+    mnd:
+      checks:
+        - argument
+        - case
+        - condition
+        - return
+    nolintlint:
+      require-explanation: false
+      require-specific: false
+      allow-unused: false
+    revive:
+      rules:
+        - name: unused-parameter
+          severity: warning
+          disabled: true
+    staticcheck:
+      checks:
+        - all
+    tagliatelle:
+      case:
+        rules:
+          avro: snake
+          bson: snake
+          json: snake
+          mapstructure: kebab
+          xml: snake
+          yaml: snake
+        use-field-name: true
+    whitespace:
+      multi-if: false
+      multi-func: false
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - deadcode
+          - dupl
+          - funlen
+          - gochecknoglobals
+          - goconst
+          - lll
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - gitlab.com/gobl/gobl
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

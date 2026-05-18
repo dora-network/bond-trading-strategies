@@ -1,0 +1,991 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Strategy Service API",
+    "version": "1.1.0",
+    "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8081"
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Server is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dora/orderbooks": {
+      "get": {
+        "operationId": "listDORAOrderBooks",
+        "responses": {
+          "200": {
+            "description": "DORA order books available to the configured API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DORAOrderBookSummary"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/dora/user": {
+      "get": {
+        "operationId": "getDORAUser",
+        "responses": {
+          "200": {
+            "description": "Current DORA user for the configured API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DORAUserSummary"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/tenors": {
+      "get": {
+        "operationId": "listTenors",
+        "responses": {
+          "200": {
+            "description": "Supported benchmark tenors",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TenorSummary"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/strategies": {
+      "get": {
+        "operationId": "listStrategies",
+        "responses": {
+          "200": {
+            "description": "Registered strategies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/StrategySummary"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/backtests": {
+      "get": {
+        "operationId": "listBacktests",
+        "responses": {
+          "200": {
+            "description": "Backtest summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BacktestSummary"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createBacktest",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBacktestRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Backtest accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/backtests/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "get": {
+        "operationId": "getBacktest",
+        "responses": {
+          "200": {
+            "description": "Backtest detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelBacktest",
+        "responses": {
+          "200": {
+            "description": "Backtest cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/runs": {
+      "get": {
+        "operationId": "listRuns",
+        "responses": {
+          "200": {
+            "description": "Run summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RunSummary"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createRun",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Run created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "get": {
+        "operationId": "getRun",
+        "responses": {
+          "200": {
+            "description": "Run detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "stopRun",
+        "responses": {
+          "200": {
+            "description": "Run stopped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/pause": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "post": {
+        "operationId": "pauseRun",
+        "responses": {
+          "200": {
+            "description": "Run paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/resume": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "post": {
+        "operationId": "resumeRun",
+        "responses": {
+          "200": {
+            "description": "Run resumed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "ID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid request",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotImplemented": {
+        "description": "Strategy is known but not implemented for the requested operation",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Request conflicts with the current resource state",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "Internal server error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "DORAOrderBookSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "base_asset_id": {
+            "type": "string"
+          },
+          "quote_asset_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "display_name",
+          "base_asset_id",
+          "quote_asset_id",
+          "status"
+        ]
+      },
+      "DORAUserSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "TenorSummary": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "description"
+        ]
+      },
+      "StrategySummary": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "not_implemented"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "config_fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StrategyConfigField"
+            }
+          },
+          "supports_run": {
+            "type": "boolean"
+          },
+          "supports_backtest": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "type",
+          "status",
+          "supports_run",
+          "supports_backtest"
+        ]
+      },
+      "StrategyConfigField": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "default": {}
+        },
+        "required": [
+          "name",
+          "type",
+          "description",
+          "required"
+        ]
+      },
+      "CreateBacktestRequest": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": [
+              "mean_reversion",
+              "copytrading"
+            ]
+          },
+          "config": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MeanReversionConfig"
+              },
+              {
+                "$ref": "#/components/schemas/CopyTradingConfig"
+              }
+            ]
+          },
+          "start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "strategy_type",
+          "config",
+          "start",
+          "end"
+        ]
+      },
+      "CreateRunRequest": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": [
+              "mean_reversion",
+              "copytrading"
+            ]
+          },
+          "config": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MeanReversionConfig"
+              },
+              {
+                "$ref": "#/components/schemas/CopyTradingConfig"
+              }
+            ]
+          }
+        },
+        "required": [
+          "strategy_type",
+          "config"
+        ]
+      },
+      "MeanReversionConfig": {
+        "type": "object",
+        "properties": {
+          "lookback_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 20
+          },
+          "entry_z_score": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 2.0
+          },
+          "exit_z_score": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.5
+          },
+          "stop_loss_z_score": {
+            "type": "number",
+            "minimum": 0,
+            "default": 3.5
+          },
+          "min_std_dev": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0005
+          },
+          "max_position_size": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 1.0
+          },
+          "order_book_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "DORA Order book UUID used to locate the traded asset and place orders.",
+            "required": true
+          },
+          "tenor": {
+            "type": "string",
+            "description": "Benchmark Treasury tenor, for example 1M, 6M, 2Y, 5Y, 10Y, or 30Y.",
+            "required": true
+          },
+          "amount": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "Maximum number of bonds to trade each order, when opening a position, e.g. 10. Exit and Stop loss signal will liquidate whole position."
+          },
+          "leverage": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "Leverage multiplier for live orders."
+          }
+        }
+      },
+      "CopyTradingConfig": {
+        "type": "object",
+        "properties": {
+          "followed_trader": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "min_order_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_order_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "allowed_bonds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "required": [
+          "followed_trader",
+          "min_order_size",
+          "max_order_size"
+        ]
+      },
+      "BacktestSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "strategy_type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "strategy_type",
+          "status",
+          "created_at"
+        ]
+      },
+      "BacktestDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/BacktestSummary"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "config": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/MeanReversionConfig"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CopyTradingConfig"
+                  }
+                ]
+              },
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "result": {
+                "$ref": "#/components/schemas/BacktestResult"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "config",
+              "start",
+              "end"
+            ]
+          }
+        ]
+      },
+      "BacktestResult": {
+        "type": "object",
+        "properties": {
+          "closed_trades": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClosedTrade"
+            }
+          },
+          "total_pnl": {
+            "type": "string"
+          },
+          "win_count": {
+            "type": "integer"
+          },
+          "loss_count": {
+            "type": "integer"
+          },
+          "max_drawdown": {
+            "type": "string"
+          },
+          "sharpe_ratio": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "closed_trades",
+          "total_pnl",
+          "win_count",
+          "loss_count",
+          "max_drawdown",
+          "sharpe_ratio"
+        ]
+      },
+      "ClosedTrade": {
+        "type": "object",
+        "properties": {
+          "bond_id": {
+            "type": "string"
+          },
+          "open_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "close_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "entry_spread": {
+            "type": "string"
+          },
+          "exit_spread": {
+            "type": "string"
+          },
+          "position_size": {
+            "type": "string"
+          },
+          "pnl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bond_id",
+          "open_time",
+          "close_time",
+          "signal",
+          "entry_spread",
+          "exit_spread",
+          "position_size",
+          "pnl"
+        ]
+      },
+      "RunSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "strategy_type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "paused",
+              "stopped"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "stopped_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "strategy_type",
+          "status",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "RunDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RunSummary"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "config": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/MeanReversionConfig"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CopyTradingConfig"
+                  }
+                ]
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "config"
+            ]
+          }
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      }
+    }
+  }
+}
