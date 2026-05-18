@@ -158,9 +158,10 @@ func (s *Strategy) getBenchmarkYieldClient() (benchmarkYieldClient, error) {
 func (s *Strategy) setBenchmarkObservations(obs []fred.Observation) {
 	normalised := make([]fred.Observation, 0, len(obs))
 	for _, observation := range obs {
+		yieldPct, _ := observation.Yield.Mul(decimal.MustNew(100, 0)) //nolint:mnd
 		normalised = append(normalised, fred.Observation{
 			Date:  normalizeDate(observation.Date),
-			Yield: observation.Yield,
+			Yield: yieldPct,
 		})
 	}
 
@@ -196,9 +197,10 @@ func (s *Strategy) cachedBenchmarkYield(ts time.Time) (value decimal.Decimal, da
 func (s *Strategy) mergeBenchmarkObservations(obs []fred.Observation) {
 	normalised := make([]fred.Observation, 0, len(obs))
 	for _, observation := range obs {
+		yieldPct, _ := observation.Yield.Mul(decimal.MustNew(100, 0)) //nolint:mnd
 		normalised = append(normalised, fred.Observation{
 			Date:  normalizeDate(observation.Date),
-			Yield: observation.Yield,
+			Yield: yieldPct,
 		})
 	}
 

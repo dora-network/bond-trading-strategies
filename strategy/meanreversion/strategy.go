@@ -665,8 +665,13 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 	// Merge new observations into the in-memory cache.
 	s.mergeBenchmarkObservations(obs)
 
-	// Return the yield from the most recent observation in the response.
-	return obs[len(obs)-1].Yield
+	// Return the yield from the in-memory cache (FRED yields are converted to
+	// percentage format during merge, consistent with DORA YTM).
+	yield, _, ok = s.cachedBenchmarkYield(ts)
+	if !ok {
+		return decimal.Zero
+	}
+	return yield
 }
 
 // Update ingests a new yield observation and returns the resulting Decision.

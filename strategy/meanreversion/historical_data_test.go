@@ -61,9 +61,9 @@ func TestStrategyGetObservations(t *testing.T) {
 
 		require.NoError(t, err)
 		require.Len(t, obs, 2)
-		assert.True(t, obs[0].BenchmarkYield.Equal(decimal.MustNew(45, 3)))
-		assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(47, 3)))
-		assert.True(t, meanreversion.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 4, 9, 0, 0, 0, time.UTC)).Equal(decimal.MustNew(47, 3)))
+		assert.True(t, obs[0].BenchmarkYield.Equal(decimal.MustNew(45, 1)))
+		assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(47, 1)))
+		assert.True(t, meanreversion.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 4, 9, 0, 0, 0, time.UTC)).Equal(decimal.MustNew(47, 1)))
 		assert.Equal(t, 1, history.LoadHistoricalPricesCallCount())
 		assert.Equal(t, 2, benchmark.FetchHistoricalYieldsCallCount())
 		_, tenor, _, _ := benchmark.FetchHistoricalYieldsArgsForCall(0)
