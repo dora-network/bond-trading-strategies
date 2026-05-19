@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -102,8 +104,36 @@ func (c *strategyClient) createBacktest(ctx context.Context, payload any) (map[s
 	return doStrategyJSON[map[string]any](ctx, c, http.MethodPost, "/v1/backtests", payload)
 }
 
-func (c *strategyClient) listBacktests(ctx context.Context) (map[string]any, error) {
-	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, "/v1/backtests", nil)
+type listBacktestsArgs struct {
+	Status string
+	From   string
+	To     string
+	Page   int
+	Limit  int
+}
+
+func (c *strategyClient) listBacktests(ctx context.Context, args listBacktestsArgs) (map[string]any, error) {
+	path := "/v1/backtests"
+	params := url.Values{}
+	if args.Status != "" {
+		params.Set("status", args.Status)
+	}
+	if args.From != "" {
+		params.Set("from", args.From)
+	}
+	if args.To != "" {
+		params.Set("to", args.To)
+	}
+	if args.Page > 0 {
+		params.Set("page", strconv.Itoa(args.Page))
+	}
+	if args.Limit > 0 {
+		params.Set("limit", strconv.Itoa(args.Limit))
+	}
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, path, nil)
 }
 
 func (c *strategyClient) getBacktest(ctx context.Context, id string) (map[string]any, error) {

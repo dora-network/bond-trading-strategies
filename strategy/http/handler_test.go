@@ -401,11 +401,15 @@ func TestHandlerListBacktests(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp struct {
 		Items []strategyhttp.BacktestSummary `json:"items"`
+		Page  int                            `json:"page"`
+		Limit int                            `json:"limit"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp.Items, 2)
 	assert.Equal(t, secondID, resp.Items[0].ID)
 	assert.Equal(t, firstID, resp.Items[1].ID)
+	assert.Equal(t, 1, resp.Page)
+	assert.Equal(t, 10, resp.Limit)
 }
 
 func TestHandlerCreateAndControlRun(t *testing.T) {
@@ -704,6 +708,8 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 
 	var resp struct {
 		Items []strategyhttp.BacktestSummary `json:"items"`
+		Page  int                            `json:"page"`
+		Limit int                            `json:"limit"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp.Items, 2)
@@ -712,6 +718,272 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 	expected := []uuid.UUID{failedID, completedID}
 	sort.Slice(expected, func(i, j int) bool { return expected[i].String() < expected[j].String() })
 	assert.Equal(t, expected, ids)
+	assert.Equal(t, 1, resp.Page)
+	assert.Equal(t, 10, resp.Limit)
+}
+
+func TestHandlerListBacktestsWithFilters(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	completedAt := now.Add(30 * time.Second)
+	id1 := uuid.Must(uuid.NewV7())
+	id2 := uuid.Must(uuid.NewV7())
+	id3 := uuid.Must(uuid.NewV7())
+
+	store := &memoryBacktestStore{
+		backtests: map[uuid.UUID]*strategyhttp.BacktestDetail{
+			id1: {
+				BacktestSummary: strategyhttp.BacktestSummary{
+					ID:           id1,
+					DORAUserID:   "user-1",
+					StrategyType: "mean_reversion",
+					Status:       "completed",
+					Config:       json.RawMessage(`{"lookback_window":20}`),
+					CreatedAt:    now,
+					CompletedAt:  &completedAt,
+				},
+				Start: now.Add(-time.Hour),
+				End:   now,
+			},
+			id2: {
+				BacktestSummary: strategyhttp.BacktestSummary{
+					ID:           id2,
+					DORAUserID:   "user-1",
+					StrategyType: "mean_reversion",
+					Status:       "failed",
+					Config:       json.RawMessage(`{"lookback_window":10}`),
+					CreatedAt:    now.Add(-24 * time.Hour),
+				},
+				Start: now.Add(-25 * time.Hour),
+				End:   now.Add(-24 * time.Hour),
+				Error: "error occurred",
+			},
+			id3: {
+				BacktestSummary: strategyhttp.BacktestSummary{
+					ID:           id3,
+					DORAUserID:   "user-1",
+					StrategyType: "trend_following",
+					Status:       "running",
+					Config:       json.RawMessage(`{"lookback_window":5}`),
+					CreatedAt:    now.Add(-48 * time.Hour),
+				},
+				Start: now.Add(-49 * time.Hour),
+				End:   now.Add(-48 * time.Hour),
+			},
+		},
+	}
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithBacktestStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-1", nil
+			},
+		}),
+	)
+	restorer, ok := handler.(interface{ RestoreBacktests(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreBacktests(context.Background()))
+
+	t.Run("status filter completed", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?status=completed", nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+			Page  int                            `json:"page"`
+			Limit int                            `json:"limit"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Items, 1)
+		assert.Equal(t, id1, resp.Items[0].ID)
+	})
+
+	t.Run("status filter multiple", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?status=completed,failed", nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Items, 2)
+	})
+
+	t.Run("from filter", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		from := now.Add(-12 * time.Hour).Format(time.RFC3339)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?from="+from, nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Items, 1)
+		assert.Equal(t, id1, resp.Items[0].ID)
+	})
+
+	t.Run("to filter", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		to := now.Add(-12 * time.Hour).Format(time.RFC3339)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?to="+to, nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Items, 2)
+	})
+
+	t.Run("from and to filter", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		from := now.Add(-36 * time.Hour).Format(time.RFC3339)
+		to := now.Add(-12 * time.Hour).Format(time.RFC3339)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?from="+from+"&to="+to, nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Items, 1)
+		assert.Equal(t, id2, resp.Items[0].ID)
+	})
+
+	t.Run("combined status and date filters", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		from := now.Add(-12 * time.Hour).Format(time.RFC3339)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?status=completed&from="+from, nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Items, 1)
+		assert.Equal(t, id1, resp.Items[0].ID)
+	})
+
+	t.Run("pagination page 1 limit 1", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?page=1&limit=1", nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+			Page  int                            `json:"page"`
+			Limit int                            `json:"limit"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Items, 1)
+		assert.Equal(t, id1, resp.Items[0].ID) // most recent first
+		assert.Equal(t, 1, resp.Page)
+		assert.Equal(t, 1, resp.Limit)
+	})
+
+	t.Run("pagination page 2 limit 1", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?page=2&limit=1", nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+			Page  int                            `json:"page"`
+			Limit int                            `json:"limit"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Items, 1)
+		assert.Equal(t, id2, resp.Items[0].ID)
+		assert.Equal(t, 2, resp.Page)
+		assert.Equal(t, 1, resp.Limit)
+	})
+
+	t.Run("pagination beyond results returns empty", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?page=10&limit=1", nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Empty(t, resp.Items)
+	})
+
+	t.Run("limit capped at 50", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?limit=100", nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+			Limit int                            `json:"limit"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Items, 3)
+		assert.Equal(t, 50, resp.Limit)
+	})
+
+	t.Run("from with date-only format", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		from := now.Format("2006-01-02")
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?from="+from, nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		// id1 is today, id2 is yesterday, id3 is 2 days ago — only id1 passes.
+		require.Len(t, resp.Items, 1)
+		assert.Equal(t, id1, resp.Items[0].ID)
+	})
+
+	t.Run("to with date-only format", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		to := now.Add(-24 * time.Hour).Format("2006-01-02")
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?to="+to, nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.BacktestSummary `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		// to=2026-04-23 means CreatedAt <= 2026-04-23T00:00:00Z,
+		// so only id3 (created 2 days ago) is included.
+		require.Len(t, resp.Items, 1)
+		assert.Equal(t, id3, resp.Items[0].ID)
+	})
 }
 
 func TestHandlerBacktestOwnership(t *testing.T) {

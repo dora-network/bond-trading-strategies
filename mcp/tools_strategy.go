@@ -53,6 +53,14 @@ type strategyBacktestTradesArgs struct {
 	Limit int    `json:"limit,omitempty"`
 }
 
+type strategyListBacktestsArgs struct {
+	Status string `json:"status,omitempty"`
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"`
+	Page   int    `json:"page,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
 type strategyCancelBacktestArgs struct {
 	ID string `json:"id"`
 }
@@ -278,15 +286,20 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 
 	s.AddTool(
 		mcp.NewTool("strategy_backtest_list",
-			mcp.WithDescription("List strategy backtests from strategy-server."),
+			mcp.WithDescription("List strategy backtests from strategy-server. Supports optional status, date range, and pagination filters."),
+			mcp.WithString("status", mcp.Description("Filter by status (e.g. running,failed,completed).")),
+			mcp.WithString("from", mcp.Description("Earliest created_at in RFC3339 format.")),
+			mcp.WithString("to", mcp.Description("Latest created_at in RFC3339 format.")),
+			mcp.WithNumber("page", mcp.Description("Page number (default 1).")),
+			mcp.WithNumber("limit", mcp.Description("Items per page (default 10, max 50).")),
 		),
-		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			result, err := client.listBacktests(ctx)
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args strategyListBacktestsArgs) (*mcp.CallToolResult, error) {
+			result, err := client.listBacktests(ctx, listBacktestsArgs(args))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 			return jsonText(result)
-		},
+		}),
 	)
 
 	registerBacktestSubResourceTool(s, "strategy_backtest_trades", "trade records",

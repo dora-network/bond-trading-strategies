@@ -70,7 +70,7 @@ func newStrategyMockServer(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/runs/22222222-2222-2222-2222-222222222222":
 			_, _ = w.Write([]byte(`{"id":"22222222-2222-2222-2222-222222222222","strategy_type":"mean_reversion","status":"stopped","created_at":"2026-04-24T12:00:00Z","updated_at":"2026-04-24T12:03:00Z","stopped_at":"2026-04-24T12:03:00Z","config":{"lookback_window":20}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/backtests":
-			_, _ = w.Write([]byte(`{"items":[{"id":"33333333-3333-3333-3333-333333333333","strategy_type":"mean_reversion","status":"running","created_at":"2026-04-24T12:00:00Z"}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"id":"33333333-3333-3333-3333-333333333333","strategy_type":"mean_reversion","status":"running","created_at":"2026-04-24T12:00:00Z"}],"page":1,"limit":10}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/backtests":
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))

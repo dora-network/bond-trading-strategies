@@ -721,9 +721,101 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 }
 
 func (h *Handler) listBacktests(w http.ResponseWriter, r *http.Request) {
-	listItems(w, r, h.backtests,
-		func(d *BacktestDetail) BacktestSummary { return h.toSummary(r.Context(), d) },
-		h.resolveDORAUserID, &h.mu)
+	doraUserID, err := h.resolveDORAUserID(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
+		return
+	}
+
+	statusFilter := parseStatusFilter(r)
+	from, to := parseDateFilter(r)
+	page, limit := parsePagination(r)
+
+	h.mu.RLock()
+	details := filterAndSort(h.backtests, doraUserID)
+	items := make([]BacktestSummary, 0, len(details))
+	for _, d := range details {
+		items = append(items, h.toSummary(r.Context(), d))
+	}
+	h.mu.RUnlock()
+
+	if len(statusFilter) > 0 {
+		statusSet := make(map[string]bool, len(statusFilter))
+		for _, s := range statusFilter {
+			statusSet[s] = true
+		}
+		tmp := make([]BacktestSummary, 0, len(items))
+		for _, item := range items {
+			if statusSet[item.Status] {
+				tmp = append(tmp, item)
+			}
+		}
+		items = tmp
+	}
+
+	if !from.IsZero() || !to.IsZero() {
+		tmp := make([]BacktestSummary, 0, len(items))
+		for _, item := range items {
+			if !from.IsZero() && item.CreatedAt.Before(from) {
+				continue
+			}
+			if !to.IsZero() && !item.CreatedAt.Before(to) {
+				continue
+			}
+			tmp = append(tmp, item)
+		}
+		items = tmp
+	}
+
+	total := len(items)
+	start := (page - 1) * limit
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items[start:end],
+		"page":  page,
+		"limit": limit,
+	})
+}
+
+func parseStatusFilter(r *http.Request) []string {
+	raw := r.URL.Query().Get("status")
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		s := strings.TrimSpace(p)
+		if s != "" {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+func parseDateFilter(r *http.Request) (from, to time.Time) {
+	if f := r.URL.Query().Get("from"); f != "" {
+		if t, err := time.Parse(time.RFC3339, f); err == nil {
+			from = t
+		} else if t, err := time.Parse("2006-01-02", f); err == nil {
+			from = t
+		}
+	}
+	if t := r.URL.Query().Get("to"); t != "" {
+		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
+			to = parsed
+		} else if parsed, err := time.Parse("2006-01-02", t); err == nil {
+			to = parsed
+		}
+	}
+	return from, to
 }
 
 func (h *Handler) getBacktestTrades(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
@@ -791,28 +883,38 @@ func (h *Handler) getBacktest(w http.ResponseWriter, r *http.Request, id uuid.UU
 
 	h.mu.RLock()
 	detail, ok := h.backtests[id]
+	if !ok || detail.DORAUserID != doraUserID {
+		h.mu.RUnlock()
+		if !ok {
+			writeError(w, http.StatusNotFound, "backtest not found")
+		} else {
+			writeError(w, http.StatusForbidden, "access denied")
+		}
+		return
+	}
+	// Copy the detail while holding the lock so subsequent reads
+	// are safe from concurrent awaitBacktestResult writes.
+	detailCopy := *detail
+	detailCopy.Result = nil
+	if detail.Result != nil {
+		rCopy := *detail.Result
+		detailCopy.Result = &rCopy
+	}
 	h.mu.RUnlock()
-	if !ok {
-		writeError(w, http.StatusNotFound, "backtest not found")
-		return
-	}
-	if detail.DORAUserID != doraUserID {
-		writeError(w, http.StatusForbidden, "access denied")
-		return
-	}
 
-	if detail.Status == "completed" && detail.Result == nil && h.backtestStore != nil {
+	if detailCopy.Status == "completed" && detailCopy.Result == nil && h.backtestStore != nil {
 		result, err := h.backtestStore.LoadBacktestResult(r.Context(), id)
 		if err != nil {
 			slog.Error("failed to load backtest result", "err", err, "backtest_id", id)
 		} else {
+			detailCopy.Result = result
 			h.mu.Lock()
 			detail.Result = result
 			h.mu.Unlock()
 		}
 	}
 
-	writeJSON(w, http.StatusOK, h.summaryResult(r.Context(), detail))
+	writeJSON(w, http.StatusOK, h.summaryResult(r.Context(), &detailCopy))
 }
 
 func (h *Handler) getBacktestMetadata(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
@@ -824,17 +926,19 @@ func (h *Handler) getBacktestMetadata(w http.ResponseWriter, r *http.Request, id
 
 	h.mu.RLock()
 	detail, ok := h.backtests[id]
+	if !ok || detail.DORAUserID != doraUserID {
+		h.mu.RUnlock()
+		if !ok {
+			writeError(w, http.StatusNotFound, "backtest not found")
+		} else {
+			writeError(w, http.StatusForbidden, "access denied")
+		}
+		return
+	}
+	summary := h.toSummary(r.Context(), detail)
 	h.mu.RUnlock()
-	if !ok {
-		writeError(w, http.StatusNotFound, "backtest not found")
-		return
-	}
-	if detail.DORAUserID != doraUserID {
-		writeError(w, http.StatusForbidden, "access denied")
-		return
-	}
 
-	writeJSON(w, http.StatusOK, h.toSummary(r.Context(), detail))
+	writeJSON(w, http.StatusOK, summary)
 }
 
 func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
