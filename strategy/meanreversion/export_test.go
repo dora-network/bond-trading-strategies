@@ -73,15 +73,15 @@ func OpenSignal(s *Strategy) types.Signal {
 
 // RunWithPrices runs the strategy's internal run loop with a caller-supplied
 // price channel, bypassing the prices.Handler subscription. For unit tests only.
-func RunWithPrices(s *Strategy, ctx context.Context, msgs <-chan strategyPkg.Message, priceCh <-chan map[uuid.UUID]pricesPkg.AssetPrice) {
+func RunWithPrices(s *Strategy, ctx context.Context, msgs <-chan strategyPkg.Message, priceCh <-chan map[uuid.UUID]pricesPkg.AssetPrice) error {
 	s.mu.Lock()
 	if s.isRunning {
 		s.mu.Unlock()
-		return
+		return nil
 	}
 	var runCtx context.Context
 	runCtx, s.cancel = context.WithCancel(ctx)
 	s.isRunning = true
 	s.mu.Unlock()
-	s.run(runCtx, msgs, priceCh)
+	return s.run(runCtx, msgs, priceCh)
 }

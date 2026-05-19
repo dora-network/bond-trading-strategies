@@ -147,6 +147,13 @@ func (h *Handler) processMessage(ctx context.Context, data []byte) error {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 
+	// Normalise all timestamps to UTC — the database stores timestamp without
+	// timezone and expects UTC values.
+	for id, price := range prices {
+		price.Time = price.Time.UTC()
+		prices[id] = price
+	}
+
 	h.mu.RLock()
 	slog.Debug("sending price updates", "updates", len(prices), "subscribers", len(h.subscribers))
 	h.mu.RUnlock()

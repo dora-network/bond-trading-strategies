@@ -71,42 +71,32 @@ func (s *PGStore) LoadHistoricalPrices(ctx context.Context, assetID string, star
 	}
 	defer rows.Close()
 
-	var out []AssetPrice
-	for rows.Next() {
-		var (
-			id        string
-			priceText string
-			ytmText   string
-			ts        time.Time
-		)
+	return scanAssetPriceRows(rows, "price history")
+}
 
-		if err := rows.Scan(&id, &priceText, &ytmText, &ts); err != nil {
-			return nil, fmt.Errorf("scan price history: %w", err)
-		}
+// LoadLastPrices loads the last N historical prices for one asset ordered by
+// time ascending. Only rows with a non-null YTM are returned.
+func (s *PGStore) LoadLastPrices(ctx context.Context, assetID string, limit int) ([]AssetPrice, error) {
+	const q = `
+		SELECT asset_id::text, price::text, ytm::text, timestamp
+		FROM (
+			SELECT asset_id, price, ytm, timestamp
+			FROM price_history
+			WHERE asset_id = $1
+			  AND ytm IS NOT NULL
+			ORDER BY timestamp DESC
+			LIMIT $2
+		) sub
+		ORDER BY timestamp ASC
+	`
 
-		price, err := decimal.Parse(priceText)
-		if err != nil {
-			return nil, fmt.Errorf("parse price %q: %w", priceText, err)
-		}
-		ytm, err := decimal.Parse(ytmText)
-		if err != nil {
-			return nil, fmt.Errorf("parse ytm %q: %w", ytmText, err)
-		}
-
-		ytmCopy := ytm
-		out = append(out, AssetPrice{
-			AssetID: id,
-			Price:   price,
-			YTM:     &ytmCopy,
-			Time:    ts,
-		})
+	rows, err := s.pool.Query(ctx, q, assetID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query last prices: %w", err)
 	}
+	defer rows.Close()
 
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate price history: %w", err)
-	}
-
-	return out, nil
+	return scanAssetPriceRows(rows, "last prices")
 }
 
 type Subscriber struct {
@@ -163,4 +153,45 @@ func (s *Subscriber) Start(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// scanAssetPriceRows scans pgx rows containing (asset_id, price, ytm, timestamp)
+// and returns them as AssetPrice values. The label is used in error messages.
+func scanAssetPriceRows(rows pgx.Rows, label string) ([]AssetPrice, error) {
+	var out []AssetPrice
+	for rows.Next() {
+		var (
+			id        string
+			priceText string
+			ytmText   string
+			ts        time.Time
+		)
+
+		if err := rows.Scan(&id, &priceText, &ytmText, &ts); err != nil {
+			return nil, fmt.Errorf("scan %s: %w", label, err)
+		}
+
+		price, err := decimal.Parse(priceText)
+		if err != nil {
+			return nil, fmt.Errorf("parse price %q: %w", priceText, err)
+		}
+		ytm, err := decimal.Parse(ytmText)
+		if err != nil {
+			return nil, fmt.Errorf("parse ytm %q: %w", ytmText, err)
+		}
+
+		ytmCopy := ytm
+		out = append(out, AssetPrice{
+			AssetID: id,
+			Price:   price,
+			YTM:     &ytmCopy,
+			Time:    ts,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s: %w", label, err)
+	}
+
+	return out, nil
 }

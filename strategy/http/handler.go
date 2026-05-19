@@ -32,6 +32,7 @@ const (
 type Handler struct {
 	service        strategycore.Service
 	now            func() time.Time
+	log            *slog.Logger
 	strategies     map[string]StrategyDefinition
 	prices         *prices.Handler
 	doraClient     doraClient
@@ -368,7 +369,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		opt(h)
 	}
 	if h.strategies == nil {
-		h.strategies = defaultStrategies(h.prices)
+		h.strategies = defaultStrategies(h.prices, h.log)
 	}
 
 	h.mux = http.NewServeMux()
@@ -426,6 +427,12 @@ func WithBacktestStore(store BacktestStore) func(*Handler) {
 func WithPricesHandler(pricesHandler *prices.Handler) func(*Handler) {
 	return func(h *Handler) {
 		h.prices = pricesHandler
+	}
+}
+
+func WithLogger(log *slog.Logger) func(*Handler) {
+	return func(h *Handler) {
+		h.log = log
 	}
 }
 
@@ -1346,9 +1353,9 @@ func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, c
 	return def, normalised, strat, http.StatusOK, nil
 }
 
-func defaultStrategies(pricesHandler *prices.Handler) map[string]StrategyDefinition {
+func defaultStrategies(pricesHandler *prices.Handler, log *slog.Logger) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
-		newMeanReversionDefinition(pricesHandler),
+		newMeanReversionDefinition(pricesHandler, log),
 		newCopyTradingDefinition(),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
@@ -1358,7 +1365,7 @@ func defaultStrategies(pricesHandler *prices.Handler) map[string]StrategyDefinit
 	return out
 }
 
-func newMeanReversionDefinition(pricesHandler *prices.Handler) StrategyDefinition {
+func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger) StrategyDefinition {
 	defaults := meanreversion.DefaultConfig()
 	return StrategyDefinition{
 		Type:        "mean_reversion",
@@ -1441,7 +1448,7 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler) StrategyDefinitio
 			if err != nil {
 				return nil, nil, err
 			}
-			return normalised, meanreversion.New(cfg, pricesHandler), nil
+			return normalised, meanreversion.New(cfg, pricesHandler, meanreversion.WithLogger(log)), nil
 		},
 	}
 }

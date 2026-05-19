@@ -551,7 +551,7 @@ func TestRunLoop_NoNewEntryWhenPositionOpen(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
+		_ = meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
 	}()
 
 	// Give the run loop time to process all updates.
@@ -628,7 +628,7 @@ func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
+		_ = meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
 	}()
 
 	// Wait for the close order to be placed.

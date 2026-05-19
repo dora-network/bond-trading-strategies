@@ -26,6 +26,21 @@ type FakeHistoricalPriceStore struct {
 		result1 []prices.AssetPrice
 		result2 error
 	}
+	LoadLastPricesStub        func(context.Context, string, int) ([]prices.AssetPrice, error)
+	loadLastPricesMutex       sync.RWMutex
+	loadLastPricesArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+		arg3 int
+	}
+	loadLastPricesReturns struct {
+		result1 []prices.AssetPrice
+		result2 error
+	}
+	loadLastPricesReturnsOnCall map[int]struct {
+		result1 []prices.AssetPrice
+		result2 error
+	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
 }
@@ -92,6 +107,72 @@ func (fake *FakeHistoricalPriceStore) LoadHistoricalPricesReturnsOnCall(i int, r
 		})
 	}
 	fake.loadHistoricalPricesReturnsOnCall[i] = struct {
+		result1 []prices.AssetPrice
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeHistoricalPriceStore) LoadLastPrices(arg1 context.Context, arg2 string, arg3 int) ([]prices.AssetPrice, error) {
+	fake.loadLastPricesMutex.Lock()
+	ret, specificReturn := fake.loadLastPricesReturnsOnCall[len(fake.loadLastPricesArgsForCall)]
+	fake.loadLastPricesArgsForCall = append(fake.loadLastPricesArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+		arg3 int
+	}{arg1, arg2, arg3})
+	stub := fake.LoadLastPricesStub
+	fakeReturns := fake.loadLastPricesReturns
+	fake.recordInvocation("LoadLastPrices", []interface{}{arg1, arg2, arg3})
+	fake.loadLastPricesMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeHistoricalPriceStore) LoadLastPricesCallCount() int {
+	fake.loadLastPricesMutex.RLock()
+	defer fake.loadLastPricesMutex.RUnlock()
+	return len(fake.loadLastPricesArgsForCall)
+}
+
+func (fake *FakeHistoricalPriceStore) LoadLastPricesCalls(stub func(context.Context, string, int) ([]prices.AssetPrice, error)) {
+	fake.loadLastPricesMutex.Lock()
+	defer fake.loadLastPricesMutex.Unlock()
+	fake.LoadLastPricesStub = stub
+}
+
+func (fake *FakeHistoricalPriceStore) LoadLastPricesArgsForCall(i int) (context.Context, string, int) {
+	fake.loadLastPricesMutex.RLock()
+	defer fake.loadLastPricesMutex.RUnlock()
+	argsForCall := fake.loadLastPricesArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeHistoricalPriceStore) LoadLastPricesReturns(result1 []prices.AssetPrice, result2 error) {
+	fake.loadLastPricesMutex.Lock()
+	defer fake.loadLastPricesMutex.Unlock()
+	fake.LoadLastPricesStub = nil
+	fake.loadLastPricesReturns = struct {
+		result1 []prices.AssetPrice
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeHistoricalPriceStore) LoadLastPricesReturnsOnCall(i int, result1 []prices.AssetPrice, result2 error) {
+	fake.loadLastPricesMutex.Lock()
+	defer fake.loadLastPricesMutex.Unlock()
+	fake.LoadLastPricesStub = nil
+	if fake.loadLastPricesReturnsOnCall == nil {
+		fake.loadLastPricesReturnsOnCall = make(map[int]struct {
+			result1 []prices.AssetPrice
+			result2 error
+		})
+	}
+	fake.loadLastPricesReturnsOnCall[i] = struct {
 		result1 []prices.AssetPrice
 		result2 error
 	}{result1, result2}

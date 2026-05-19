@@ -73,12 +73,14 @@ func main() {
 		}
 	}()
 
+	log := slog.With("service", "strategy-server")
 	service := strategycore.NewService(strategycore.WithBaseContext(ctx))
 	handlerImpl := strategyhttp.NewHandler(
 		service,
 		strategyhttp.WithRunStore(strategyhttp.NewPGRunStore(pool)),
 		strategyhttp.WithBacktestStore(strategyhttp.NewPGBacktestStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
+		strategyhttp.WithLogger(log),
 	)
 	restorer, ok := handlerImpl.(interface{ RestoreRuns(context.Context) error })
 	if !ok {

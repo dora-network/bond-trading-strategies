@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +88,7 @@ func DefaultConfig() Config {
 type Strategy struct {
 	mu                    sync.RWMutex
 	cfg                   Config
+	log                   *slog.Logger
 	window                *window.Rolling
 	cancel                context.CancelFunc
 	isRunning             bool
@@ -112,24 +114,39 @@ type Strategy struct {
 	openSignal types.Signal
 }
 
-// New creates a new Strategy with the given Config.
+// New creates a new Strategy with the given Config and optional functional options.
+// Supported options: WithLogger.
 
-func New(cfg Config, pricesHandlers ...*prices.Handler) *Strategy {
-	var pricesHandler *prices.Handler
-	if len(pricesHandlers) > 0 {
-		pricesHandler = pricesHandlers[0]
-	}
+func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *Strategy {
 	if cfg.Leverage.IsZero() {
 		cfg.Leverage = decimal.One
 	}
 
-	return &Strategy{
+	s := &Strategy{
 		cfg:             cfg,
 		window:          window.NewRollingWindow(cfg.LookbackWindow),
 		pricesHandler:   pricesHandler,
 		marketAPIClient: newDoraClient(),
 		errs:            make([]error, 0),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// WithLogger sets the logger on a mean-reversion Strategy.
+func WithLogger(log *slog.Logger) func(*Strategy) {
+	return func(s *Strategy) {
+		s.log = log
+	}
+}
+
+func (s *Strategy) logger() *slog.Logger {
+	if s.log == nil {
+		return slog.Default()
+	}
+	return s.log
 }
 
 func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtestResult types.BacktestResult, err error) {
@@ -168,17 +185,26 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message) error
 	s.isRunning = true
 	s.mu.Unlock()
 
-	s.run(runCtx, msgCh, pricesCh)
-	return nil
+	return s.run(runCtx, msgCh, pricesCh)
 }
 
 func (s *Strategy) subscribePrices() (<-chan map[uuid.UUID]prices.AssetPrice, error) {
 	s.pricesReqID = uuid.Must(uuid.NewV7())
 	pricesCh, err := s.pricesHandler.Subscribe(s.pricesReqID)
 	if err != nil {
+		s.pricesReqID = uuid.Nil
 		return nil, err
 	}
 	return pricesCh, nil
+}
+
+func (s *Strategy) unsubscribePrices() {
+	if s.pricesHandler == nil || s.pricesReqID == uuid.Nil {
+		return
+	}
+	if err := s.pricesHandler.Unsubscribe(s.pricesReqID); err != nil {
+		s.logger().Error("failed to unsubscribe from prices", "error", err)
+	}
 }
 
 func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
@@ -474,19 +500,17 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 }
 
 //nolint:funlen // main run loop with setup and teardown
-func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices <-chan map[uuid.UUID]prices.AssetPrice) {
+func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices <-chan map[uuid.UUID]prices.AssetPrice) error {
 	defer func() {
 		s.mu.Lock()
 		s.isRunning = false
 		s.mu.Unlock()
 	}()
+	defer s.unsubscribePrices()
 
 	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
 	if err != nil {
-		s.mu.Lock()
-		s.errs = append(s.errs, fmt.Errorf("error looking up asset ID: %w", err))
-		s.mu.Unlock()
-		return
+		return fmt.Errorf("error looking up asset ID: %w", err)
 	}
 
 	// Pre-fill the rolling window with historical data so that signals can
@@ -510,7 +534,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case msg := <-msgs:
 			s.mu.Lock()
 			switch msg {

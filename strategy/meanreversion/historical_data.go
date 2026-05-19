@@ -20,6 +20,7 @@ import (
 //counterfeiter:generate . historicalPriceStore
 type historicalPriceStore interface {
 	LoadHistoricalPrices(ctx context.Context, assetID string, start, end time.Time) ([]prices.AssetPrice, error)
+	LoadLastPrices(ctx context.Context, assetID string, limit int) ([]prices.AssetPrice, error)
 }
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
@@ -238,15 +239,13 @@ func (s *Strategy) mergeBenchmarkObservations(obs []fred.Observation) {
 // live price tick, without waiting for LookbackWindow observations to
 // accumulate organically.
 //
+// Historical prices are loaded as the last (2× LookbackWindow) ticks to
+// ensure enough observations exist to fill the rolling window.
+//
 // This is best-effort: if historical data is unavailable (no DB connection,
 // no FRED API key, etc.) the method returns an error but the caller may
 // choose to continue with an empty window.
 func (s *Strategy) prefillWindow(ctx context.Context, assetID string) error {
-	end := time.Now().UTC()
-	// Request 3× LookbackWindow calendar days to ensure enough trading-day
-	// observations exist to fill the window (weekends, holidays are skipped).
-	start := end.AddDate(0, 0, -s.cfg.LookbackWindow*3) //nolint:mnd
-
 	historyStore, err := s.getHistoricalPriceStore(ctx)
 	if err != nil {
 		return fmt.Errorf("get history store: %w", err)
@@ -262,16 +261,19 @@ func (s *Strategy) prefillWindow(ctx context.Context, assetID string) error {
 		return fmt.Errorf("get benchmark client: %w", err)
 	}
 
-	history, err := historyStore.LoadHistoricalPrices(ctx, assetID, start, end)
+	limit := s.cfg.LookbackWindow * 2
+	history, err := historyStore.LoadLastPrices(ctx, assetID, limit)
 	if err != nil {
-		return fmt.Errorf("load historical prices: %w", err)
+		return fmt.Errorf("load last prices: %w", err)
 	}
 
-	benchmarkYields, err := benchmarkClient.FetchHistoricalYields(ctx, tenor, start, end)
-	if err != nil {
-		return fmt.Errorf("fetch benchmark yields: %w", err)
+	if len(history) > 0 {
+		benchmarkYields, err := benchmarkClient.FetchHistoricalYields(ctx, tenor, history[0].Time, history[len(history)-1].Time)
+		if err != nil {
+			return fmt.Errorf("fetch benchmark yields: %w", err)
+		}
+		s.setBenchmarkObservations(benchmarkYields)
 	}
-	s.setBenchmarkObservations(benchmarkYields)
 
 	for _, price := range history {
 		if price.YTM == nil {
