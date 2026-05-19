@@ -271,17 +271,17 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		rec = httptest.NewRecorder()
-		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/metadata", nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			return false
 		}
-		var detail strategyhttp.BacktestDetail
-		if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		var summary strategyhttp.BacktestSummary
+		if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil {
 			return false
 		}
-		return detail.Status == "completed" && detail.Result != nil
+		return summary.Status == "completed"
 	}, time.Second, 10*time.Millisecond)
 }
 
@@ -345,9 +345,9 @@ func TestHandlerCancelBacktest(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, 1, svc.StopBacktestCallCount())
-	var detail strategyhttp.BacktestDetail
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
-	assert.Equal(t, "cancelled", detail.Status)
+	var summary strategyhttp.BacktestSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &summary))
+	assert.Equal(t, "cancelled", summary.Status)
 }
 
 func TestHandlerListBacktests(t *testing.T) {
@@ -636,12 +636,12 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 					DORAUserID:   "user-test-1",
 					StrategyType: "mean_reversion",
 					Status:       "completed",
+					Config:       json.RawMessage(`{"lookback_window":20}`),
 					CreatedAt:    now,
 					CompletedAt:  &completedAt,
 				},
-				Config: json.RawMessage(`{"lookback_window":20}`),
-				Start:  now.Add(-time.Hour),
-				End:    now,
+				Start: now.Add(-time.Hour),
+				End:   now,
 				Result: &strategyhttp.BacktestResult{
 					TotalPnL:    "0.05",
 					WinCount:    3,
@@ -656,13 +656,13 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 					DORAUserID:   "user-test-1",
 					StrategyType: "mean_reversion",
 					Status:       "failed",
+					Config:       json.RawMessage(`{"lookback_window":10}`),
 					CreatedAt:    now.Add(-time.Minute),
 					CompletedAt:  &completedAt,
 				},
-				Config: json.RawMessage(`{"lookback_window":10}`),
-				Start:  now.Add(-2 * time.Hour),
-				End:    now.Add(-time.Hour),
-				Error:  "something went wrong",
+				Start: now.Add(-2 * time.Hour),
+				End:   now.Add(-time.Hour),
+				Error: "something went wrong",
 			},
 			uuid.Must(uuid.NewV7()): {
 				BacktestSummary: strategyhttp.BacktestSummary{
@@ -670,12 +670,12 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 					DORAUserID:   otherUserID,
 					StrategyType: "mean_reversion",
 					Status:       "completed",
+					Config:       json.RawMessage(`{"lookback_window":5}`),
 					CreatedAt:    now.Add(-2 * time.Hour),
 					CompletedAt:  &completedAt,
 				},
-				Config: json.RawMessage(`{"lookback_window":5}`),
-				Start:  now.Add(-3 * time.Hour),
-				End:    now.Add(-2 * time.Hour),
+				Start: now.Add(-3 * time.Hour),
+				End:   now.Add(-2 * time.Hour),
 			},
 		},
 	}
@@ -712,18 +712,6 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 	expected := []uuid.UUID{failedID, completedID}
 	sort.Slice(expected, func(i, j int) bool { return expected[i].String() < expected[j].String() })
 	assert.Equal(t, expected, ids)
-
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+completedID.String(), nil)
-	req.Header.Set("Authorization", "ApiKey test-key")
-	handlerAny.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	var btDetail strategyhttp.BacktestDetail
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &btDetail))
-	assert.Equal(t, "completed", btDetail.Status)
-	assert.Equal(t, "0.05", btDetail.Result.TotalPnL)
-	assert.Equal(t, 3, btDetail.Result.WinCount)
 }
 
 func TestHandlerBacktestOwnership(t *testing.T) {
@@ -739,11 +727,11 @@ func TestHandlerBacktestOwnership(t *testing.T) {
 					DORAUserID:   "user-alice",
 					StrategyType: "mean_reversion",
 					Status:       "completed",
+					Config:       json.RawMessage(`{"lookback_window":20}`),
 					CreatedAt:    now,
 				},
-				Config: json.RawMessage(`{"lookback_window":20}`),
-				Start:  now.Add(-time.Hour),
-				End:    now,
+				Start: now.Add(-time.Hour),
+				End:   now,
 			},
 		},
 	}
@@ -775,6 +763,13 @@ func TestHandlerBacktestOwnership(t *testing.T) {
 	req.Header.Set("Authorization", "ApiKey test-key")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	// /metadata endpoint also enforces ownership.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+btID.String()+"/metadata", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handlerAny.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestHandlerValidationErrors(t *testing.T) {
@@ -826,6 +821,7 @@ type memoryRunStore struct {
 type doraClientFunc struct {
 	listOrderBooks func(context.Context) ([]strategyhttp.DORAOrderBookSummary, error)
 	getUserID      func(context.Context) (string, error)
+	getAssetByID   func(context.Context, string) (*strategyhttp.AssetInfo, error)
 }
 
 func (f doraClientFunc) ListOrderBooks(ctx context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
@@ -833,6 +829,13 @@ func (f doraClientFunc) ListOrderBooks(ctx context.Context) ([]strategyhttp.DORA
 		return nil, fmt.Errorf("not implemented")
 	}
 	return f.listOrderBooks(ctx)
+}
+
+func (f doraClientFunc) GetAssetByID(ctx context.Context, id string) (*strategyhttp.AssetInfo, error) {
+	if f.getAssetByID == nil {
+		return nil, fmt.Errorf("not implemented")
+	}
+	return f.getAssetByID(ctx, id)
 }
 
 func (f doraClientFunc) GetUserID(ctx context.Context) (string, error) {
@@ -875,9 +878,18 @@ func (s *memoryBacktestStore) LoadBacktests(ctx context.Context) ([]*strategyhtt
 	for _, bt := range s.backtests {
 		copyBT := *bt
 		copyBT.Config = append([]byte(nil), bt.Config...)
+		copyBT.Result = nil
 		out = append(out, &copyBT)
 	}
 	return out, nil
+}
+
+func (s *memoryBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UUID) (*strategyhttp.BacktestResult, error) {
+	bt, ok := s.backtests[id]
+	if !ok {
+		return nil, fmt.Errorf("backtest not found")
+	}
+	return bt.Result, nil
 }
 
 func (s *memoryBacktestStore) SaveBacktest(ctx context.Context, detail *strategyhttp.BacktestDetail) error {
@@ -888,6 +900,52 @@ func (s *memoryBacktestStore) SaveBacktest(ctx context.Context, detail *strategy
 	copyBT.Config = append([]byte(nil), detail.Config...)
 	s.backtests[detail.ID] = &copyBT
 	return nil
+}
+
+func (s *memoryBacktestStore) GetBacktestTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]strategyhttp.TradeRecord, error) {
+	result, err := s.LoadBacktestResult(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return []strategyhttp.TradeRecord{}, nil
+	}
+	return paginateHelper(result.TradeRecords, page, limit), nil
+}
+
+func (s *memoryBacktestStore) GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]strategyhttp.ClosedTrade, error) {
+	result, err := s.LoadBacktestResult(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return []strategyhttp.ClosedTrade{}, nil
+	}
+	return paginateHelper(result.ClosedTrades, page, limit), nil
+}
+
+func paginateHelper[T any](items []T, page, limit int) []T {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	start := (page - 1) * limit
+	if start >= len(items) {
+		return []T{}
+	}
+
+	end := start + limit
+	if end > len(items) {
+		end = len(items)
+	}
+
+	return items[start:end]
 }
 
 func TestHandlerRunOwnership(t *testing.T) {
@@ -968,6 +1026,82 @@ func TestHandlerRunOwnership(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestHandlerBacktestSummary(t *testing.T) {
+	t.Parallel()
+
+	backtestID := uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+
+	store := &memoryBacktestStore{
+		backtests: map[uuid.UUID]*strategyhttp.BacktestDetail{
+			backtestID: {
+				BacktestSummary: strategyhttp.BacktestSummary{
+					ID:           backtestID,
+					DORAUserID:   "user-1",
+					StrategyType: "mean_reversion",
+					Status:       "completed",
+					Config:       json.RawMessage(`{"lookback_window":20}`),
+					CreatedAt:    now,
+				},
+				Start: now.Add(-time.Hour),
+				End:   now,
+				Result: &strategyhttp.BacktestResult{
+					TotalPnL:    "100.0",
+					WinCount:    5,
+					LossCount:   2,
+					MaxDrawdown: "0.1",
+					SharpeRatio: "1.5",
+				},
+			},
+		},
+	}
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithBacktestStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-1", nil
+			},
+		}),
+	)
+	restorer, ok := handler.(interface{ RestoreBacktests(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreBacktests(context.Background()))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Must unmarshal as BacktestResultSummary with P&L fields populated
+	// from the store, plus metadata fields from the original detail.
+	var resultSummary strategyhttp.BacktestResultSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resultSummary))
+	assert.Equal(t, "100.0", resultSummary.TotalPnL)
+	assert.Equal(t, "0.1", resultSummary.MaxDrawdown)
+	assert.Equal(t, "1.5", resultSummary.SharpeRatio)
+	assert.Equal(t, 5, resultSummary.WinCount)
+	assert.Equal(t, 2, resultSummary.LossCount)
+	assert.Equal(t, "mean_reversion", resultSummary.StrategyType)
+	assert.Equal(t, "completed", resultSummary.Status)
+
+	// Metadata endpoint returns BacktestSummary.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/metadata", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var summary strategyhttp.BacktestSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &summary))
+	assert.Equal(t, backtestID, summary.ID)
+	assert.Equal(t, "completed", summary.Status)
+	assert.Equal(t, "mean_reversion", summary.StrategyType)
+}
+
 func TestHandlerRequiresAuth(t *testing.T) {
 	t.Parallel()
 
@@ -1038,5 +1172,115 @@ func TestHandlerRequiresAuth(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer eyJhbGciOiJSUzI1NiJ9.test.sig")
 		handler.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code)
+	})
+}
+
+func TestHandlerBacktestSubResources(t *testing.T) {
+	t.Parallel()
+
+	backtestID := uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+
+	// Create 15 trade records and 15 closed trades
+	tradeRecords := make([]strategyhttp.TradeRecord, 15)
+	closedTrades := make([]strategyhttp.ClosedTrade, 15)
+	for i := 0; i < 15; i++ {
+		tradeRecords[i] = strategyhttp.TradeRecord{
+			BondID: fmt.Sprintf("bond-%d", i),
+			Signal: "BUY",
+		}
+		closedTrades[i] = strategyhttp.ClosedTrade{
+			BondID:     fmt.Sprintf("bond-%d", i),
+			Signal:     "BUY",
+			ExitSignal: "SELL",
+		}
+	}
+
+	store := &memoryBacktestStore{
+		backtests: map[uuid.UUID]*strategyhttp.BacktestDetail{
+			backtestID: {
+				BacktestSummary: strategyhttp.BacktestSummary{
+					ID:           backtestID,
+					DORAUserID:   "user-1",
+					StrategyType: "mean_reversion",
+					Status:       "completed",
+					CreatedAt:    now,
+				},
+				Result: &strategyhttp.BacktestResult{
+					TradeRecords: tradeRecords,
+					ClosedTrades: closedTrades,
+					TotalPnL:     "100.0",
+				},
+			},
+		},
+	}
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithBacktestStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-1", nil
+			},
+		}),
+	)
+	restorer, ok := handler.(interface{ RestoreBacktests(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreBacktests(context.Background()))
+
+	t.Run("GetTradesPage1", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("/v1/backtests/%s/trades?page=1&limit=10", backtestID), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.TradeRecord `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Len(t, resp.Items, 10)
+		assert.Equal(t, "bond-0", resp.Items[0].BondID)
+		assert.Equal(t, "bond-9", resp.Items[9].BondID)
+	})
+
+	t.Run("GetTradesPage2", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("/v1/backtests/%s/trades?page=2&limit=10", backtestID), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.TradeRecord `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Len(t, resp.Items, 5)
+		assert.Equal(t, "bond-10", resp.Items[0].BondID)
+		assert.Equal(t, "bond-14", resp.Items[4].BondID)
+	})
+
+	t.Run("GetClosedTradesLimitClamping", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("/v1/backtests/%s/closed-trades?limit=100", backtestID), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp struct {
+			Items []strategyhttp.ClosedTrade `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		// Our sample has 15, so it should return all 15 if limit is clamped to 50
+		assert.Len(t, resp.Items, 15)
+	})
+
+	t.Run("NotFound", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("/v1/backtests/%s/trades", uuid.New()), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
 }

@@ -110,6 +110,20 @@ func (c *strategyClient) getBacktest(ctx context.Context, id string) (map[string
 	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, "/v1/backtests/"+id, nil)
 }
 
+func (c *strategyClient) getBacktestMetadata(ctx context.Context, id string) (map[string]any, error) {
+	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, "/v1/backtests/"+id+"/metadata", nil)
+}
+
+func (c *strategyClient) getBacktestTrades(ctx context.Context, id string, page, limit int) (map[string]any, error) {
+	path := fmt.Sprintf("/v1/backtests/%s/trades?page=%d&limit=%d", id, page, limit)
+	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, path, nil)
+}
+
+func (c *strategyClient) getBacktestClosedTrades(ctx context.Context, id string, page, limit int) (map[string]any, error) {
+	path := fmt.Sprintf("/v1/backtests/%s/closed-trades?page=%d&limit=%d", id, page, limit)
+	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, path, nil)
+}
+
 func (c *strategyClient) cancelBacktest(ctx context.Context, id string) (map[string]any, error) {
 	return doStrategyJSON[map[string]any](ctx, c, http.MethodDelete, "/v1/backtests/"+id, nil)
 }

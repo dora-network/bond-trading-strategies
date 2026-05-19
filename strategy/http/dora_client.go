@@ -11,6 +11,7 @@ import (
 
 type doraClient interface {
 	ListOrderBooks(context.Context) ([]DORAOrderBookSummary, error)
+	GetAssetByID(context.Context, string) (*AssetInfo, error)
 	GetUserID(context.Context) (string, error)
 }
 
@@ -63,6 +64,29 @@ func (c *liveDORAClient) ListOrderBooks(ctx context.Context) ([]DORAOrderBookSum
 		})
 	}
 	return items, nil
+}
+
+func (c *liveDORAClient) GetAssetByID(ctx context.Context, assetID string) (*AssetInfo, error) {
+	authCtx, err := c.authContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, rawResp, err := c.client.DefaultAPI.GetAssetById(authCtx, assetID).Execute()
+	if rawResp != nil && rawResp.Body != nil {
+		defer rawResp.Body.Close()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get asset by id: %w", err)
+	}
+	if resp == nil || resp.Data == nil {
+		return nil, errors.New("get asset by id: missing response data")
+	}
+
+	return &AssetInfo{
+		Name:   resp.Data.Name,
+		Symbol: resp.Data.Symbol,
+	}, nil
 }
 
 func (c *liveDORAClient) GetUserID(ctx context.Context) (string, error) {

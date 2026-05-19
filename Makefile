@@ -7,13 +7,13 @@ endif
 
 STRATEGY_ADDR ?= :8081
 
-MCP_ADDR ?= :8082
-MCP_BASE_URL ?= http://localhost:8082
+MCP_ADDR ?= :8080
+MCP_BASE_URL ?= http://localhost:8080
 STRATEGY_BASE_URL ?= http://localhost:8081
 
 WS_URL ?= wss://dev.dora.co
 DORA_BASE_URL ?= https://dev.dora.co
-PRICE_DAEMON_HTTP_ADDR ?= :8080
+PRICE_DAEMON_HTTP_ADDR ?= :8082
 RECONNECT_DELAY ?= 5s
 
 .PHONY: help

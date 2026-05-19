@@ -47,6 +47,12 @@ type strategyGetBacktestArgs struct {
 	ID string `json:"id"`
 }
 
+type strategyBacktestTradesArgs struct {
+	ID    string `json:"id"`
+	Page  int    `json:"page,omitempty"`
+	Limit int    `json:"limit,omitempty"`
+}
+
 type strategyCancelBacktestArgs struct {
 	ID string `json:"id"`
 }
@@ -258,7 +264,7 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 
 	s.AddTool(
 		mcp.NewTool("strategy_backtest_get",
-			mcp.WithDescription("Get one strategy backtest by ID from strategy-server."),
+			mcp.WithDescription("Get summarised results from one strategy backtest by ID from strategy-server."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy backtest ID.")),
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args strategyGetBacktestArgs) (*mcp.CallToolResult, error) {
@@ -281,6 +287,32 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 			}
 			return jsonText(result)
 		},
+	)
+
+	registerBacktestSubResourceTool(s, "strategy_backtest_trades", "trade records",
+		func(ctx context.Context, id string, page, limit int) (map[string]any, error) {
+			return client.getBacktestTrades(ctx, id, page, limit)
+		},
+	)
+
+	registerBacktestSubResourceTool(s, "strategy_backtest_closed_trades", "closed trades",
+		func(ctx context.Context, id string, page, limit int) (map[string]any, error) {
+			return client.getBacktestClosedTrades(ctx, id, page, limit)
+		},
+	)
+
+	s.AddTool(
+		mcp.NewTool("strategy_backtest_metadata",
+			mcp.WithDescription("Get the backtest metadata (ID, status, timestamps) by ID from strategy-server. Use this to check status or get the backtest ID — not the P&L result summary."), //nolint:lll
+			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy backtest ID.")),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args strategyGetBacktestArgs) (*mcp.CallToolResult, error) {
+			result, err := client.getBacktestMetadata(ctx, args.ID)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return jsonText(result)
+		}),
 	)
 
 	s.AddTool(
@@ -367,4 +399,32 @@ func formatRunDetailSummary(run strategyRunDetail) string {
 		lines = append(lines, fmt.Sprintf("Error: %s", run.Error))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func registerBacktestSubResourceTool(
+	s *server.MCPServer, name, label string,
+	fetch func(context.Context, string, int, int) (map[string]any, error),
+) {
+	s.AddTool(
+		mcp.NewTool(name,
+			mcp.WithDescription(fmt.Sprintf("Get paginated %s from a completed backtest. Default page=1, limit=10, max limit=50.", label)),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy backtest ID.")),
+			mcp.WithNumber("page", mcp.Description("Page number (default 1).")),
+			mcp.WithNumber("limit", mcp.Description("Items per page (default 10, max 50).")),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args strategyBacktestTradesArgs) (*mcp.CallToolResult, error) {
+			page, limit := args.Page, args.Limit
+			if page < 1 {
+				page = 1
+			}
+			if limit < 1 {
+				limit = 10
+			}
+			result, err := fetch(ctx, args.ID, page, limit)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return jsonText(result)
+		}),
+	)
 }

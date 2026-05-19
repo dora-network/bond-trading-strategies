@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dora-network/bond-trading-strategies/testutils"
@@ -81,9 +82,15 @@ func newStrategyMockServer(t *testing.T) *httptest.Server {
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"id":"44444444-4444-4444-4444-444444444444","strategy_type":"mean_reversion","status":"running","created_at":"2026-04-24T12:00:00Z","start":"2026-04-01T00:00:00Z","end":"2026-04-02T00:00:00Z","config":{"lookback_window":20}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/backtests/44444444-4444-4444-4444-444444444444":
-			_, _ = w.Write([]byte(`{"id":"44444444-4444-4444-4444-444444444444","strategy_type":"mean_reversion","status":"completed","created_at":"2026-04-24T12:00:00Z","completed_at":"2026-04-24T12:01:00Z","start":"2026-04-01T00:00:00Z","end":"2026-04-02T00:00:00Z","config":{"lookback_window":20},"result":{"closed_trades":[],"total_pnl":"0","win_count":0,"loss_count":0,"max_drawdown":"0","sharpe_ratio":"0"}}`))
+			_, _ = w.Write([]byte(`{"total_pnl":"9377.78","win_count":764,"loss_count":334,"max_drawdown":"299.56","sharpe_ratio":"39.0","strategy_type":"mean_reversion","status":"completed","config":{"lookback_window":20},"asset_name":"UST 10Y","asset_symbol":"UST10Y"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backtests/44444444-4444-4444-4444-444444444444/metadata":
+			_, _ = w.Write([]byte(`{"id":"44444444-4444-4444-4444-444444444444","dora_user_id":"test-user","strategy_type":"mean_reversion","status":"completed","created_at":"2026-04-24T12:00:00Z","completed_at":"2026-04-24T12:01:00Z"}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/backtests/44444444-4444-4444-4444-444444444444/trades"):
+			_, _ = w.Write([]byte(`{"items":[{"time":"2026-04-24T11:00:00Z","bond_id":"BOND-1","signal":"BUY","spread":"0.012","zscore":"2.0","price":"100","quantity":"5","entry_balance":"10000"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/backtests/44444444-4444-4444-4444-444444444444/closed-trades"):
+			_, _ = w.Write([]byte(`{"items":[{"bond_id":"BOND-1","open_time":"2026-04-24T10:00:00Z","close_time":"2026-04-24T11:00:00Z","signal":"BUY","exit_signal":"SELL","entry_spread":"0.015","exit_spread":"0.008","position_size":"5","pnl":"2","exit_reason":"take_profit","entry_price":"100","exit_price":"102","quantity":"5","entry_balance":"10000"}]}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/backtests/44444444-4444-4444-4444-444444444444":
-			_, _ = w.Write([]byte(`{"id":"44444444-4444-4444-4444-444444444444","strategy_type":"mean_reversion","status":"cancelled","created_at":"2026-04-24T12:00:00Z","completed_at":"2026-04-24T12:01:00Z","start":"2026-04-01T00:00:00Z","end":"2026-04-02T00:00:00Z","config":{"lookback_window":20},"error":"backtest cancelled"}`))
+			_, _ = w.Write([]byte(`{"id":"44444444-4444-4444-4444-444444444444","dora_user_id":"test-user","strategy_type":"mean_reversion","status":"cancelled","created_at":"2026-04-24T12:00:00Z","completed_at":"2026-04-24T12:01:00Z"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not found"}`))
@@ -221,11 +228,46 @@ func TestStrategyBacktestLifecycle(t *testing.T) {
 
 	get := callTool(t, ts, "strategy_backtest_get", map[string]any{"id": "44444444-4444-4444-4444-444444444444"})
 	require.False(t, get.IsError)
-	assert.Contains(t, textContent(t, get), "completed")
+	getText := textContent(t, get)
+	assert.Contains(t, getText, "total_pnl")
+	assert.Contains(t, getText, "9377.78")
+	assert.Contains(t, getText, "win_count")
+	assert.Contains(t, getText, "764")
+	assert.Contains(t, getText, "strategy_type")
+	assert.Contains(t, getText, "mean_reversion")
+	assert.Contains(t, getText, "asset_name")
+	assert.Contains(t, getText, "UST 10Y")
+	assert.Contains(t, getText, "asset_symbol")
+	assert.Contains(t, getText, "UST10Y")
+	assert.Contains(t, getText, "status")
+	assert.Contains(t, getText, "completed")
+
+	// Metadata still returns the backtest summary.
+	metadata := callTool(t, ts, "strategy_backtest_metadata", map[string]any{"id": "44444444-4444-4444-4444-444444444444"})
+	require.False(t, metadata.IsError)
+	assert.Contains(t, textContent(t, metadata), "completed")
 
 	list := callTool(t, ts, "strategy_backtest_list", nil)
 	require.False(t, list.IsError)
 	assert.Contains(t, textContent(t, list), "33333333-3333-3333-3333-333333333333")
+
+	trades := callTool(t, ts, "strategy_backtest_trades", map[string]any{
+		"id":    "44444444-4444-4444-4444-444444444444",
+		"page":  1,
+		"limit": 10,
+	})
+	require.False(t, trades.IsError)
+	tradesText := textContent(t, trades)
+	assert.Contains(t, tradesText, "BOND-1")
+	assert.Contains(t, tradesText, "BUY")
+
+	closedTrades := callTool(t, ts, "strategy_backtest_closed_trades", map[string]any{
+		"id": "44444444-4444-4444-4444-444444444444",
+	})
+	require.False(t, closedTrades.IsError)
+	closedText := textContent(t, closedTrades)
+	assert.Contains(t, closedText, "take_profit")
+	assert.Contains(t, closedText, "exit_signal")
 
 	cancel := callTool(t, ts, "strategy_backtest_cancel", map[string]any{"id": "44444444-4444-4444-4444-444444444444"})
 	require.False(t, cancel.IsError)
@@ -393,6 +435,9 @@ func TestToolsListContainsExpectedTools(t *testing.T) {
 		"strategy_backtest_create",
 		"strategy_backtest_get",
 		"strategy_backtest_list",
+		"strategy_backtest_trades",
+		"strategy_backtest_closed_trades",
+		"strategy_backtest_metadata",
 		"strategy_backtest_cancel",
 		"fred_fetch_series",
 		"fred_fetch_latest",

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,21 +25,26 @@ import (
 const (
 	strategyStatusAvailable      = "available"
 	strategyStatusNotImplemented = "not_implemented"
+	defaultPaginationLimit       = 10
+	maxPaginationLimit           = 50
 )
 
 type Handler struct {
-	service       strategycore.Service
-	now           func() time.Time
-	strategies    map[string]StrategyDefinition
-	prices        *prices.Handler
-	doraClient    doraClient
-	runStore      RunStore
-	backtestStore BacktestStore
-	mux           *http.ServeMux
-	authedMux     http.Handler
-	mu            sync.RWMutex
-	backtests     map[uuid.UUID]*BacktestDetail
-	runs          map[uuid.UUID]*RunDetail
+	service        strategycore.Service
+	now            func() time.Time
+	strategies     map[string]StrategyDefinition
+	prices         *prices.Handler
+	doraClient     doraClient
+	runStore       RunStore
+	backtestStore  BacktestStore
+	mux            *http.ServeMux
+	authedMux      http.Handler
+	mu             sync.RWMutex
+	backtests      map[uuid.UUID]*BacktestDetail
+	runs           map[uuid.UUID]*RunDetail
+	orderbookCache map[string]DORAOrderBookSummary
+	assetCache     map[string]AssetInfo
+	cacheMu        sync.RWMutex
 }
 
 type runStarter interface {
@@ -101,24 +107,144 @@ type DORAUserSummary struct {
 	ID string `json:"id"`
 }
 
+type AssetInfo struct {
+	Name   string `json:"name"`
+	Symbol string `json:"symbol"`
+}
+
 // listable is implemented by BacktestDetail and RunDetail for generic list operations.
 type listable interface {
 	GetDORAUserID() string
 	GetCreatedAt() time.Time
 }
 
+type BacktestResultSummary struct {
+	TotalPnL     string          `json:"total_pnl"` //nolint:tagliatelle
+	WinCount     int             `json:"win_count"`
+	LossCount    int             `json:"loss_count"`
+	MaxDrawdown  string          `json:"max_drawdown"`
+	SharpeRatio  string          `json:"sharpe_ratio"`
+	StrategyType string          `json:"strategy_type"`
+	Status       string          `json:"status"`
+	Config       json.RawMessage `json:"config"`
+	AssetName    string          `json:"asset_name"`
+	AssetSymbol  string          `json:"asset_symbol"`
+	Error        string          `json:"error,omitempty"`
+}
+
+func (h *Handler) summaryResult(ctx context.Context, d *BacktestDetail) BacktestResultSummary {
+	s := BacktestResultSummary{
+		StrategyType: d.StrategyType,
+		Status:       d.Status,
+		Config:       d.Config,
+		Error:        d.Error,
+	}
+	if d.Result != nil {
+		s.TotalPnL = d.Result.TotalPnL
+		s.WinCount = d.Result.WinCount
+		s.LossCount = d.Result.LossCount
+		s.MaxDrawdown = d.Result.MaxDrawdown
+		s.SharpeRatio = d.Result.SharpeRatio
+	}
+
+	var cfg orderBookConfig
+	if d.Config != nil {
+		_ = json.Unmarshal(d.Config, &cfg)
+	}
+	if cfg.OrderBookID != "" {
+		info, err := h.resolveOrderbookAsset(ctx, cfg.OrderBookID)
+		if err != nil {
+			slog.Warn("resolve orderbook asset", "err", err, "order_book_id", cfg.OrderBookID)
+		} else {
+			s.AssetName = info.Name
+			s.AssetSymbol = info.Symbol
+		}
+	}
+	return s
+}
+
+type orderBookConfig struct {
+	OrderBookID string `json:"order_book_id"`
+}
+
+func (h *Handler) toSummary(ctx context.Context, detail *BacktestDetail) BacktestSummary {
+	s := detail.BacktestSummary
+	s.AssetName = ""
+	s.AssetSymbol = ""
+
+	var cfg orderBookConfig
+	if detail.Config != nil {
+		_ = json.Unmarshal(detail.Config, &cfg)
+	}
+	if cfg.OrderBookID != "" {
+		info, err := h.resolveOrderbookAsset(ctx, cfg.OrderBookID)
+		if err != nil {
+			slog.Warn("resolve orderbook asset", "err", err, "order_book_id", cfg.OrderBookID)
+		} else {
+			s.AssetName = info.Name
+			s.AssetSymbol = info.Symbol
+		}
+	}
+	return s
+}
+
+func (h *Handler) resolveOrderbookAsset(ctx context.Context, orderBookID string) (AssetInfo, error) {
+	h.cacheMu.RLock()
+	info, ok := h.assetCache[orderBookID]
+	h.cacheMu.RUnlock()
+	if ok {
+		return info, nil
+	}
+
+	client := h.doraClient
+	if client == nil {
+		client = newDORAClient()
+	}
+
+	orderbooks, err := client.ListOrderBooks(ctx)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf("list order books: %w", err)
+	}
+
+	h.cacheMu.Lock()
+	for _, ob := range orderbooks {
+		h.orderbookCache[ob.ID] = ob
+	}
+	h.cacheMu.Unlock()
+
+	h.cacheMu.RLock()
+	ob, ok := h.orderbookCache[orderBookID]
+	h.cacheMu.RUnlock()
+	if !ok {
+		return AssetInfo{}, fmt.Errorf("order book %q not found", orderBookID)
+	}
+
+	asset, err := client.GetAssetByID(ctx, ob.BaseAssetID)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf("get asset by id: %w", err)
+	}
+
+	h.cacheMu.Lock()
+	h.assetCache[orderBookID] = *asset
+	h.cacheMu.Unlock()
+
+	return *asset, nil
+}
+
 type BacktestSummary struct {
-	ID           uuid.UUID  `json:"id"`
-	DORAUserID   string     `json:"dora_user_id"`
-	StrategyType string     `json:"strategy_type"`
-	Status       string     `json:"status"`
-	CreatedAt    time.Time  `json:"created_at"`
-	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	ID           uuid.UUID       `json:"id"`
+	DORAUserID   string          `json:"dora_user_id"`
+	StrategyType string          `json:"strategy_type"`
+	Status       string          `json:"status"`
+	Config       json.RawMessage `json:"config"`
+	AssetName    string          `json:"asset_name"`
+	AssetSymbol  string          `json:"asset_symbol"`
+	CreatedAt    time.Time       `json:"created_at"`
+	CompletedAt  *time.Time      `json:"completed_at,omitempty"`
 }
 
 type BacktestDetail struct {
 	BacktestSummary
-	Config json.RawMessage `json:"config"`
 	Start  time.Time       `json:"start"`
 	End    time.Time       `json:"end"`
 	Result *BacktestResult `json:"result,omitempty"`
@@ -231,10 +357,12 @@ type TradeRecord struct {
 
 func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handler {
 	h := &Handler{
-		service:   service,
-		now:       time.Now,
-		backtests: make(map[uuid.UUID]*BacktestDetail),
-		runs:      make(map[uuid.UUID]*RunDetail),
+		service:        service,
+		now:            time.Now,
+		backtests:      make(map[uuid.UUID]*BacktestDetail),
+		runs:           make(map[uuid.UUID]*RunDetail),
+		orderbookCache: make(map[string]DORAOrderBookSummary),
+		assetCache:     make(map[string]AssetInfo),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -400,19 +528,56 @@ func (h *Handler) handleBacktests(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleBacktestByID(w http.ResponseWriter, r *http.Request) {
-	id, ok := parseIDFromPath(r.URL.Path, "/v1/backtests/")
-	if !ok {
+	rest := strings.TrimPrefix(r.URL.Path, "/v1/backtests/")
+	if rest == r.URL.Path || rest == "" {
+		writeError(w, http.StatusNotFound, "resource not found")
+		return
+	}
+	parts := strings.Split(rest, "/")
+	id, err := uuid.Parse(parts[0])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	if len(parts) == 1 {
+		switch r.Method {
+		case http.MethodGet:
+			h.getBacktest(w, r, id)
+		case http.MethodDelete:
+			h.cancelBacktest(w, r, id)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodDelete)
+		}
+		return
+	}
+
+	if len(parts) != 2 { //nolint:mnd
 		writeError(w, http.StatusNotFound, "resource not found")
 		return
 	}
 
-	switch r.Method {
-	case http.MethodGet:
-		h.getBacktest(w, r, id)
-	case http.MethodDelete:
-		h.cancelBacktest(w, r, id)
+	switch parts[1] {
+	case "trades":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		h.getBacktestTrades(w, r, id)
+	case "closed-trades":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		h.getBacktestClosedTrades(w, r, id)
+	case "metadata":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		h.getBacktestMetadata(w, r, id)
 	default:
-		writeMethodNotAllowed(w, http.MethodGet, http.MethodDelete)
+		writeError(w, http.StatusNotFound, "resource not found")
 	}
 }
 
@@ -506,11 +671,11 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 			DORAUserID:   doraUserID,
 			StrategyType: def.Type,
 			Status:       "running",
+			Config:       cfg,
 			CreatedAt:    now,
 		},
-		Config: cfg,
-		Start:  req.Start.UTC(),
-		End:    req.End.UTC(),
+		Start: req.Start.UTC(),
+		End:   req.End.UTC(),
 	}
 
 	h.mu.Lock()
@@ -557,8 +722,64 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 
 func (h *Handler) listBacktests(w http.ResponseWriter, r *http.Request) {
 	listItems(w, r, h.backtests,
-		func(d *BacktestDetail) BacktestSummary { return d.BacktestSummary },
+		func(d *BacktestDetail) BacktestSummary { return h.toSummary(r.Context(), d) },
 		h.resolveDORAUserID, &h.mu)
+}
+
+func (h *Handler) getBacktestTrades(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
+	getBacktestSubResource(h, w, r, id, "trades", h.backtestStore.GetBacktestTrades)
+}
+
+func (h *Handler) getBacktestClosedTrades(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
+	getBacktestSubResource(h, w, r, id, "closed trades", h.backtestStore.GetBacktestClosedTrades)
+}
+
+func getBacktestSubResource[T any](
+	h *Handler, w http.ResponseWriter, r *http.Request, id uuid.UUID, label string,
+	fetch func(context.Context, uuid.UUID, int, int) ([]T, error),
+) {
+	doraUserID, err := h.resolveDORAUserID(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
+		return
+	}
+
+	h.mu.RLock()
+	detail, ok := h.backtests[id]
+	h.mu.RUnlock()
+	if !ok || detail.DORAUserID != doraUserID {
+		writeError(w, http.StatusNotFound, "backtest not found")
+		return
+	}
+
+	page, limit := parsePagination(r)
+	items, err := fetch(r.Context(), id, page, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get backtest %s: %v", label, err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func parsePagination(r *http.Request) (page, limit int) {
+	page = 1
+	limit = defaultPaginationLimit
+
+	if p := r.URL.Query().Get("page"); p != "" {
+		if val, err := strconv.Atoi(p); err == nil && val > 0 {
+			page = val
+		}
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if val, err := strconv.Atoi(l); err == nil && val > 0 {
+			limit = val
+			if limit > maxPaginationLimit {
+				limit = maxPaginationLimit
+			}
+		}
+	}
+	return page, limit
 }
 
 func (h *Handler) getBacktest(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
@@ -579,7 +800,41 @@ func (h *Handler) getBacktest(w http.ResponseWriter, r *http.Request, id uuid.UU
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
-	writeJSON(w, http.StatusOK, detail)
+
+	if detail.Status == "completed" && detail.Result == nil && h.backtestStore != nil {
+		result, err := h.backtestStore.LoadBacktestResult(r.Context(), id)
+		if err != nil {
+			slog.Error("failed to load backtest result", "err", err, "backtest_id", id)
+		} else {
+			h.mu.Lock()
+			detail.Result = result
+			h.mu.Unlock()
+		}
+	}
+
+	writeJSON(w, http.StatusOK, h.summaryResult(r.Context(), detail))
+}
+
+func (h *Handler) getBacktestMetadata(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
+	doraUserID, err := h.resolveDORAUserID(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
+		return
+	}
+
+	h.mu.RLock()
+	detail, ok := h.backtests[id]
+	h.mu.RUnlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "backtest not found")
+		return
+	}
+	if detail.DORAUserID != doraUserID {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, h.toSummary(r.Context(), detail))
 }
 
 func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
@@ -623,7 +878,7 @@ func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid
 		}
 	}
 
-	h.getBacktest(w, r, id)
+	h.getBacktestMetadata(w, r, id)
 }
 
 func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
@@ -1371,18 +1626,6 @@ func decodeJSON(r *http.Request, dst any) error {
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil
-}
-
-func parseIDFromPath(path, prefix string) (uuid.UUID, bool) {
-	rest := strings.TrimPrefix(path, prefix)
-	if rest == path || rest == "" || strings.Contains(rest, "/") {
-		return uuid.Nil, false
-	}
-	id, err := uuid.Parse(rest)
-	if err != nil {
-		return uuid.Nil, false
-	}
-	return id, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
