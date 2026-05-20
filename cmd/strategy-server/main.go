@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,18 +17,22 @@ import (
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/jackc/pgx/v5/pgxpool"
+	flag "github.com/spf13/pflag"
 )
 
 //nolint:funlen // main function with flag setup and orchestration
 func main() {
-	addr := flag.String("addr", envOr("ADDR", ":8081"), "HTTP address to listen on")
-	dbURL := flag.String("db-url", envOr("DATABASE_URL", ""), "Postgres connection string (required)")
-	wsURL := flag.String("ws-url", envOr("WS_URL", "wss://dev.dora.co"), "WebSocket base URL")
-	apiKey := flag.String("api-key", envOr("WS_API_KEY", envOr("API_KEY", "")), "API key for the DORA WebSocket price feed")
-	doraBaseURL := flag.String("dora-base-url", envOr("DORA_BASE_URL", ""), "DORA HTTP base URL")
-	fredAPIKey := flag.String("fred-api-key", envOr("FRED_API_KEY", ""), "FRED API key")
-	reconnectDelay := flag.Duration("reconnect-delay", 5*time.Second, "Delay between reconnect attempts") //nolint:mnd
+	addr := flag.StringP("addr", "a", envOr("ADDR", ":8081"), "HTTP address to listen on")
+	dbURL := flag.StringP("db-url", "d", envOr("DATABASE_URL", ""), "Postgres connection string (required)")
+	wsURL := flag.StringP("ws-url", "s", envOr("WS_URL", "wss://dev.dora.co"), "WebSocket base URL")
+	apiKey := flag.StringP("api-key", "k", envOr("WS_API_KEY", envOr("API_KEY", "")), "API key for the DORA WebSocket price feed")
+	doraBaseURL := flag.StringP("dora-base-url", "b", envOr("DORA_BASE_URL", ""), "DORA HTTP base URL")
+	fredAPIKey := flag.StringP("fred-api-key", "f", envOr("FRED_API_KEY", ""), "FRED API key")
+	reconnectDelay := flag.DurationP("reconnect-delay", "r", 5*time.Second, "Delay between reconnect attempts") //nolint:mnd
+	logLevel := flag.StringP("log-level", "l", "", "Log level (DEBUG, INFO, WARN, ERROR); overrides LOG_LEVEL env")
 	flag.Parse()
+
+	setLogLevel(*logLevel)
 	if *dbURL == "" {
 		fmt.Fprintln(os.Stderr, "error: -db-url (or DATABASE_URL) is required")
 		flag.Usage()
@@ -134,6 +137,24 @@ func main() {
 		}
 	}
 	slog.Info("strategy server stopped")
+}
+
+func setLogLevel(flagValue string) {
+	raw := flagValue
+	if raw == "" {
+		raw = os.Getenv("LOG_LEVEL")
+	}
+	if raw == "" {
+		return
+	}
+
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(raw)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: invalid log level %q, using default\n", raw)
+		return
+	}
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
 
 func envOr(key, fallback string) string {

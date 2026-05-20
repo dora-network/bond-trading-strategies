@@ -34,7 +34,7 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtest
 	return results, err
 }
 
-func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message) error {
+func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
 	// TODO: implement the strategy runner
 	return errors.New("not implemented")
 }

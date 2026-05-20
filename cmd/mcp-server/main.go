@@ -6,13 +6,11 @@
 //
 // Flags:
 //
-//	-addr          TCP address to listen on (default ":8080")
-//	-base-url           Externally-reachable base URL (default "http://localhost:8080")
-//	-strategy-base-url  Base URL for the strategy REST server (or STRATEGY_BASE_URL)
-//	-fred-api-key       FRED API key; can also be set via the FRED_API_KEY env var
-//
-// The DORA_API_KEY environment variable is required. The server will not start
-// without it and terminates immediately with an error if it is absent.
+//	-a, --addr                TCP address to listen on (default ":8080")
+//	-b, --base-url             Externally-reachable base URL (default "http://localhost:8080")
+//	-s, --strategy-base-url    Base URL for the strategy REST server (or STRATEGY_BASE_URL)
+//	-f, --fred-api-key         FRED API key (or set FRED_API_KEY env var)
+//	-k, --dora-api-key         DORA API key (or set DORA_API_KEY env var)
 //
 // The FRED API key is required only for FRED tools (fred_fetch_*). Strategy
 // tools proxy requests to strategy-server over HTTP. For run-oriented
@@ -21,9 +19,7 @@
 //
 // Example — local dev:
 //
-//	export DORA_API_KEY=your_dora_key
-//	export FRED_API_KEY=your_fred_key
-//	mcp-server -addr :8080 -base-url http://localhost:8080 -strategy-base-url http://localhost:8081
+//	mcp-server -a :8080 -b http://localhost:8080 -s http://localhost:8081 -f $FRED_API_KEY -k $DORA_API_KEY
 //
 // The server exposes two HTTP endpoints:
 //
@@ -32,47 +28,50 @@
 package main
 
 import (
-	"flag"
+	"fmt"
 	"log"
 	"os"
 
 	mcpserver "github.com/dora-network/bond-trading-strategies/mcp"
+	flag "github.com/spf13/pflag"
 )
 
 func main() {
-	addr := flag.String("addr", ":8080", "TCP address to listen on")
-	baseURL := flag.String("base-url", "http://localhost:8080", "Externally-reachable base URL")
-	strategyBaseURL := flag.String("strategy-base-url", "", "Base URL for strategy-server")
-	fredKey := flag.String("fred-api-key", "", "FRED API key (or set FRED_API_KEY env var)")
+	addr := flag.StringP("addr", "a", envOr("ADDR", ":8080"), "TCP address to listen on")
+	baseURL := flag.StringP("base-url", "b", envOr("MCP_BASE_URL", "http://localhost:8080"), "Externally-reachable base URL")
+	strategyBaseURL := flag.StringP("strategy-base-url", "s", envOr("STRATEGY_BASE_URL", ""), "Base URL for strategy-server")
+	fredKey := flag.StringP("fred-api-key", "f", envOr("FRED_API_KEY", ""), "FRED API key")
+	doraAPIKey := flag.StringP("dora-api-key", "k", envOr("DORA_API_KEY", ""), "DORA API key")
 	flag.Parse()
 
-	// DORA_API_KEY is mandatory — strategy-server requires it on every request.
-	doraAPIKey := os.Getenv("DORA_API_KEY")
-	if doraAPIKey == "" {
-		log.Fatalf("DORA_API_KEY environment variable is required but not set")
-	}
-
-	// Environment variable takes precedence over flag when flag is empty.
-	if *strategyBaseURL == "" {
-		*strategyBaseURL = os.Getenv("STRATEGY_BASE_URL")
-	}
-	if *fredKey == "" {
-		*fredKey = os.Getenv("FRED_API_KEY")
+	if *doraAPIKey == "" {
+		fmt.Fprintln(os.Stderr, "error: --dora-api-key (or DORA_API_KEY) is required")
+		flag.Usage()
+		os.Exit(1)
 	}
 
 	if *strategyBaseURL == "" {
-		log.Fatalf("strategy server base URL is required (set -strategy-base-url or STRATEGY_BASE_URL)")
+		fmt.Fprintln(os.Stderr, "error: --strategy-base-url (or STRATEGY_BASE_URL) is required")
+		flag.Usage()
+		os.Exit(1)
 	}
 	if *fredKey == "" {
 		log.Printf(
 			"warning: no FRED API key provided. FRED tools will return errors when called.\n" +
-				"  Set -fred-api-key flag or FRED_API_KEY environment variable.")
+				"  Set --fred-api-key flag or FRED_API_KEY environment variable.")
 	}
 
-	srv := mcpserver.NewSSEServer(*fredKey, doraAPIKey, *strategyBaseURL, *baseURL)
+	srv := mcpserver.NewSSEServer(*fredKey, *doraAPIKey, *strategyBaseURL, *baseURL)
 
 	log.Printf("bond-trading-strategies MCP server listening on %s (base URL: %s), strategy-server URL: %s", *addr, *baseURL, *strategyBaseURL)
 	if err := srv.Start(*addr); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

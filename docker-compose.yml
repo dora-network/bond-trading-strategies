@@ -14,17 +14,17 @@ services:
     entrypoint:
       - "/app/strategy-server"
     command:
-      - "-addr"
+      - "--addr"
       - ":8081"
-      - "-db-url"
+      - "--db-url"
       - "${DATABASE_URL}"
-      - "-ws-url"
+      - "--ws-url"
       - "${WS_URL:-wss://dev.dora.co}"
-      - "-api-key"
+      - "--api-key"
       - "${DORA_API_KEY:-}"
-      - "-dora-base-url"
+      - "--dora-base-url"
       - "${DORA_BASE_URL:-https://dev.dora.co}"
-      - "-fred-api-key"
+      - "--fred-api-key"
       - "${FRED_API_KEY:-}"
     restart: unless-stopped
 
@@ -46,14 +46,16 @@ services:
     entrypoint:
       - "/app/mcp-server"
     command:
-      - "-addr"
+      - "--addr"
       - ":8080"
-      - "-base-url"
+      - "--base-url"
       - "${BASE_URL:-http://localhost:8080}"
-      - "-strategy-base-url"
+      - "--strategy-base-url"
       - "${STRATEGY_BASE_URL:-http://strategy-server:8081}"
-      - "-fred-api-key"
+      - "--fred-api-key"
       - "${FRED_API_KEY:-}"
+      - "--dora-api-key"
+      - "${DORA_API_KEY:-}"
     restart: unless-stopped
 
 secrets:

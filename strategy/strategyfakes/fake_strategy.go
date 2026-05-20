@@ -8,6 +8,7 @@ import (
 
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/google/uuid"
 )
 
 type FakeStrategy struct {
@@ -26,11 +27,12 @@ type FakeStrategy struct {
 		result1 types.BacktestResult
 		result2 error
 	}
-	RunStub        func(context.Context, <-chan strategy.Message) error
+	RunStub        func(context.Context, <-chan strategy.Message, uuid.UUID) error
 	runMutex       sync.RWMutex
 	runArgsForCall []struct {
 		arg1 context.Context
 		arg2 <-chan strategy.Message
+		arg3 uuid.UUID
 	}
 	runReturns struct {
 		result1 error
@@ -108,19 +110,20 @@ func (fake *FakeStrategy) BacktestReturnsOnCall(i int, result1 types.BacktestRes
 	}{result1, result2}
 }
 
-func (fake *FakeStrategy) Run(arg1 context.Context, arg2 <-chan strategy.Message) error {
+func (fake *FakeStrategy) Run(arg1 context.Context, arg2 <-chan strategy.Message, arg3 uuid.UUID) error {
 	fake.runMutex.Lock()
 	ret, specificReturn := fake.runReturnsOnCall[len(fake.runArgsForCall)]
 	fake.runArgsForCall = append(fake.runArgsForCall, struct {
 		arg1 context.Context
 		arg2 <-chan strategy.Message
-	}{arg1, arg2})
+		arg3 uuid.UUID
+	}{arg1, arg2, arg3})
 	stub := fake.RunStub
 	fakeReturns := fake.runReturns
-	fake.recordInvocation("Run", []interface{}{arg1, arg2})
+	fake.recordInvocation("Run", []interface{}{arg1, arg2, arg3})
 	fake.runMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2)
+		return stub(arg1, arg2, arg3)
 	}
 	if specificReturn {
 		return ret.result1
@@ -134,17 +137,17 @@ func (fake *FakeStrategy) RunCallCount() int {
 	return len(fake.runArgsForCall)
 }
 
-func (fake *FakeStrategy) RunCalls(stub func(context.Context, <-chan strategy.Message) error) {
+func (fake *FakeStrategy) RunCalls(stub func(context.Context, <-chan strategy.Message, uuid.UUID) error) {
 	fake.runMutex.Lock()
 	defer fake.runMutex.Unlock()
 	fake.RunStub = stub
 }
 
-func (fake *FakeStrategy) RunArgsForCall(i int) (context.Context, <-chan strategy.Message) {
+func (fake *FakeStrategy) RunArgsForCall(i int) (context.Context, <-chan strategy.Message, uuid.UUID) {
 	fake.runMutex.RLock()
 	defer fake.runMutex.RUnlock()
 	argsForCall := fake.runArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
 }
 
 func (fake *FakeStrategy) RunReturns(result1 error) {

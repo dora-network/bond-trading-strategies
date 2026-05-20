@@ -35,7 +35,7 @@ start-strategy-server:
 	go run ./cmd/strategy-server -addr "$(STRATEGY_ADDR)" -db-url "$(DATABASE_URL)" -dora-base-url "$(DORA_BASE_URL)" -fred-api-key "$(FRED_API_KEY)"
 
 start-mcp-server:
-	go run ./cmd/mcp-server -addr "$(MCP_ADDR)" -base-url "$(MCP_BASE_URL)" -strategy-base-url "$(STRATEGY_BASE_URL)" -fred-api-key "$(FRED_API_KEY)"
+	go run ./cmd/mcp-server -a "$(MCP_ADDR)" -b "$(MCP_BASE_URL)" -s "$(STRATEGY_BASE_URL)" -f "$(FRED_API_KEY)" -k "$(DORA_API_KEY)"
 
 start-price-daemon:
 	go run ./cmd/price-daemon -ws-url "$(WS_URL)" -db-url "$(DATABASE_URL)" -api-key "$(DORA_API_KEY)" -asset-id "$(ASSET_ID)" -order-books "$(ORDER_BOOK_IDS)" -since "$(SINCE)" -reconnect-delay "$(RECONNECT_DELAY)" -http-addr "$(PRICE_DAEMON_HTTP_ADDR)"

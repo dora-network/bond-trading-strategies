@@ -153,7 +153,7 @@ func TestService_RunStrategy(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	myStrategy := &strategyfakes.FakeStrategy{
-		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message) error {
+		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
 			mu.Lock()
 			isRunning = true
 			mu.Unlock()
@@ -199,7 +199,7 @@ func TestService_RunStrategyIgnoresRequestContextCancellation(t *testing.T) {
 	started := make(chan struct{})
 	stopped := make(chan struct{})
 	myStrategy := &strategyfakes.FakeStrategy{
-		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message) error {
+		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
 			close(started)
 			defer close(stopped)
 			for {
@@ -238,7 +238,7 @@ func TestService_StopStrategy(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	myStrategy := &strategyfakes.FakeStrategy{
-		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message) error {
+		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
 			mu.Lock()
 			isRunning = true
 			mu.Unlock()
@@ -303,7 +303,7 @@ func TestService_PauseStrategy(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	myStrategy := &strategyfakes.FakeStrategy{
-		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message) error {
+		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
 			mu.Lock()
 			isRunning = true
 			mu.Unlock()
@@ -364,7 +364,7 @@ func TestService_ResumeStrategy(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	myStrategy := &strategyfakes.FakeStrategy{
-		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message) error {
+		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
 			mu.Lock()
 			isRunning = true
 			mu.Unlock()

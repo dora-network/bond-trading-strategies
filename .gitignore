@@ -14,7 +14,6 @@ fred.http
 .pi-lens
 *.http
 price-daemon
-strategy-server
 
 .gsd-id
 .mcp.json

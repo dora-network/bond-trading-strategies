@@ -112,6 +112,7 @@ type Strategy struct {
 	// initializeBalances (so restarts correctly see the pre-existing position)
 	// and kept in sync by executeDecision and closePosition. Protected by mu.
 	openSignal types.Signal
+	runID      uuid.UUID
 }
 
 // New creates a new Strategy with the given Config and optional functional options.
@@ -166,8 +167,9 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtest
 	return bt.Run(ctx, obs)
 }
 
-func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message) error {
+func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
 	s.mu.Lock()
+	s.runID = runID
 
 	if s.isRunning {
 		s.mu.Unlock()
@@ -435,6 +437,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 	s.mu.RUnlock()
 
 	if !useTracked {
+		s.log.Debug("using DORA API to get current position", "runID", s.runID, "assetID", assetID)
 		var err error
 		position, err = s.currentPosition(ctx, assetID)
 		if err != nil {
@@ -463,6 +466,14 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		return false, fmt.Errorf("compute inverse leverage: %w", err)
 	}
 
+	s.log.Info("creating market order",
+		"runID", s.runID,
+		"assetID", assetID,
+		"side", side,
+		"quantity", quantity,
+		"price", price,
+		"inverseLeverage", inverseLeverage,
+	)
 	if err := s.marketAPIClient.CreateMarketOrder(ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage); err != nil {
 		return false, err
 	}
@@ -517,6 +528,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 	// be generated immediately on the first price tick.  This is best-effort
 	// — if the historical price store or FRED client are unavailable the
 	// strategy will still start with an empty window (the existing behaviour).
+	s.log.Info("prefilling window with historical data", "runID", s.runID)
 	if err := s.prefillWindow(ctx, assetID); err != nil {
 		s.mu.Lock()
 		s.errs = append(s.errs, fmt.Errorf("prefill window (non-fatal): %w", err))
@@ -527,6 +539,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 	// them in-memory for subsequent trade execution, avoiding repeated API
 	// calls.  This is best-effort — if the API is unavailable the strategy
 	// will look up positions on each trade via the DORA API.
+	s.log.Info("initialising balances", "runID", s.runID, "assetID", assetID)
 	s.initializeBalances(ctx, assetID)
 
 	ticker := time.NewTicker(time.Second)
@@ -548,6 +561,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 			s.mu.Unlock()
 		case pxs := <-prices:
 			for _, px := range pxs {
+				s.log.Debug("processing price update", "runID", s.runID, "assetID", px.AssetID, "time", px.Time)
 				// if the price update is for a different asset, ignore it
 				if px.AssetID != assetID {
 					continue
@@ -556,11 +570,17 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 					// no YTM available, ignore price updates
 					continue
 				}
-
 				// getBenchmarkYield may make a FRED API call and acquire a
 				// write lock to update the cache, so we call it without
 				// holding s.mu.
 				benchmarkYield := s.getBenchmarkYield(ctx, px.Time)
+				s.log.Debug("processing price update",
+					"runID", s.runID,
+					"assetID", px.AssetID,
+					"time", px.Time,
+					"price", px.Price,
+					"ytm", *px.YTM,
+					"benchmarkYield", benchmarkYield)
 
 				s.mu.Lock()
 				obs := types.YieldObservation{
@@ -577,13 +597,22 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 				// we must not evaluate exit conditions on that tick.
 				windowReadyBeforeUpdate := s.window.Ready()
 				decision, err := s.Update(obs)
+				s.log.Debug("decision generated",
+					"runID", s.runID,
+					"assetID", px.AssetID,
+					"time", px.Time,
+					"zScore", decision.ZScore,
+					"signal", decision.Signal,
+				)
 				if err != nil {
+					s.log.Error("failed to update strategy", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "err", err)
 					s.mu.Unlock()
 					continue
 				}
 
 				if s.paused {
 					// strategy is paused, ignore decision
+					s.log.Debug("strategy is paused, ignoring decision", "runID", s.runID, "assetID", px.AssetID, "time", px.Time)
 					s.mu.Unlock()
 					continue
 				}
@@ -595,8 +624,10 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 					// rolling window was already full before this tick so that
 					// the z-score in decision is statistically meaningful.
 					if windowReadyBeforeUpdate {
-						if shouldExit, _ := s.ShouldExit(currentOpenSignal, decision.ZScore); shouldExit {
+						if shouldExit, reason := s.ShouldExit(currentOpenSignal, decision.ZScore); shouldExit {
+							s.log.Info("exiting position", "reason", reason, "runID", s.runID)
 							if err := s.closePosition(ctx, px.AssetID); err != nil {
+								s.log.Error("failed to close position", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "err", err)
 								s.mu.Lock()
 								s.errs = append(s.errs, err)
 								s.mu.Unlock()
@@ -613,7 +644,9 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 					continue
 				}
 
+				s.log.Info("opening position", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "signal", decision.Signal)
 				if _, err := s.executeDecision(ctx, decision, px.AssetID); err != nil {
+					s.log.Error("failed to execute decision", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "err", err)
 					s.mu.Lock()
 					s.errs = append(s.errs, err)
 					s.mu.Unlock()

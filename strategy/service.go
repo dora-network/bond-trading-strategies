@@ -143,7 +143,7 @@ func (s *service) RunStrategyWithID(ctx context.Context, id uuid.UUID, strategy 
 
 	go func() {
 		defer cancel()
-		if err := strategy.Run(runCtx, ch); err != nil && !errors.Is(err, context.Canceled) {
+		if err := strategy.Run(runCtx, ch, id); err != nil && !errors.Is(err, context.Canceled) {
 			slog.ErrorContext(runCtx, "strategy exited with error", "err", err, "run_id", id)
 		}
 		s.mu.Lock()

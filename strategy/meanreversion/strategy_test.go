@@ -2,6 +2,7 @@ package meanreversion_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -499,7 +500,9 @@ func TestRunLoop_NoNewEntryWhenPositionOpen(t *testing.T) {
 	cfg.OrderBookID = orderBookID
 	cfg.InitialBalance = decimal.MustNew(10, 0)
 
-	s := meanreversion.New(cfg, nil)
+	log := slog.Default()
+
+	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
 	client := &meanreversionfakes.FakeMarketApiClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
@@ -577,7 +580,9 @@ func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
 	cfg.OrderBookID = orderBookID
 	cfg.InitialBalance = decimal.MustNew(10, 0)
 
-	s := meanreversion.New(cfg, nil)
+	log := slog.Default()
+
+	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
 	client := &meanreversionfakes.FakeMarketApiClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
