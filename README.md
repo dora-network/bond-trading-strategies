@@ -27,9 +27,9 @@ connectivity.
 | ------------------------- | ------------------------ | ----------------------- | ---------------------------------------------------------- |
 | `-ws-url`                 | `WS_URL`                 | `wss://staging.dora.co` | WebSocket base URL                                         |
 | `-db-url`                 | `DATABASE_URL`           | —                       | Postgres connection string **(required)**                  |
-| `-api-key`                | `API_KEY`                | —                       | DORA API key                                               |
+| `-api-key`                | `DORA_API_KEY`           | —                       | DORA API key for WebSocket and REST API                    |
+| `-dora-base-url`          | `DORA_BASE_URL`          | —                       | DORA REST API base URL for order book discovery            |
 | `-asset-id`               | `ASSET_ID`               | —                       | Filter to a single asset UUID                              |
-| `-order-books`            | `ORDER_BOOK_IDS`         | —                       | Comma-separated order book IDs for candle streaming        |
 | `-since`                  | —                        | —                       | RFC3339 lower bound for candle history backfill            |
 | `-reconnect-delay`        | —                        | `5s`                    | Delay between WebSocket reconnect attempts                 |
 | `-http-addr`              | `HTTP_ADDR`              | `:8080`                 | HTTP listen address for the health server                  |

@@ -38,7 +38,7 @@ start-mcp-server:
 	go run ./cmd/mcp-server -a "$(MCP_ADDR)" -b "$(MCP_BASE_URL)" -s "$(STRATEGY_BASE_URL)" -f "$(FRED_API_KEY)" -k "$(DORA_API_KEY)"
 
 start-price-daemon:
-	go run ./cmd/price-daemon -ws-url "$(WS_URL)" -db-url "$(DATABASE_URL)" -api-key "$(DORA_API_KEY)" -asset-id "$(ASSET_ID)" -order-books "$(ORDER_BOOK_IDS)" -since "$(SINCE)" -reconnect-delay "$(RECONNECT_DELAY)" -http-addr "$(PRICE_DAEMON_HTTP_ADDR)"
+	go run ./cmd/price-daemon -w "$(WS_URL)" -d "$(DATABASE_URL)" -k "$(DORA_API_KEY)" -b "$(DORA_BASE_URL)" -a "$(ASSET_ID)" -s "$(SINCE)" -r "$(RECONNECT_DELAY)" -A "$(PRICE_DAEMON_HTTP_ADDR)"
 
 .PHONY: build
 build:

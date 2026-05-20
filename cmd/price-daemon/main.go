@@ -1,5 +1,7 @@
 // Command price-daemon connects to the DORA WebSocket price stream and saves
-// every price update to the price_history Postgres table.
+// every price update to the price_history Postgres table. It also discovers
+// active order books via the DORA REST API and subscribes to candle streams
+// for each one.
 //
 // Usage:
 //
@@ -7,60 +9,69 @@
 //
 // Flags:
 //
-//	-ws-url           WebSocket base URL (default "wss://staging.dora.co", env WS_URL)
-//	-db-url           Postgres connection string, required (env DATABASE_URL)
-//	-api-key          API key sent as query param (env API_KEY)
-//	-asset-id         Filter stream to a single asset UUID (env ASSET_ID)
-//	-order-books      Comma-separated list of order book IDs for candles stream (env ORDER_BOOK_IDS)
-//	-since            Only stream candles after this RFC3339 timestamp
-//	-reconnect-delay  Delay between reconnect attempts (default 5s)
+//	-w, --ws-url                  WebSocket base URL (env WS_URL)
+//	-d, --db-url                  Postgres connection string, required (env DATABASE_URL)
+//	-k, --dora-api-key            DORA API key (env DORA_API_KEY)
+//	-b, --dora-base-url           DORA REST API base URL for order book discovery (env DORA_BASE_URL)
+//	-a, --asset-id                Filter stream to a single asset UUID (env ASSET_ID)
+//	-s, --since                   Only stream candles after this RFC3339 timestamp
+//	-r, --reconnect-delay         Delay between reconnect attempts (default 5s)
+//	-A, --http-addr               HTTP listen address for health server (env HTTP_ADDR)
+//	-z, --health-stale-after      Duration after which stream/write activity is unhealthy (env HEALTH_STALE_AFTER)
+//	-g, --health-startup-grace   Startup grace period before health requires activity (env HEALTH_STARTUP_GRACE)
+//	-p, --health-db-ping         Enable database ping in health endpoint (env HEALTH_DB_PING)
+//	-t, --health-db-ping-timeout  Database ping timeout for health endpoint (env HEALTH_DB_PING_TIMEOUT)
 //
 // Example:
 //
-//	export DATABASE_URL=postgres://user:pass@localhost:5432/dora
-//	export API_KEY=mykey
-//	price-daemon -ws-url wss://prod.dora.co
+//	price-daemon -d $DATABASE_URL -k $DORA_API_KEY -b https://dev.dora.co -w wss://dev.dora.co
 package main
 
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/candles"
+	"github.com/dora-network/bond-trading-strategies/dora"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/jackc/pgx/v5/pgxpool"
+	flag "github.com/spf13/pflag"
 )
 
 //nolint:funlen // main function with flag setup and orchestration
 func main() {
-	wsURL := flag.String("ws-url", envOr("WS_URL", "wss://staging.dora.co"), "WebSocket base URL")
-	dbURL := flag.String("db-url", envOr("DATABASE_URL", ""), "Postgres connection string (required)")
-	apiKey := flag.String("api-key", envOr("API_KEY", ""), "API key")
-	assetID := flag.String("asset-id", envOr("ASSET_ID", ""), "Filter to single asset UUID")
-	orderBooksStr := flag.String("order-books", envOr("ORDER_BOOK_IDS", ""), "Comma-separated list of order book IDs for candles")
-	sinceStr := flag.String("since", "", "Only stream candles after this RFC3339 timestamp")
-	reconnectDelay := flag.Duration("reconnect-delay", 5*time.Second, "Delay between reconnect attempts") //nolint:mnd
-	httpAddr := flag.String("http-addr", envOr("HTTP_ADDR", ":8080"), "HTTP listen address for health server")
-	healthStaleAfter := flag.Duration("health-stale-after", envOrDuration("HEALTH_STALE_AFTER", time.Minute), "Duration after which stream/write activity is unhealthy")       //nolint:lll
-	healthStartupGrace := flag.Duration("health-startup-grace", envOrDuration("HEALTH_STARTUP_GRACE", time.Second*10), "Startup grace period before health requires activity") //nolint:lll,mnd
-	healthDBPing := flag.Bool("health-db-ping", envOrBool("HEALTH_DB_PING", true), "Enable database ping in health endpoint")
-	healthDBPingTimeout := flag.Duration("health-db-ping-timeout", envOrDuration("HEALTH_DB_PING_TIMEOUT", 2*time.Second), "Database ping timeout for health endpoint") //nolint:lll,mnd
+	wsURL := flag.StringP("ws-url", "w", envOr("WS_URL", "wss://staging.dora.co"), "WebSocket base URL")
+	dbURL := flag.StringP("db-url", "d", envOr("DATABASE_URL", ""), "Postgres connection string (required)")
+	apiKey := flag.StringP("dora-api-key", "k", envOr("DORA_API_KEY", ""), "DORA API key")
+	doraBaseURL := flag.StringP("dora-base-url", "b", envOr("DORA_BASE_URL", ""), "DORA REST API base URL for order book discovery")
+	assetID := flag.StringP("asset-id", "a", envOr("ASSET_ID", ""), "Filter to single asset UUID")
+	sinceStr := flag.StringP("since", "s", "", "Only stream candles after this RFC3339 timestamp")
+	reconnectDelay := flag.DurationP("reconnect-delay", "r", 5*time.Second, "Delay between reconnect attempts") //nolint:mnd
+	httpAddr := flag.StringP("http-addr", "A", envOr("HTTP_ADDR", ":8080"), "HTTP listen address for health server")
+	healthStaleAfter := flag.DurationP("health-stale-after", "z", envOrDuration("HEALTH_STALE_AFTER", time.Minute), "Duration after which stream/write activity is unhealthy")       //nolint:lll
+	healthStartupGrace := flag.DurationP("health-startup-grace", "g", envOrDuration("HEALTH_STARTUP_GRACE", time.Second*10), "Startup grace period before health requires activity") //nolint:lll,mnd
+	healthDBPing := flag.BoolP("health-db-ping", "p", envOrBool("HEALTH_DB_PING", true), "Enable database ping in health endpoint")
+	healthDBPingTimeout := flag.DurationP("health-db-ping-timeout", "t", envOrDuration("HEALTH_DB_PING_TIMEOUT", 2*time.Second), "Database ping timeout for health endpoint") //nolint:lll,mnd
 	flag.Parse()
 
 	if *dbURL == "" {
-		fmt.Fprintln(os.Stderr, "error: -db-url (or DATABASE_URL) is required")
+		fmt.Fprintln(os.Stderr, "error: --db-url (or DATABASE_URL) is required")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	if *apiKey == "" {
+		fmt.Fprintln(os.Stderr, "error: --dora-api-key (or DORA_API_KEY) is required")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -70,15 +81,23 @@ func main() {
 		var err error
 		since, err = time.Parse(time.RFC3339, *sinceStr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: invalid -since value %q: %v\n", *sinceStr, err)
+			fmt.Fprintf(os.Stderr, "error: invalid --since value %q: %v\n", *sinceStr, err)
 			os.Exit(1)
 		}
 	}
 
-	var orderBookIDs []string
-	if *orderBooksStr != "" {
-		orderBookIDs = strings.Split(*orderBooksStr, ",")
+	// Discover active order books from the DORA API.
+	doraClient := dora.NewClient(*apiKey, *doraBaseURL)
+	orderBooks, err := doraClient.ListOrderBooks(context.Background(), "OPEN")
+	if err != nil {
+		slog.Error("failed to list order books from DORA", "err", err)
+		os.Exit(1)
 	}
+	orderBookIDs := make([]string, 0, len(orderBooks))
+	for _, ob := range orderBooks {
+		orderBookIDs = append(orderBookIDs, ob.ID)
+	}
+	slog.Info("discovered order books", "count", len(orderBookIDs), "ids", orderBookIDs)
 
 	cfg := prices.Config{
 		BaseURL: *wsURL,
@@ -182,7 +201,7 @@ func main() {
 		}
 	}()
 
-	// Setup and run Candles Stream if configured
+	// Setup and run Candles Stream for all discovered order books.
 	if len(orderBookIDs) > 0 {
 		candlesCfg := candles.Config{
 			BaseURL:      *wsURL,
