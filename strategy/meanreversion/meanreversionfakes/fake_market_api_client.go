@@ -41,6 +41,22 @@ type FakeMarketApiClient struct {
 		result1 string
 		result2 error
 	}
+	CreateMarketOrderStub        func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool) error
+	createMarketOrderMutex       sync.RWMutex
+	createMarketOrderArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+		arg3 doraclient.Side
+		arg4 decimal.Decimal
+		arg5 decimal.Decimal
+		arg6 bool
+	}
+	createMarketOrderReturns struct {
+		result1 error
+	}
+	createMarketOrderReturnsOnCall map[int]struct {
+		result1 error
+	}
 	QuoteAssetIDStub        func(context.Context, string) (string, error)
 	quoteAssetIDMutex       sync.RWMutex
 	quoteAssetIDArgsForCall []struct {
@@ -67,21 +83,6 @@ type FakeMarketApiClient struct {
 	selfUserIDReturnsOnCall map[int]struct {
 		result1 string
 		result2 error
-	}
-	CreateMarketOrderStub        func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal) error
-	createMarketOrderMutex       sync.RWMutex
-	createMarketOrderArgsForCall []struct {
-		arg1 context.Context
-		arg2 string
-		arg3 doraclient.Side
-		arg4 decimal.Decimal
-		arg5 decimal.Decimal
-	}
-	createMarketOrderReturns struct {
-		result1 error
-	}
-	createMarketOrderReturnsOnCall map[int]struct {
-		result1 error
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
@@ -221,6 +222,72 @@ func (fake *FakeMarketApiClient) BaseAssetIDReturnsOnCall(i int, result1 string,
 	}{result1, result2}
 }
 
+func (fake *FakeMarketApiClient) CreateMarketOrder(arg1 context.Context, arg2 string, arg3 doraclient.Side, arg4 decimal.Decimal, arg5 decimal.Decimal, arg6 bool) error {
+	fake.createMarketOrderMutex.Lock()
+	ret, specificReturn := fake.createMarketOrderReturnsOnCall[len(fake.createMarketOrderArgsForCall)]
+	fake.createMarketOrderArgsForCall = append(fake.createMarketOrderArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+		arg3 doraclient.Side
+		arg4 decimal.Decimal
+		arg5 decimal.Decimal
+		arg6 bool
+	}{arg1, arg2, arg3, arg4, arg5, arg6})
+	stub := fake.CreateMarketOrderStub
+	fakeReturns := fake.createMarketOrderReturns
+	fake.recordInvocation("CreateMarketOrder", []interface{}{arg1, arg2, arg3, arg4, arg5, arg6})
+	fake.createMarketOrderMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4, arg5, arg6)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeMarketApiClient) CreateMarketOrderCallCount() int {
+	fake.createMarketOrderMutex.RLock()
+	defer fake.createMarketOrderMutex.RUnlock()
+	return len(fake.createMarketOrderArgsForCall)
+}
+
+func (fake *FakeMarketApiClient) CreateMarketOrderCalls(stub func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool) error) {
+	fake.createMarketOrderMutex.Lock()
+	defer fake.createMarketOrderMutex.Unlock()
+	fake.CreateMarketOrderStub = stub
+}
+
+func (fake *FakeMarketApiClient) CreateMarketOrderArgsForCall(i int) (context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool) {
+	fake.createMarketOrderMutex.RLock()
+	defer fake.createMarketOrderMutex.RUnlock()
+	argsForCall := fake.createMarketOrderArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5, argsForCall.arg6
+}
+
+func (fake *FakeMarketApiClient) CreateMarketOrderReturns(result1 error) {
+	fake.createMarketOrderMutex.Lock()
+	defer fake.createMarketOrderMutex.Unlock()
+	fake.CreateMarketOrderStub = nil
+	fake.createMarketOrderReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeMarketApiClient) CreateMarketOrderReturnsOnCall(i int, result1 error) {
+	fake.createMarketOrderMutex.Lock()
+	defer fake.createMarketOrderMutex.Unlock()
+	fake.CreateMarketOrderStub = nil
+	if fake.createMarketOrderReturnsOnCall == nil {
+		fake.createMarketOrderReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.createMarketOrderReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeMarketApiClient) QuoteAssetID(arg1 context.Context, arg2 string) (string, error) {
 	fake.quoteAssetIDMutex.Lock()
 	ret, specificReturn := fake.quoteAssetIDReturnsOnCall[len(fake.quoteAssetIDArgsForCall)]
@@ -284,71 +351,6 @@ func (fake *FakeMarketApiClient) QuoteAssetIDReturnsOnCall(i int, result1 string
 		result1 string
 		result2 error
 	}{result1, result2}
-}
-
-func (fake *FakeMarketApiClient) CreateMarketOrder(arg1 context.Context, arg2 string, arg3 doraclient.Side, arg4 decimal.Decimal, arg5 decimal.Decimal) error {
-	fake.createMarketOrderMutex.Lock()
-	ret, specificReturn := fake.createMarketOrderReturnsOnCall[len(fake.createMarketOrderArgsForCall)]
-	fake.createMarketOrderArgsForCall = append(fake.createMarketOrderArgsForCall, struct {
-		arg1 context.Context
-		arg2 string
-		arg3 doraclient.Side
-		arg4 decimal.Decimal
-		arg5 decimal.Decimal
-	}{arg1, arg2, arg3, arg4, arg5})
-	stub := fake.CreateMarketOrderStub
-	fakeReturns := fake.createMarketOrderReturns
-	fake.recordInvocation("CreateMarketOrder", []interface{}{arg1, arg2, arg3, arg4, arg5})
-	fake.createMarketOrderMutex.Unlock()
-	if stub != nil {
-		return stub(arg1, arg2, arg3, arg4, arg5)
-	}
-	if specificReturn {
-		return ret.result1
-	}
-	return fakeReturns.result1
-}
-
-func (fake *FakeMarketApiClient) CreateMarketOrderCallCount() int {
-	fake.createMarketOrderMutex.RLock()
-	defer fake.createMarketOrderMutex.RUnlock()
-	return len(fake.createMarketOrderArgsForCall)
-}
-
-func (fake *FakeMarketApiClient) CreateMarketOrderCalls(stub func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal) error) {
-	fake.createMarketOrderMutex.Lock()
-	defer fake.createMarketOrderMutex.Unlock()
-	fake.CreateMarketOrderStub = stub
-}
-
-func (fake *FakeMarketApiClient) CreateMarketOrderArgsForCall(i int) (context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal) {
-	fake.createMarketOrderMutex.RLock()
-	defer fake.createMarketOrderMutex.RUnlock()
-	argsForCall := fake.createMarketOrderArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5
-}
-
-func (fake *FakeMarketApiClient) CreateMarketOrderReturns(result1 error) {
-	fake.createMarketOrderMutex.Lock()
-	defer fake.createMarketOrderMutex.Unlock()
-	fake.CreateMarketOrderStub = nil
-	fake.createMarketOrderReturns = struct {
-		result1 error
-	}{result1}
-}
-
-func (fake *FakeMarketApiClient) CreateMarketOrderReturnsOnCall(i int, result1 error) {
-	fake.createMarketOrderMutex.Lock()
-	defer fake.createMarketOrderMutex.Unlock()
-	fake.CreateMarketOrderStub = nil
-	if fake.createMarketOrderReturnsOnCall == nil {
-		fake.createMarketOrderReturnsOnCall = make(map[int]struct {
-			result1 error
-		})
-	}
-	fake.createMarketOrderReturnsOnCall[i] = struct {
-		result1 error
-	}{result1}
 }
 
 func (fake *FakeMarketApiClient) SelfUserID(arg1 context.Context) (string, error) {

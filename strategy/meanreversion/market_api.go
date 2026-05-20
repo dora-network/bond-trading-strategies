@@ -17,7 +17,7 @@ type marketAPIClient interface {
 	QuoteAssetID(ctx context.Context, orderBookID string) (string, error)
 	SelfUserID(ctx context.Context) (string, error)
 	AssetPosition(ctx context.Context, accountID, assetID string) (decimal.Decimal, decimal.Decimal, error)
-	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal) error //nolint:lll
+	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool) error //nolint:lll
 }
 
 type doraAPIClient struct {
@@ -157,6 +157,7 @@ func (c *doraAPIClient) CreateMarketOrder(
 	side doraclient.Side,
 	quantity decimal.Decimal,
 	inverseLeverage decimal.Decimal,
+	fromGlobalPosition bool,
 ) error {
 	if c == nil || c.client == nil {
 		return errors.New("DORA client is not configured")
@@ -176,12 +177,8 @@ func (c *doraAPIClient) CreateMarketOrder(
 			Prefix: apiKeyPrefix,
 		},
 	})
-	var fromGlobalPosition bool
 	if inverseLeverage.IsZero() {
 		inverseLeverage = decimal.One
-	}
-	if inverseLeverage.Equal(decimal.One) {
-		fromGlobalPosition = true
 	}
 	request := doraclient.NewCreateOrderRequest(
 		quantity.String(),

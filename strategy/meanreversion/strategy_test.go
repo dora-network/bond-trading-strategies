@@ -645,8 +645,9 @@ func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
 
 	// Exactly one close order: a SELL to close the long for the full qty.
 	require.Equal(t, 1, client.CreateMarketOrderCallCount())
-	_, _, side, qty, invLev := client.CreateMarketOrderArgsForCall(0)
+	_, _, side, qty, invLev, fromGlobalPos := client.CreateMarketOrderArgsForCall(0)
 	_ = invLev
+	_ = fromGlobalPos
 	assert.Equal(t, doraclient.SIDE_SELL, side)
 	assert.True(t, qty.Equal(decimal.MustNew(5, 0)), "should close full position quantity")
 	assert.Equal(t, types.SignalHold, meanreversion.OpenSignal(s))

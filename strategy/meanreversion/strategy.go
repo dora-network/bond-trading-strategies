@@ -111,8 +111,9 @@ type Strategy struct {
 	// SignalHold means flat (no position). Derived from bondQty in
 	// initializeBalances (so restarts correctly see the pre-existing position)
 	// and kept in sync by executeDecision and closePosition. Protected by mu.
-	openSignal types.Signal
-	runID      uuid.UUID
+	openSignal         types.Signal
+	fromGlobalPosition bool // matches the fromGlobalPosition used in the opening order; protected by mu
+	runID              uuid.UUID
 }
 
 // New creates a new Strategy with the given Config and optional functional options.
@@ -411,7 +412,9 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		inverseLeverage = decimal.One
 	}
 
-	if err := s.marketAPIClient.CreateMarketOrder(ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage); err != nil {
+	if err := s.marketAPIClient.CreateMarketOrder(
+		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, s.fromGlobalPosition,
+	); err != nil {
 		return err
 	}
 
@@ -420,6 +423,7 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		s.bondQty = decimal.Zero
 	}
 	s.openSignal = types.SignalHold
+	s.fromGlobalPosition = false
 	s.mu.Unlock()
 	return nil
 }
@@ -466,6 +470,11 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		return false, fmt.Errorf("compute inverse leverage: %w", err)
 	}
 
+	// fromGlobalPosition rules:
+	//   - Short sells (SELL) must NEVER be fromGlobalPosition = true.
+	//   - Buys (BUY) are fromGlobalPosition = true only when inverseLeverage == 1.0.
+	fromGlobalPosition := side == doraclient.SIDE_BUY && inverseLeverage.Equal(decimal.One)
+
 	s.log.Info("creating market order",
 		"runID", s.runID,
 		"assetID", assetID,
@@ -473,8 +482,11 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		"quantity", quantity,
 		"price", price,
 		"inverseLeverage", inverseLeverage,
+		"fromGlobalPosition", fromGlobalPosition,
 	)
-	if err := s.marketAPIClient.CreateMarketOrder(ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage); err != nil {
+	if err := s.marketAPIClient.CreateMarketOrder(
+		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition,
+	); err != nil {
 		return false, err
 	}
 
@@ -506,6 +518,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		// direction since we cannot derive it from bondQty.
 		s.openSignal = decision.Signal
 	}
+	s.fromGlobalPosition = fromGlobalPosition
 	s.mu.Unlock()
 	return true, nil
 }
