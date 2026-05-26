@@ -57,6 +57,19 @@ type FakeMarketApiClient struct {
 	createMarketOrderReturnsOnCall map[int]struct {
 		result1 error
 	}
+	GetPortfolioV2Stub        func(context.Context) (*doraclient.AccountPortfolioV2, error)
+	getPortfolioV2Mutex       sync.RWMutex
+	getPortfolioV2ArgsForCall []struct {
+		arg1 context.Context
+	}
+	getPortfolioV2Returns struct {
+		result1 *doraclient.AccountPortfolioV2
+		result2 error
+	}
+	getPortfolioV2ReturnsOnCall map[int]struct {
+		result1 *doraclient.AccountPortfolioV2
+		result2 error
+	}
 	QuoteAssetIDStub        func(context.Context, string) (string, error)
 	quoteAssetIDMutex       sync.RWMutex
 	quoteAssetIDArgsForCall []struct {
@@ -286,6 +299,70 @@ func (fake *FakeMarketApiClient) CreateMarketOrderReturnsOnCall(i int, result1 e
 	fake.createMarketOrderReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
+}
+
+func (fake *FakeMarketApiClient) GetPortfolioV2(arg1 context.Context) (*doraclient.AccountPortfolioV2, error) {
+	fake.getPortfolioV2Mutex.Lock()
+	ret, specificReturn := fake.getPortfolioV2ReturnsOnCall[len(fake.getPortfolioV2ArgsForCall)]
+	fake.getPortfolioV2ArgsForCall = append(fake.getPortfolioV2ArgsForCall, struct {
+		arg1 context.Context
+	}{arg1})
+	stub := fake.GetPortfolioV2Stub
+	fakeReturns := fake.getPortfolioV2Returns
+	fake.recordInvocation("GetPortfolioV2", []interface{}{arg1})
+	fake.getPortfolioV2Mutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeMarketApiClient) GetPortfolioV2CallCount() int {
+	fake.getPortfolioV2Mutex.RLock()
+	defer fake.getPortfolioV2Mutex.RUnlock()
+	return len(fake.getPortfolioV2ArgsForCall)
+}
+
+func (fake *FakeMarketApiClient) GetPortfolioV2Calls(stub func(context.Context) (*doraclient.AccountPortfolioV2, error)) {
+	fake.getPortfolioV2Mutex.Lock()
+	defer fake.getPortfolioV2Mutex.Unlock()
+	fake.GetPortfolioV2Stub = stub
+}
+
+func (fake *FakeMarketApiClient) GetPortfolioV2ArgsForCall(i int) context.Context {
+	fake.getPortfolioV2Mutex.RLock()
+	defer fake.getPortfolioV2Mutex.RUnlock()
+	argsForCall := fake.getPortfolioV2ArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeMarketApiClient) GetPortfolioV2Returns(result1 *doraclient.AccountPortfolioV2, result2 error) {
+	fake.getPortfolioV2Mutex.Lock()
+	defer fake.getPortfolioV2Mutex.Unlock()
+	fake.GetPortfolioV2Stub = nil
+	fake.getPortfolioV2Returns = struct {
+		result1 *doraclient.AccountPortfolioV2
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeMarketApiClient) GetPortfolioV2ReturnsOnCall(i int, result1 *doraclient.AccountPortfolioV2, result2 error) {
+	fake.getPortfolioV2Mutex.Lock()
+	defer fake.getPortfolioV2Mutex.Unlock()
+	fake.GetPortfolioV2Stub = nil
+	if fake.getPortfolioV2ReturnsOnCall == nil {
+		fake.getPortfolioV2ReturnsOnCall = make(map[int]struct {
+			result1 *doraclient.AccountPortfolioV2
+			result2 error
+		})
+	}
+	fake.getPortfolioV2ReturnsOnCall[i] = struct {
+		result1 *doraclient.AccountPortfolioV2
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeMarketApiClient) QuoteAssetID(arg1 context.Context, arg2 string) (string, error) {

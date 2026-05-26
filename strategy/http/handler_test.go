@@ -1070,8 +1070,37 @@ func TestHandlerValidationErrors(t *testing.T) {
 			"initial_balance": 0,
 		},
 	})
+	// Runs allow initial_balance=0 because it's populated from DORA positions.
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Backtests must still reject initial_balance <= 0.
+	backtestBody := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"initial_balance": 0,
+		},
+		"start": time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   time.Now().Format(time.RFC3339),
+	}
+	backtestPayload, err := json.Marshal(backtestBody)
+	require.NoError(t, err)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/backtests", bytes.NewReader(backtestPayload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "config.initial_balance must be greater than 0")
+	assert.Contains(t, rec.Body.String(), "config.initial_balance must be greater than 0 for backtests")
+
+	// Both runs and backtests reject negative initial_balance.
+	rec = performJSONRequest(t, handler, "/v1/runs", map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"initial_balance": -1,
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "config.initial_balance must be non-negative")
 }
 
 func performJSONRequest(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {

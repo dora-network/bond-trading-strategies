@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,7 +21,7 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
-//nolint:funlen // main function with flag setup and orchestration
+//nolint:funlen, mnd // main function with flag setup and orchestration
 func main() {
 	addr := flag.StringP("addr", "a", envOr("ADDR", ":8081"), "HTTP address to listen on")
 	dbURL := flag.StringP("db-url", "d", envOr("DATABASE_URL", ""), "Postgres connection string (required)")
@@ -28,6 +29,8 @@ func main() {
 	apiKey := flag.StringP("api-key", "k", envOr("WS_API_KEY", envOr("API_KEY", "")), "API key for the DORA WebSocket price feed")
 	doraBaseURL := flag.StringP("dora-base-url", "b", envOr("DORA_BASE_URL", ""), "DORA HTTP base URL")
 	fredAPIKey := flag.StringP("fred-api-key", "f", envOr("FRED_API_KEY", ""), "FRED API key")
+	encryptionKeyHex := flag.StringP("encryption-key", "e", envOr("ENCRYPTION_KEY", ""),
+		"32-byte AES-256 key (hex) for encrypting user API keys at rest")
 	reconnectDelay := flag.DurationP("reconnect-delay", "r", 5*time.Second, "Delay between reconnect attempts") //nolint:mnd
 	logLevel := flag.StringP("log-level", "l", "", "Log level (DEBUG, INFO, WARN, ERROR); overrides LOG_LEVEL env")
 	flag.Parse()
@@ -37,6 +40,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: -db-url (or DATABASE_URL) is required")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	var encryptionKey []byte
+	if *encryptionKeyHex != "" {
+		var err2 error
+		encryptionKey, err2 = hex.DecodeString(*encryptionKeyHex)
+		if err2 != nil {
+			fmt.Fprintln(os.Stderr, "error: --encryption-key must be a valid hex string")
+			os.Exit(1)
+		}
+		if len(encryptionKey) != 32 {
+			fmt.Fprintln(os.Stderr, "error: --encryption-key must decode to exactly 32 bytes (64 hex chars)")
+			os.Exit(1)
+		}
 	}
 	if *doraBaseURL != "" {
 		if err := os.Setenv("DORA_BASE_URL", *doraBaseURL); err != nil {
@@ -84,6 +101,7 @@ func main() {
 		strategyhttp.WithBacktestStore(strategyhttp.NewPGBacktestStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithLogger(log),
+		strategyhttp.WithEncryptionKey(encryptionKey),
 	)
 	restorer, ok := handlerImpl.(interface{ RestoreRuns(context.Context) error })
 	if !ok {

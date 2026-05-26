@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	github.com/coder/websocket v1.8.14
-	github.com/dora-network/dora-client-go v0.0.0-20260505155214-10a6bbdc7da3
+	github.com/dora-network/dora-client-go v0.0.0-20260521110737-366a34d6d1c7
 	github.com/google/uuid v1.6.0
 	github.com/govalues/decimal v0.1.36
 	github.com/jackc/pgx/v5 v5.9.2

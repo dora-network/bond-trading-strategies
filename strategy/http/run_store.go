@@ -22,8 +22,9 @@ func NewPGRunStore(pool *pgxpool.Pool) *PGRunStore {
 
 func (s *PGRunStore) LoadRuns(ctx context.Context) ([]*RunDetail, error) {
 	const q = `
-		SELECT id, dora_user_id, strategy_type, status, config, created_at, updated_at, stopped_at, error
+		SELECT id, dora_user_id, strategy_type, status, config, created_at, updated_at, stopped_at, error, encrypted_api_key
 		FROM strategy_runs
+		WHERE status != 'stopped'
 	`
 
 	rows, err := s.pool.Query(ctx, q)
@@ -45,6 +46,7 @@ func (s *PGRunStore) LoadRuns(ctx context.Context) ([]*RunDetail, error) {
 			&detail.UpdatedAt,
 			&detail.StoppedAt,
 			&detail.Error,
+			&detail.EncryptedAPIKey,
 		); err != nil {
 			return nil, fmt.Errorf("scan strategy run: %w", err)
 		}
@@ -58,18 +60,19 @@ func (s *PGRunStore) LoadRuns(ctx context.Context) ([]*RunDetail, error) {
 
 func (s *PGRunStore) SaveRun(ctx context.Context, detail *RunDetail) error {
 	const q = `
-		INSERT INTO strategy_runs (id, dora_user_id, strategy_type, status, config, created_at, updated_at, stopped_at, error)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO strategy_runs (id, dora_user_id, strategy_type, status, config, created_at, updated_at, stopped_at, error, encrypted_api_key)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (id)
 		DO UPDATE SET
-			dora_user_id  = EXCLUDED.dora_user_id,
-			strategy_type = EXCLUDED.strategy_type,
-			status        = EXCLUDED.status,
-			config        = EXCLUDED.config,
-			created_at    = EXCLUDED.created_at,
-			updated_at    = EXCLUDED.updated_at,
-			stopped_at    = EXCLUDED.stopped_at,
-			error         = EXCLUDED.error
+			dora_user_id       = EXCLUDED.dora_user_id,
+			strategy_type      = EXCLUDED.strategy_type,
+			status             = EXCLUDED.status,
+			config             = EXCLUDED.config,
+			created_at         = EXCLUDED.created_at,
+			updated_at         = EXCLUDED.updated_at,
+			stopped_at         = EXCLUDED.stopped_at,
+			error              = EXCLUDED.error,
+			encrypted_api_key  = EXCLUDED.encrypted_api_key
 	`
 
 	if _, err := s.pool.Exec(
@@ -84,6 +87,7 @@ func (s *PGRunStore) SaveRun(ctx context.Context, detail *RunDetail) error {
 		detail.UpdatedAt,
 		detail.StoppedAt,
 		detail.Error,
+		detail.EncryptedAPIKey,
 	); err != nil {
 		return fmt.Errorf("save strategy run %s: %w", detail.ID, err)
 	}

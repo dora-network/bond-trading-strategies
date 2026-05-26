@@ -38,6 +38,7 @@ type Handler struct {
 	doraClient     doraClient
 	runStore       RunStore
 	backtestStore  BacktestStore
+	encryptionKey  []byte // 32-byte AES-256 key for encrypting API keys at rest
 	mux            *http.ServeMux
 	authedMux      http.Handler
 	mu             sync.RWMutex
@@ -59,7 +60,7 @@ type StrategyDefinition struct {
 	ConfigFields     []StrategyConfigField
 	SupportsRun      bool
 	SupportsBacktest bool
-	DecodeConfig     func(json.RawMessage) (json.RawMessage, strategycore.Strategy, error)
+	DecodeConfig     func(json.RawMessage, string) (json.RawMessage, strategycore.Strategy, error)
 }
 
 type StrategyConfigField struct {
@@ -307,8 +308,9 @@ func listItems[T listable, S any](
 
 type RunDetail struct {
 	RunSummary
-	Config json.RawMessage `json:"config"`
-	Error  string          `json:"error,omitempty"`
+	Config          json.RawMessage `json:"config"`
+	EncryptedAPIKey []byte          `json:"-"` // stored in DB, never serialized to JSON
+	Error           string          `json:"error,omitempty"`
 }
 
 type ErrorResponse struct {
@@ -367,6 +369,9 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 	}
 	for _, opt := range opts {
 		opt(h)
+	}
+	if h.log == nil {
+		h.log = slog.Default()
 	}
 	if h.strategies == nil {
 		h.strategies = defaultStrategies(h.prices, h.log)
@@ -439,6 +444,15 @@ func WithLogger(log *slog.Logger) func(*Handler) {
 func WithDORAClient(client doraClient) func(*Handler) {
 	return func(h *Handler) {
 		h.doraClient = client
+	}
+}
+
+// WithEncryptionKey sets the 32-byte AES-256 key used to encrypt API keys at rest.
+// Without this, runs cannot be resumed after a server restart because the
+// user's DORA API key is unavailable.
+func WithEncryptionKey(key []byte) func(*Handler) {
+	return func(h *Handler) {
+		h.encryptionKey = key
 	}
 }
 
@@ -1010,6 +1024,24 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Inject the user's API key into the strategy so it can authenticate with DORA.
+	authInfo, _ := authFromContext(r.Context())
+	if authInfo.APIKey != "" {
+		if withClient, ok := strat.(*meanreversion.Strategy); ok {
+			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))
+			withClientOpts(withClient)
+		}
+	}
+
+	var encryptedAPIKey []byte
+	if authInfo.APIKey != "" && len(h.encryptionKey) > 0 {
+		encryptedAPIKey, err = encryptAPIKey([]byte(authInfo.APIKey), h.encryptionKey)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("encrypt api key: %v", err))
+			return
+		}
+	}
+
 	now := h.now().UTC()
 	id := uuid.Must(uuid.NewV7())
 	detail := &RunDetail{
@@ -1021,7 +1053,8 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		},
-		Config: cfg,
+		Config:          cfg,
+		EncryptedAPIKey: encryptedAPIKey,
 	}
 	id, err = h.startRun(r.Context(), detail, strat)
 	if err != nil {
@@ -1233,6 +1266,14 @@ func (h *Handler) RestoreRuns(ctx context.Context) error {
 		if detail.Status != "running" {
 			continue
 		}
+		h.log.Info("resuming run",
+			"run_id", detail.ID,
+			"created_at", detail.CreatedAt,
+			"status", detail.Status,
+			"user_id", detail.DORAUserID,
+			"strategy_type", detail.StrategyType,
+			"config", detail.Config,
+		)
 		if err := h.resumePersistedRun(ctx, detail); err != nil {
 			return fmt.Errorf("restore run %s: %w", detail.ID, err)
 		}
@@ -1264,6 +1305,22 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		return err
 	}
 	_ = normalised
+
+	// Decrypt the stored API key and inject it into the strategy so it can
+	// authenticate with DORA. Without this, a resumed run would fall back to
+	// the server's DORA_API_KEY env var, which may belong to a different user.
+	var apiKeyDecrypted []byte
+	if len(detail.EncryptedAPIKey) > 0 && len(h.encryptionKey) > 0 {
+		var err2 error
+		apiKeyDecrypted, err2 = decryptAPIKey(detail.EncryptedAPIKey, h.encryptionKey)
+		if err2 != nil {
+			return fmt.Errorf("decrypt api key for run %s: %w", detail.ID, err2)
+		}
+		if mr, ok := strat.(*meanreversion.Strategy); ok {
+			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(string(apiKeyDecrypted)))(mr)
+		}
+	}
+
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}
@@ -1346,7 +1403,7 @@ func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, c
 		return StrategyDefinition{}, nil, nil, http.StatusNotImplemented, fmt.Errorf("strategy_type %q has no config decoder", strategyType)
 	}
 
-	normalised, strat, err := def.DecodeConfig(config)
+	normalised, strat, err := def.DecodeConfig(config, string(capability))
 	if err != nil {
 		return StrategyDefinition{}, nil, nil, http.StatusBadRequest, err
 	}
@@ -1443,8 +1500,9 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 		},
 		SupportsRun:      true,
 		SupportsBacktest: true,
-		DecodeConfig: func(raw json.RawMessage) (json.RawMessage, strategycore.Strategy, error) {
-			cfg, normalised, err := decodeMeanReversionConfig(raw)
+		DecodeConfig: func(raw json.RawMessage, capability string) (json.RawMessage, strategycore.Strategy, error) {
+			forRun := capability == string(capabilityRun)
+			cfg, normalised, err := decodeMeanReversionConfig(raw, forRun)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1486,7 +1544,7 @@ func newCopyTradingDefinition() StrategyDefinition {
 		},
 		SupportsRun:      false,
 		SupportsBacktest: false,
-		DecodeConfig: func(raw json.RawMessage) (json.RawMessage, strategycore.Strategy, error) {
+		DecodeConfig: func(raw json.RawMessage, _ string) (json.RawMessage, strategycore.Strategy, error) {
 			cfg, normalised, err := decodeCopyTradingConfig(raw)
 			if err != nil {
 				return nil, nil, err
@@ -1510,7 +1568,7 @@ type meanReversionConfigPayload struct {
 }
 
 //nolint:funlen // config decoding with validation
-func decodeMeanReversionConfig(raw json.RawMessage) (meanreversion.Config, json.RawMessage, error) {
+func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.Config, json.RawMessage, error) {
 	var payload meanReversionConfigPayload
 	if err := decodeRawConfig(raw, &payload); err != nil {
 		return meanreversion.Config{}, nil, err
@@ -1576,12 +1634,19 @@ func decodeMeanReversionConfig(raw json.RawMessage) (meanreversion.Config, json.
 
 	amount := defaults.InitialBalance
 	if payload.InitialBalance != nil {
-		if *payload.InitialBalance <= 0 {
-			return meanreversion.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0")
+		if *payload.InitialBalance < 0 {
+			return meanreversion.Config{}, nil, fmt.Errorf("config.initial_balance must be non-negative")
 		}
-		amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
-		if err != nil {
-			return meanreversion.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+		if *payload.InitialBalance == 0 {
+			if !forRun {
+				return meanreversion.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0 for backtests")
+			}
+			// For runs, initial_balance is obtained from DORA positions, so 0 is valid.
+		} else {
+			amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
+			if err != nil {
+				return meanreversion.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+			}
 		}
 	}
 

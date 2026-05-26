@@ -144,6 +144,16 @@ func WithLogger(log *slog.Logger) func(*Strategy) {
 	}
 }
 
+// WithMarketAPIClient sets the market API client on a mean-reversion Strategy.
+// Use this to inject a client that authenticates with a specific API key
+// (e.g. the user's own key decrypted from storage) instead of the default
+// client that reads DORA_API_KEY from the environment.
+func WithMarketAPIClient(client marketAPIClient) func(*Strategy) {
+	return func(s *Strategy) {
+		s.marketAPIClient = client
+	}
+}
+
 func (s *Strategy) logger() *slog.Logger {
 	if s.log == nil {
 		return slog.Default()
@@ -309,7 +319,20 @@ func (s *Strategy) cappedOrderQuantity(positionSize, currentPosition, price deci
 // if any API call fails the error is recorded in s.errs and the strategy
 // continues with an uninitialised tracker (falling back to API lookups on
 // each trade).
+//
+// The account used for the USD balance depends on fromGlobalPosition:
+//   - true (leverage == 1x):  use the global account's USD balance as InitialBalance.
+//   - false (leverage > 1x): use the isolated account for the base asset.
 func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
+	inverseLeverage, err := decimal.One.Quo(s.cfg.Leverage)
+	if err != nil {
+		s.mu.Lock()
+		s.errs = append(s.errs, fmt.Errorf("initialise balances: compute inverse leverage: %w", err))
+		s.mu.Unlock()
+		return
+	}
+	fromGlobalPosition := inverseLeverage.Equal(decimal.One)
+
 	quoteAssetID, err := s.marketAPIClient.QuoteAssetID(ctx, s.cfg.OrderBookID.String())
 	if err != nil {
 		s.mu.Lock()
@@ -317,6 +340,23 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 		s.mu.Unlock()
 		return
 	}
+
+	// Try the V2 portfolio API first — it returns accounts with IsGlobal flags
+	// so we can pick the right one for the leverage level.
+	portfolio, err := s.marketAPIClient.GetPortfolioV2(ctx)
+	if err == nil && portfolio != nil {
+		initializeBalancesFromPortfolio(s, portfolio, baseAssetID, quoteAssetID, fromGlobalPosition, s.logger())
+		s.mu.Lock()
+		s.balancesInitialized = true
+		s.mu.Unlock()
+		return
+	}
+	if err != nil {
+		s.log.Warn("initialise balances: v2 portfolio unavailable, falling back to legacy path", "err", err)
+	}
+
+	// Fallback: use the legacy SelfUserID + AssetPosition path.
+	// This uses the global account regardless of leverage.
 	accountID, err := s.marketAPIClient.SelfUserID(ctx)
 	if err != nil {
 		s.mu.Lock()
@@ -350,6 +390,9 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 	} else {
 		s.mu.Lock()
 		s.usdBal = usdAvailable
+		if !usdAvailable.IsZero() {
+			s.cfg.InitialBalance = usdAvailable
+		}
 		s.mu.Unlock()
 	}
 
@@ -358,10 +401,6 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 	s.mu.Lock()
 	s.balancesInitialized = true
 	// Reconstruct the open-position signal from the fetched bond quantity.
-	// This ensures that after a server restart the strategy immediately knows
-	// it already holds a position and will not attempt to open a duplicate
-	// entry on the next price tick: positive qty = prior Buy, negative = prior
-	// Sell, zero = flat.
 	switch {
 	case s.bondQty.IsPos():
 		s.openSignal = types.SignalBuy
@@ -375,8 +414,9 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 
 // closePosition closes the entire open position by placing a market order in
 // the opposite direction for the full position quantity. It is called by the
-// run loop when ShouldExit returns true. bondQty (or, when balance tracking
-// is unavailable, a fresh DORA lookup) determines the exact quantity to close.
+// run loop when ShouldExit returns true. It uses the in-memory tracked bondQty
+// to close the position. If placing the order fails, it checks the live position
+// on DORA and self-heals the tracking state if the actual position is already 0.
 func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 	s.mu.RLock()
 	qty := s.bondQty
@@ -394,6 +434,9 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 	if qty.IsZero() {
 		// Already flat — just clear the signal.
 		s.mu.Lock()
+		if useTracked {
+			s.bondQty = decimal.Zero
+		}
 		s.openSignal = types.SignalHold
 		s.mu.Unlock()
 		return nil
@@ -415,6 +458,19 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 	if err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, s.fromGlobalPosition,
 	); err != nil {
+		// Self-healing: if the order failed, check the live position on the exchange.
+		// If the live position is actually already 0, we can self-heal and clear our tracking state.
+		if liveQty, liveErr := s.currentPosition(ctx, assetID); liveErr == nil && liveQty.IsZero() {
+			s.log.Info("close order failed but live position is already 0, self-healing tracking state", "runID", s.runID)
+			s.mu.Lock()
+			if useTracked {
+				s.bondQty = decimal.Zero
+			}
+			s.openSignal = types.SignalHold
+			s.fromGlobalPosition = false
+			s.mu.Unlock()
+			return nil
+		}
 		return err
 	}
 
@@ -457,7 +513,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 	if err != nil {
 		return false, err
 	}
-	if !ok {
+	if !ok || quantity.IsZero() {
 		return false, nil
 	}
 	side := doraclient.SIDE_BUY
@@ -475,6 +531,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 	//   - Buys (BUY) are fromGlobalPosition = true only when inverseLeverage == 1.0.
 	fromGlobalPosition := side == doraclient.SIDE_BUY && inverseLeverage.Equal(decimal.One)
 
+	s.log.Info("opening position", "runID", s.runID, "assetID", assetID, "signal", decision.Signal)
 	s.log.Info("creating market order",
 		"runID", s.runID,
 		"assetID", assetID,
@@ -657,7 +714,6 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 					continue
 				}
 
-				s.log.Info("opening position", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "signal", decision.Signal)
 				if _, err := s.executeDecision(ctx, decision, px.AssetID); err != nil {
 					s.log.Error("failed to execute decision", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "err", err)
 					s.mu.Lock()

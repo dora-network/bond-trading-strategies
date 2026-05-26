@@ -10,7 +10,6 @@ linters:
   enable:
     - bodyclose
     - dogsled
-    - dupl
     - errcheck
     - errorlint
     - exhaustive
@@ -19,13 +18,11 @@ linters:
     - funlen
     - gochecknoglobals
     - gochecknoinits
-    #    - goconst
     - goprintffuncname
     - gosec
     - govet
     - ineffassign
     - lll
-    - misspell
     - mnd
     - nakedret
     - noctx
@@ -43,8 +40,6 @@ linters:
   settings:
     dogsled:
       max-blank-identifiers: 2
-    dupl:
-      threshold: 100
     errcheck:
       check-type-assertions: true
       check-blank: false
@@ -94,10 +89,6 @@ linters:
           file_entropy_threshold: 0.85
     lll:
       line-length: 140
-    misspell:
-      locale: UK
-      ignore-rules:
-        - strat
     mnd:
       checks:
         - argument

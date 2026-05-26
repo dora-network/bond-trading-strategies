@@ -2,7 +2,9 @@ package meanreversion_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -651,4 +653,172 @@ func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
 	assert.Equal(t, doraclient.SIDE_SELL, side)
 	assert.True(t, qty.Equal(decimal.MustNew(5, 0)), "should close full position quantity")
 	assert.Equal(t, types.SignalHold, meanreversion.OpenSignal(s))
+}
+
+func TestRunLoop_NoNewEntryWhenQuantityZero(t *testing.T) {
+	t.Parallel()
+
+	orderBookID := uuid.Must(uuid.NewV7())
+	cfg := defaultConfig()
+	cfg.LookbackWindow = 10
+	cfg.OrderBookID = orderBookID
+	// Small budget to ensure quantity calculation truncates to 0
+	cfg.InitialBalance = decimal.MustNew(1, 0) // Balance = $1
+
+	log := slog.Default()
+
+	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
+	client := &meanreversionfakes.FakeMarketApiClient{}
+	client.BaseAssetIDReturns("bond-id", nil)
+	client.QuoteAssetIDReturns("usd-id", nil)
+	client.SelfUserIDReturns("user-1", nil)
+	// Balance has no existing position, and tracking initialised
+	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+		return decimal.Zero, decimal.Zero, nil
+	}
+	meanreversion.SetLookupClient(s, client)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	msgCh := make(chan strategy.Message)
+	defer close(msgCh)
+
+	// Price of the bond is high, e.g., $100, which is greater than budget ($1).
+	// So capped quantity will be floor(1 * PositionSize / 100) = 0.
+	var priceUpdates []map[uuid.UUID]prices.AssetPrice
+	for i := 0; i < 10; i++ {
+		var ytm decimal.Decimal
+		if i%2 == 0 {
+			ytm = decimal.MustNew(4, 2)
+		} else {
+			ytm = decimal.MustNew(6, 2)
+		}
+		// High price: $100
+		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
+			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: decimal.MustNew(100, 0), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
+		})
+	}
+	// Add an update that generates a buy signal (wide spread)
+	for i := 10; i < 15; i++ {
+		ytm := decimal.MustNew(8, 2) // wide spread → SignalBuy
+		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
+			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: decimal.MustNew(100, 0), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
+		})
+	}
+
+	priceCh := make(chan map[uuid.UUID]prices.AssetPrice, len(priceUpdates))
+	for _, u := range priceUpdates {
+		priceCh <- u
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
+	}()
+
+	// Give the run loop time to process updates.
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+
+	// Verify no order was created because quantity was 0
+	assert.Zero(t, client.CreateMarketOrderCallCount(),
+		"expected no market order when quantity to order is 0")
+	// Verify that openSignal remains SignalHold (did not change to SignalBuy)
+	assert.Equal(t, types.SignalHold, meanreversion.OpenSignal(s),
+		"expected open signal to remain Hold when quantity is 0")
+}
+
+func TestRunLoop_SelfHealsWhenPositionDoesNotExistOnExchange(t *testing.T) {
+	t.Parallel()
+
+	orderBookID := uuid.Must(uuid.NewV7())
+	cfg := defaultConfig()
+	cfg.LookbackWindow = 10
+	cfg.OrderBookID = orderBookID
+	cfg.InitialBalance = decimal.MustNew(10, 0)
+
+	log := slog.Default()
+
+	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
+	client := &meanreversionfakes.FakeMarketApiClient{}
+	client.BaseAssetIDReturns("bond-id", nil)
+	client.QuoteAssetIDReturns("usd-id", nil)
+	client.SelfUserIDReturns("user-1", nil)
+
+	// Simulate initialization with an existing position of 5 bonds
+	var count int
+	var mu sync.Mutex
+	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if assetID == "bond-id" {
+			count++
+			if count == 1 {
+				return decimal.MustNew(5, 0), decimal.Zero, nil
+			}
+			return decimal.Zero, decimal.Zero, nil
+		}
+		return decimal.MustNew(50, 0), decimal.Zero, nil
+	}
+	client.CreateMarketOrderReturns(errors.New("insufficient position to close"))
+	meanreversion.SetLookupClient(s, client)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	msgCh := make(chan strategy.Message)
+	defer close(msgCh)
+
+	// Build observations to trigger a ShouldExit exit condition.
+	// - 10 window-fill ticks: alternating 6% / 8% YTM: mean = 7%
+	// - Then price ticks showing 4% YTM -> triggers ExitZScore -> ShouldExit returns true
+	var priceUpdates []map[uuid.UUID]prices.AssetPrice
+	for i := 0; i < 10; i++ {
+		var ytm decimal.Decimal
+		if i%2 == 0 {
+			ytm = decimal.MustNew(6, 2)
+		} else {
+			ytm = decimal.MustNew(8, 2)
+		}
+		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
+			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: bondPriceFromYTM(ytm), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
+		})
+	}
+
+	priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
+		uuid.New(): {
+			AssetID: "bond-id",
+			YTM:     func() *decimal.Decimal { d := decimal.MustNew(4, 2); return &d }(),
+			Price:   bondPriceFromYTM(decimal.MustNew(4, 2)),
+			Time:    epoch.Add(10 * 24 * time.Hour),
+		},
+	})
+
+	priceCh := make(chan map[uuid.UUID]prices.AssetPrice, len(priceUpdates))
+	for _, u := range priceUpdates {
+		priceCh <- u
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
+	}()
+
+	// Give the run loop time to process the exit tick.
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+
+	// Verify that closePosition attempted the close order, saw the failure,
+	// and self-healed because the live position is actually 0.
+	assert.Equal(t, 1, client.CreateMarketOrderCallCount(),
+		"expected exactly 1 market order attempt")
+
+	// Verify that tracking is self-healed: openSignal is Hold and bondQty is 0.
+	assert.Equal(t, types.SignalHold, meanreversion.OpenSignal(s))
+	assert.True(t, meanreversion.BondQty(s).IsZero())
 }

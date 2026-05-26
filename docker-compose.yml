@@ -11,6 +11,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       WS_URL: ${WS_URL:-wss://dev.dora.co}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     entrypoint:
       - "/app/strategy-server"
     command:
@@ -26,6 +28,8 @@ services:
       - "${DORA_BASE_URL:-https://dev.dora.co}"
       - "--fred-api-key"
       - "${FRED_API_KEY:-}"
+      - "--encryption-key"
+      - "${ENCRYPTION_KEY:-}"
     restart: unless-stopped
 
   mcp-server:

@@ -66,7 +66,7 @@ func (c *Client) ListOrderBooks(ctx context.Context, status string) ([]OrderBook
 	req := c.apiClient.DefaultAPI.ListOrderBooks(authCtx)
 	if status != "" {
 		obStatus := doraclient.OrderBookStatus(status)
-		req = req.Status(obStatus)
+		req = req.Status([]doraclient.OrderBookStatus{obStatus})
 	}
 
 	resp, rawResp, err := req.Execute()

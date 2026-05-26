@@ -2,6 +2,7 @@ package meanreversion
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ type marketAPIClient interface {
 	QuoteAssetID(ctx context.Context, orderBookID string) (string, error)
 	SelfUserID(ctx context.Context) (string, error)
 	AssetPosition(ctx context.Context, accountID, assetID string) (decimal.Decimal, decimal.Decimal, error)
+	GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error)
 	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool) error //nolint:lll
 }
 
@@ -25,9 +27,12 @@ type doraAPIClient struct {
 	client *doraclient.APIClient
 }
 
-const apiKeyPrefix = "ApiKey"
+const (
+	apiKeyPrefix    = "ApiKey"
+	doraQuantityDps = 3
+)
 
-func newDoraClient() *doraAPIClient {
+func NewDoraClientWithKey(apiKey string) *doraAPIClient {
 	cfg := doraclient.NewConfiguration()
 	if baseURL := os.Getenv("DORA_BASE_URL"); baseURL != "" {
 		cfg.Servers = doraclient.ServerConfigurations{{
@@ -36,9 +41,13 @@ func newDoraClient() *doraAPIClient {
 		}}
 	}
 	return &doraAPIClient{
-		apiKey: os.Getenv("DORA_API_KEY"),
+		apiKey: apiKey,
 		client: doraclient.NewAPIClient(cfg),
 	}
+}
+
+func newDoraClient() *doraAPIClient {
+	return NewDoraClientWithKey(os.Getenv("DORA_API_KEY"))
 }
 
 func (c *doraAPIClient) BaseAssetID(ctx context.Context, orderBookID string) (string, error) {
@@ -56,12 +65,12 @@ func (c *doraAPIClient) getOrderBookAssetID(ctx context.Context, orderBookID, fi
 		return "", errors.New("DORA client is not configured")
 	}
 	if c.apiKey == "" {
-		return "", errors.New("DORA_API_KEY is not configured")
+		return "", errors.New("user API key is not configured")
 	}
 	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
 		"apiKey": {Key: c.apiKey},
 	})
-	resp, _, err := c.client.DefaultAPI.GetOrderbookById(authCtx, orderBookID).Execute()
+	resp, _, err := c.client.DefaultAPI.GetOrderbookById(authCtx, orderBookID).Execute() //nolint:bodyclose
 	if err != nil {
 		return "", fmt.Errorf("get order book %s: %w", orderBookID, err)
 	}
@@ -90,7 +99,7 @@ func (c *doraAPIClient) AssetPosition(ctx context.Context, accountID, assetID st
 			Prefix: apiKeyPrefix,
 		},
 	})
-	resp, _, err := c.client.DefaultAPI.GetLedgerPositionsSelf(authCtx).Execute()
+	resp, _, err := c.client.DefaultAPI.GetLedgerPositionsSelf(authCtx).Execute() //nolint:bodyclose
 	if err != nil {
 		return decimal.Zero, decimal.Zero, fmt.Errorf("get ledger positions: %w", err)
 	}
@@ -138,7 +147,7 @@ func (c *doraAPIClient) SelfUserID(ctx context.Context) (string, error) {
 			Prefix: apiKeyPrefix,
 		},
 	})
-	resp, _, err := c.client.DefaultAPI.GetUserSelf(authCtx).Execute()
+	resp, _, err := c.client.DefaultAPI.GetUserSelf(authCtx).Execute() //nolint:bodyclose
 	if err != nil {
 		return "", fmt.Errorf("get user self: %w", err)
 	}
@@ -149,6 +158,37 @@ func (c *doraAPIClient) SelfUserID(ctx context.Context) (string, error) {
 		return "", errors.New("get user self: missing user ID")
 	}
 	return resp.Data.Id, nil
+}
+
+func (c *doraAPIClient) GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error) {
+	if c == nil || c.client == nil {
+		return nil, errors.New("DORA client is not configured")
+	}
+	if c.apiKey == "" {
+		return nil, errors.New("API_KEY is not configured")
+	}
+	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
+		"apiKeyAuthHeader": {
+			Key:    c.apiKey,
+			Prefix: apiKeyPrefix,
+		},
+	})
+	resp, _, err := c.client.DefaultAPI.GetLedgerAccountsSelfV2(authCtx).Execute() //nolint:bodyclose
+	if err != nil {
+		return nil, fmt.Errorf("get ledger accounts v2: %w", err)
+	}
+	if resp == nil {
+		return nil, nil
+	}
+	data, ok := resp.GetDataOk()
+	if !ok || data == nil {
+		return nil, nil
+	}
+	portfolio, ok := data.GetPortfolioOk()
+	if !ok || portfolio == nil {
+		return nil, nil
+	}
+	return portfolio, nil
 }
 
 func (c *doraAPIClient) CreateMarketOrder(
@@ -171,6 +211,9 @@ func (c *doraAPIClient) CreateMarketOrder(
 	if inverseLeverage.IsNeg() {
 		return errors.New("inverse leverage must be non-negative and less than or equal to 1.0")
 	}
+
+	// DORA requires quantity with at most 3 decimal places.
+	quantity = quantity.Round(doraQuantityDps)
 	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
 		"apiKeyAuthHeader": {
 			Key:    c.apiKey,
@@ -188,8 +231,24 @@ func (c *doraAPIClient) CreateMarketOrder(
 		fromGlobalPosition,
 		orderBookID,
 	)
-	_, _, err := c.client.DefaultAPI.CreateOrder(authCtx).CreateOrderRequest(*request).Execute()
+	_, rawResp, err := c.client.DefaultAPI.CreateOrder(authCtx).CreateOrderRequest(*request).Execute()
+	if rawResp != nil && rawResp.Body != nil {
+		defer rawResp.Body.Close()
+	}
 	if err != nil {
+		var openAPIError *doraclient.GenericOpenAPIError
+		if errors.As(err, &openAPIError) {
+			body := openAPIError.Body()
+			var errResp struct {
+				Error *string `json:"error"`
+			}
+			if jsonErr := json.Unmarshal(body, &errResp); jsonErr == nil && errResp.Error != nil && *errResp.Error != "" {
+				return fmt.Errorf("create market order on order book %s: %s (raw: %w)", orderBookID, *errResp.Error, err)
+			}
+			if len(body) > 0 {
+				return fmt.Errorf("create market order on order book %s: %s (raw: %w)", orderBookID, string(body), err)
+			}
+		}
 		return fmt.Errorf("create market order on order book %s: %w", orderBookID, err)
 	}
 	return nil
