@@ -712,6 +712,16 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Inject the user's API key into the strategy so it can authenticate
+	// with DORA when resolving the asset ID for the order book.
+	authInfo, _ := authFromContext(r.Context())
+	if authInfo.APIKey != "" {
+		if withClient, ok := strat.(*meanreversion.Strategy); ok {
+			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))
+			withClientOpts(withClient)
+		}
+	}
+
 	id, resultCh, err := h.service.RunBacktest(r.Context(), strat, req.Start, req.End)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("run backtest: %v", err))
