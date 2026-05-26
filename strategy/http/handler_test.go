@@ -550,6 +550,157 @@ func TestHandlerListRuns(t *testing.T) {
 	assert.Equal(t, firstID, resp.Items[1].ID)
 }
 
+func TestHandlerRejectsDuplicateOrderBookRun(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.Must(uuid.NewV7())
+	orderBookID := uuid.Must(uuid.NewV7()).String()
+
+	svc := &strategyfakes.FakeService{
+		RunStrategyStub: func(ctx context.Context, strat strategycore.Strategy) (uuid.UUID, error) {
+			return runID, nil
+		},
+	}
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time {
+			now = now.Add(time.Second)
+			return now
+		}),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+
+	// First run should succeed.
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window": 20,
+			"entry_z_score":   2.0,
+			"exit_z_score":    0.5,
+			"order_book_id":   orderBookID,
+			"tenor":           "10Y",
+			"initial_balance": 5.5,
+			"leverage":        2.0,
+		},
+	}
+	rec := performJSONRequest(t, handler, "/v1/runs", body)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, 1, svc.RunStrategyCallCount())
+
+	// Second run with the same order_book_id should fail with 409.
+	rec = performJSONRequest(t, handler, "/v1/runs", body)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, 1, svc.RunStrategyCallCount()) // service was NOT called
+	var errResp strategyhttp.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Contains(t, errResp.Error, "already active")
+}
+
+func TestHandlerAllowsDifferentOrderBookRun(t *testing.T) {
+	t.Parallel()
+
+	firstID := uuid.Must(uuid.NewV7())
+	secondID := uuid.Must(uuid.NewV7())
+	call := 0
+	svc := &strategyfakes.FakeService{
+		RunStrategyStub: func(ctx context.Context, strat strategycore.Strategy) (uuid.UUID, error) {
+			call++
+			if call == 1 {
+				return firstID, nil
+			}
+			return secondID, nil
+		},
+	}
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time {
+			now = now.Add(time.Second)
+			return now
+		}),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+
+	// First run with order book A.
+	bodyA := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window": 20,
+			"entry_z_score":   2.0,
+			"exit_z_score":    0.5,
+			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+			"tenor":           "10Y",
+			"initial_balance": 5.5,
+			"leverage":        2.0,
+		},
+	}
+	rec := performJSONRequest(t, handler, "/v1/runs", bodyA)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Second run with a different order book should succeed.
+	bodyB := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window": 20,
+			"entry_z_score":   2.0,
+			"exit_z_score":    0.5,
+			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+			"tenor":           "5Y",
+			"initial_balance": 5.5,
+			"leverage":        2.0,
+		},
+	}
+	rec = performJSONRequest(t, handler, "/v1/runs", bodyB)
+	require.Equal(t, http.StatusCreated, rec.Code)
+}
+
+func TestHandlerAllowsRunAfterPreviousStopped(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.Must(uuid.NewV7())
+	orderBookID := uuid.Must(uuid.NewV7()).String()
+
+	svc := &strategyfakes.FakeService{
+		RunStrategyStub: func(ctx context.Context, strat strategycore.Strategy) (uuid.UUID, error) {
+			return runID, nil
+		},
+	}
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time {
+			now = now.Add(time.Second)
+			return now
+		}),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window": 20,
+			"entry_z_score":   2.0,
+			"exit_z_score":    0.5,
+			"order_book_id":   orderBookID,
+			"tenor":           "10Y",
+			"initial_balance": 5.5,
+			"leverage":        2.0,
+		},
+	}
+	rec := performJSONRequest(t, handler, "/v1/runs", body)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Stop the run.
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/runs/"+runID.String(), nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Now creating a new run with the same order book should succeed.
+	rec = performJSONRequest(t, handler, "/v1/runs", body)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, 2, svc.RunStrategyCallCount())
+}
+
 func TestHandlerRestoreRuns(t *testing.T) {
 	t.Parallel()
 

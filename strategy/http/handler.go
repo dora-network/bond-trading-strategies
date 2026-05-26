@@ -269,6 +269,39 @@ func (d *BacktestDetail) GetCreatedAt() time.Time { return d.CreatedAt }
 func (d *RunDetail) GetDORAUserID() string   { return d.DORAUserID }
 func (d *RunDetail) GetCreatedAt() time.Time { return d.CreatedAt }
 
+// orderBookIDCfg is a minimal struct for extracting order_book_id from strategy config JSON.
+type orderBookIDCfg struct {
+	OrderBookID string `json:"order_book_id"`
+}
+
+// extractOrderBookID extracts the order_book_id value from a strategy config JSON.
+func extractOrderBookID(config json.RawMessage) string {
+	var c orderBookIDCfg
+	if err := json.Unmarshal(config, &c); err != nil {
+		return ""
+	}
+	return c.OrderBookID
+}
+
+// findActiveRunForOrderBook checks whether the user already has a running or paused
+// strategy for the given order book. Returns the run ID if found, uuid.Nil otherwise.
+func (h *Handler) findActiveRunForOrderBook(doraUserID, orderBookID string) uuid.UUID {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, detail := range h.runs {
+		if detail.DORAUserID != doraUserID {
+			continue
+		}
+		if detail.Status != "running" && detail.Status != "paused" {
+			continue
+		}
+		if extractOrderBookID(detail.Config) == orderBookID {
+			return detail.ID
+		}
+	}
+	return uuid.Nil
+}
+
 // filterAndSort returns items from src filtered by doraUserID, sorted by CreatedAt descending.
 func filterAndSort[T listable](src map[uuid.UUID]T, doraUserID string) []T {
 	result := make([]T, 0, len(src))
@@ -1022,6 +1055,15 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
+	}
+
+	// A user may only have one running or paused strategy per order book.
+	if orderBookID := extractOrderBookID(cfg); orderBookID != "" {
+		if existingID := h.findActiveRunForOrderBook(doraUserID, orderBookID); existingID != uuid.Nil {
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("a %s strategy is already active for this order book (run %s)", def.Type, existingID))
+			return
+		}
 	}
 
 	// Inject the user's API key into the strategy so it can authenticate with DORA.
