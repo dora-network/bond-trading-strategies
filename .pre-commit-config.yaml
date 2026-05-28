@@ -18,6 +18,7 @@ repos:
           - pre-commit
           - manual
       - id: check-added-large-files
+        args: ["--maxkb=10000"]
         stages:
           - pre-commit
           - manual
@@ -51,7 +52,7 @@ repos:
       - id: commitlint
         stages:
           - commit-msg
-        additional_dependencies: ['@commitlint/config-conventional']
+        additional_dependencies: ["@commitlint/config-conventional"]
   - repo: https://github.com/tekwizely/pre-commit-golang
     rev: v1.0.0-rc.2
     hooks:

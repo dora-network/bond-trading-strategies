@@ -37,3 +37,7 @@ tmp/
 .agents/
 skills-lock.json
 opencode.jsonc
+.opencode
+graphify-out/manifest.json
+graphify-out/cost.json
+graphify-out/cache/
