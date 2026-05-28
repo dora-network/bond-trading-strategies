@@ -1,15 +1,66 @@
 services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-bond_trading}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./build/docker/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-bond_trading}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  price-daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      secrets:
+        - github_token
+    image: bond-trading-strategies:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-bond_trading}?sslmode=disable}
+      WS_URL: ${WS_URL:-wss://dev.dora.co}
+      DORA_API_KEY: ${DORA_API_KEY:-}
+      DORA_BASE_URL: ${DORA_BASE_URL:-https://dev.dora.co}
+    entrypoint:
+      - "/app/price-daemon"
+    command:
+      - "--http-addr"
+      - ":8080"
+      - "--db-url"
+      - "${DATABASE_URL:-postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-bond_trading}?sslmode=disable}"
+      - "--ws-url"
+      - "${WS_URL:-wss://dev.dora.co}"
+      - "--dora-api-key"
+      - "${DORA_API_KEY:-}"
+      - "--dora-base-url"
+      - "${DORA_BASE_URL:-https://dev.dora.co}"
+    restart: unless-stopped
+
   strategy-server:
     build:
       context: .
       dockerfile: Dockerfile
       secrets:
         - github_token
-    image: bond-trading-strategies-mcp:latest
+    image: bond-trading-strategies:latest
     ports:
       - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-bond_trading}?sslmode=disable}
       WS_URL: ${WS_URL:-wss://dev.dora.co}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -19,7 +70,7 @@ services:
       - "--addr"
       - ":8081"
       - "--db-url"
-      - "${DATABASE_URL}"
+      - "${DATABASE_URL:-postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-bond_trading}?sslmode=disable}"
       - "--ws-url"
       - "${WS_URL:-wss://dev.dora.co}"
       - "--api-key"
@@ -38,7 +89,7 @@ services:
       dockerfile: Dockerfile
       secrets:
         - github_token
-    image: bond-trading-strategies-mcp:latest
+    image: bond-trading-strategies:latest
     ports:
       - "8080:8080"
     depends_on:
@@ -61,6 +112,9 @@ services:
       - "--dora-api-key"
       - "${DORA_API_KEY:-}"
     restart: unless-stopped
+
+volumes:
+  postgres_data:
 
 secrets:
   github_token:
