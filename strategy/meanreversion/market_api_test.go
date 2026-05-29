@@ -17,7 +17,7 @@ func TestStrategyLookupAssetID(t *testing.T) {
 	t.Run("looks up base asset ID from order book", func(t *testing.T) {
 		s := meanreversion.New(defaultConfig(), nil)
 		orderBookID := uuid.Must(uuid.NewV7())
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		lookup.BaseAssetIDReturns("asset-123", nil)
 		meanreversion.SetLookupClient(s, lookup)
 
@@ -32,7 +32,7 @@ func TestStrategyLookupAssetID(t *testing.T) {
 
 	t.Run("rejects missing order book ID", func(t *testing.T) {
 		s := meanreversion.New(defaultConfig(), nil)
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		meanreversion.SetLookupClient(s, lookup)
 
 		_, err := meanreversion.LookupAssetID(s, uuid.Nil)
@@ -43,7 +43,7 @@ func TestStrategyLookupAssetID(t *testing.T) {
 
 	t.Run("propagates lookup errors", func(t *testing.T) {
 		s := meanreversion.New(defaultConfig(), nil)
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		lookup.BaseAssetIDReturns("", errors.New("some error"))
 		meanreversion.SetLookupClient(s, lookup)
 
@@ -54,7 +54,7 @@ func TestStrategyLookupAssetID(t *testing.T) {
 
 	t.Run("rejects empty base asset ID", func(t *testing.T) {
 		s := meanreversion.New(defaultConfig(), nil)
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		meanreversion.SetLookupClient(s, lookup)
 
 		_, err := meanreversion.LookupAssetID(s, uuid.Must(uuid.NewV7()))
@@ -66,7 +66,7 @@ func TestStrategyLookupAssetID(t *testing.T) {
 func TestStrategyCurrentPosition(t *testing.T) {
 	t.Run("loads account asset position", func(t *testing.T) {
 		s := meanreversion.New(defaultConfig(), nil)
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		lookup.SelfUserIDReturns("user-123", nil)
 		lookup.AssetPositionReturns(decimal.MustNew(3, 1), decimal.Zero, nil)
 		meanreversion.SetLookupClient(s, lookup)
@@ -84,7 +84,7 @@ func TestStrategyCurrentPosition(t *testing.T) {
 
 	t.Run("requires self user id", func(t *testing.T) {
 		s := meanreversion.New(defaultConfig(), nil)
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		lookup.SelfUserIDReturns("", errors.New("user unavailable"))
 		meanreversion.SetLookupClient(s, lookup)
 

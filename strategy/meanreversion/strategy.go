@@ -114,6 +114,11 @@ type Strategy struct {
 	openSignal         types.Signal
 	fromGlobalPosition bool // matches the fromGlobalPosition used in the opening order; protected by mu
 	runID              uuid.UUID
+
+	// collateralWeight is the collateral weight of the base asset, fetched from
+	// DORA during Run. Defaults to 1.0 if unavailable. Used to compute effective
+	// capital: InitialBalance × collateralWeight × Leverage.
+	collateralWeight decimal.Decimal
 }
 
 // New creates a new Strategy with the given Config and optional functional options.
@@ -125,11 +130,12 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 	}
 
 	s := &Strategy{
-		cfg:             cfg,
-		window:          window.NewRollingWindow(cfg.LookbackWindow),
-		pricesHandler:   pricesHandler,
-		marketAPIClient: newDoraClient(),
-		errs:            make([]error, 0),
+		cfg:              cfg,
+		window:           window.NewRollingWindow(cfg.LookbackWindow),
+		pricesHandler:    pricesHandler,
+		marketAPIClient:  newDoraClient(),
+		errs:             make([]error, 0),
+		collateralWeight: decimal.One,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -274,8 +280,18 @@ func (s *Strategy) cappedOrderQuantity(positionSize, currentPosition, price deci
 		currentPosition = decimal.Zero
 	}
 
-	// Dollar budget = total capital × fraction of remaining balance.
-	budget, err := s.cfg.InitialBalance.Mul(positionSize)
+	// Effective capital = initial balance × collateral weight × leverage.
+	effectiveCapital, err := s.cfg.InitialBalance.Mul(s.collateralWeight)
+	if err != nil {
+		return decimal.Zero, false, fmt.Errorf("calculate effective capital (collateral): %w", err)
+	}
+	effectiveCapital, err = effectiveCapital.Mul(s.cfg.Leverage)
+	if err != nil {
+		return decimal.Zero, false, fmt.Errorf("calculate effective capital (leverage): %w", err)
+	}
+
+	// Dollar budget = effective capital × fraction of remaining balance.
+	budget, err := effectiveCapital.Mul(positionSize)
 	if err != nil {
 		return decimal.Zero, false, fmt.Errorf("calculate budget: %w", err)
 	}
@@ -288,11 +304,11 @@ func (s *Strategy) cappedOrderQuantity(positionSize, currentPosition, price deci
 	if err != nil {
 		return decimal.Zero, false, fmt.Errorf("calculate position value: %w", err)
 	}
-	if positionValue.Cmp(s.cfg.InitialBalance) >= 0 {
+	if positionValue.Cmp(effectiveCapital) >= 0 {
 		// Already fully invested.
 		return decimal.Zero, false, nil
 	}
-	remainingBudget, err := s.cfg.InitialBalance.Sub(positionValue)
+	remainingBudget, err := effectiveCapital.Sub(positionValue)
 	if err != nil {
 		return decimal.Zero, false, fmt.Errorf("calculate remaining budget: %w", err)
 	}
@@ -592,6 +608,17 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
 	if err != nil {
 		return fmt.Errorf("error looking up asset ID: %w", err)
+	}
+
+	// Fetch the collateral weight of the base asset from DORA. This is
+	// best-effort — if the API is unavailable the default of 1.0 is used.
+	collateralWeight, err := s.marketAPIClient.AssetCollateralWeight(ctx, assetID)
+	if err != nil {
+		s.log.Warn("collateral weight lookup failed, defaulting to 1.0", "assetID", assetID, "err", err)
+	} else {
+		s.mu.Lock()
+		s.collateralWeight = collateralWeight
+		s.mu.Unlock()
 	}
 
 	// Pre-fill the rolling window with historical data so that signals can

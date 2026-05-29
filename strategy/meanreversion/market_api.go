@@ -20,6 +20,7 @@ type marketAPIClient interface {
 	AssetPosition(ctx context.Context, accountID, assetID string) (decimal.Decimal, decimal.Decimal, error)
 	GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error)
 	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool) error //nolint:lll
+	AssetCollateralWeight(ctx context.Context, assetID string) (decimal.Decimal, error)
 }
 
 type doraAPIClient struct {
@@ -189,6 +190,36 @@ func (c *doraAPIClient) GetPortfolioV2(ctx context.Context) (*doraclient.Account
 		return nil, nil
 	}
 	return portfolio, nil
+}
+
+func (c *doraAPIClient) AssetCollateralWeight(ctx context.Context, assetID string) (decimal.Decimal, error) {
+	if c == nil || c.client == nil {
+		return decimal.Zero, errors.New("DORA client is not configured")
+	}
+	if c.apiKey == "" {
+		return decimal.Zero, errors.New("API_KEY is not configured")
+	}
+	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
+		"apiKeyAuthHeader": {
+			Key:    c.apiKey,
+			Prefix: apiKeyPrefix,
+		},
+	})
+	resp, rawResp, err := c.client.DefaultAPI.GetAssetById(authCtx, assetID).Execute()
+	if rawResp != nil && rawResp.Body != nil {
+		defer rawResp.Body.Close()
+	}
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("get asset by id %s: %w", assetID, err)
+	}
+	if resp == nil || resp.Data == nil {
+		return decimal.Zero, fmt.Errorf("get asset by id %s: missing response data", assetID)
+	}
+	cw, err := decimal.NewFromFloat64(float64(resp.Data.GetCollateralWeight()))
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("parse collateral weight for asset %s: %w", assetID, err)
+	}
+	return cw, nil
 }
 
 func (c *doraAPIClient) CreateMarketOrder(

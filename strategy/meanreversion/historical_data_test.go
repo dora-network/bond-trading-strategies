@@ -24,7 +24,7 @@ func TestStrategyGetObservations(t *testing.T) {
 		cfg.Tenor = "10Y"
 		s := meanreversion.New(cfg, nil)
 
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		lookup.BaseAssetIDReturns("asset-123", nil)
 		meanreversion.SetLookupClient(s, lookup)
 
@@ -76,7 +76,7 @@ func TestStrategyGetObservations(t *testing.T) {
 		cfg.Tenor = "10Y"
 		s := meanreversion.New(cfg, nil)
 
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		lookup.BaseAssetIDReturns("asset-123", nil)
 		meanreversion.SetLookupClient(s, lookup)
 
@@ -135,7 +135,7 @@ func TestStrategyGetObservations(t *testing.T) {
 		cfg.Tenor = "10Y"
 		s := meanreversion.New(cfg, nil)
 
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		lookup.BaseAssetIDReturns("asset-123", nil)
 		meanreversion.SetLookupClient(s, lookup)
 
@@ -160,7 +160,7 @@ func TestStrategyGetObservations(t *testing.T) {
 		cfg.Tenor = "10Y"
 		s := meanreversion.New(cfg, nil)
 
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		lookup.BaseAssetIDReturns("asset-123", nil)
 		meanreversion.SetLookupClient(s, lookup)
 
@@ -188,7 +188,7 @@ func TestStrategyGetObservations(t *testing.T) {
 		cfg.Tenor = "10Y"
 		s := meanreversion.New(cfg, nil)
 
-		lookup := &meanreversionfakes.FakeMarketApiClient{}
+		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		lookup.BaseAssetIDReturns("asset-123", nil)
 		meanreversion.SetLookupClient(s, lookup)
 

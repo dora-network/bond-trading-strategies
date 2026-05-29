@@ -468,7 +468,7 @@ func TestInitializeBalances_SetsOpenSignalFromDORAPosition(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := meanreversion.New(cfg, nil)
-			client := &meanreversionfakes.FakeMarketApiClient{}
+			client := &meanreversionfakes.FakeMarketAPIClient{}
 			client.QuoteAssetIDReturns("usd-id", nil)
 			client.SelfUserIDReturns("user-1", nil)
 			// AssetPosition is called twice: once for the bond, once for USD.
@@ -505,7 +505,7 @@ func TestRunLoop_NoNewEntryWhenPositionOpen(t *testing.T) {
 	log := slog.Default()
 
 	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
-	client := &meanreversionfakes.FakeMarketApiClient{}
+	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
 	client.SelfUserIDReturns("user-1", nil)
@@ -585,7 +585,7 @@ func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
 	log := slog.Default()
 
 	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
-	client := &meanreversionfakes.FakeMarketApiClient{}
+	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
 	client.SelfUserIDReturns("user-1", nil)
@@ -668,7 +668,7 @@ func TestRunLoop_NoNewEntryWhenQuantityZero(t *testing.T) {
 	log := slog.Default()
 
 	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
-	client := &meanreversionfakes.FakeMarketApiClient{}
+	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
 	client.SelfUserIDReturns("user-1", nil)
@@ -743,7 +743,7 @@ func TestRunLoop_SelfHealsWhenPositionDoesNotExistOnExchange(t *testing.T) {
 	log := slog.Default()
 
 	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
-	client := &meanreversionfakes.FakeMarketApiClient{}
+	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
 	client.SelfUserIDReturns("user-1", nil)
