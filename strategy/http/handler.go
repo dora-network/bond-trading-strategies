@@ -420,15 +420,15 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 	h.mux.HandleFunc("/v1/backtests/", h.handleBacktestByID)
 	h.mux.HandleFunc("/v1/runs", h.handleRuns)
 	h.mux.HandleFunc("/v1/runs/", h.handleRunByID)
+	h.mux.HandleFunc("/v1/openapi", h.handleOpenAPI)
 	h.authedMux = requireAuth(h.resolveDORAUserID, h.mux)
 	return h
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// /healthz is exempt from authentication so that liveness probes work
-	// without credentials. All other endpoints require a valid Authorization
-	// header.
-	if r.URL.Path == "/healthz" {
+	// /healthz and /v1/openapi are exempt from authentication so that
+	// health probes and spec discovery work without credentials.
+	if r.URL.Path == "/healthz" || r.URL.Path == "/v1/openapi" {
 		h.mux.ServeHTTP(w, r)
 		return
 	}

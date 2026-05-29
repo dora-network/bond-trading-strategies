@@ -1608,13 +1608,24 @@ func TestHandlerRequiresAuth(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code)
 	})
 
-	// ApiKey scheme is accepted.
-	t.Run("ApiKey scheme accepted", func(t *testing.T) {
+	// /v1/openapi must not require authentication.
+	t.Run("openapi no auth", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
-		req.Header.Set("Authorization", "ApiKey my-secret-key")
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/openapi", nil)
 		handler.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+		assert.Contains(t, rec.Body.String(), `"openapi"`)
+	})
+
+	// /v1/openapi must reject non-GET methods.
+	t.Run("openapi method not allowed", func(t *testing.T) {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(context.Background(), method, "/v1/openapi", nil)
+			handler.ServeHTTP(rec, req)
+			require.Equalf(t, http.StatusMethodNotAllowed, rec.Code, "method %s should return 405", method)
+		}
 	})
 
 	// Bearer scheme is accepted.
