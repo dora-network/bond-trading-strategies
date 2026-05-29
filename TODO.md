@@ -5,7 +5,7 @@
 - **Notification websocket endpoint**
   - The strategy service should expose a WebSocket endpoint that pushes real-time notifications to connected clients. Events include: backtest completed, comparison completed, order submission errors, stop-loss notifications, and run state changes.
 
-- **Rate limiter**
+- ~~**Rate limiter**~~ ✅
   - Add rate limiting to the strategy server's REST API so it cannot be spammed. Should be configurable (e.g., per-IP, per-user, per-endpoint) and return `429 Too Many Requests` when exceeded.
 
 ## Planned Features
@@ -21,3 +21,6 @@
 
 - **Config presets**
   - Save and load named parameter sets so users don't have to retype strategy configs every time.
+
+- **Agent skill documentation**
+  - Construct a `SKILL.md` file for the strategy server so users who prefer agent skills over MCP servers can interact with the service via a skill interface instead.

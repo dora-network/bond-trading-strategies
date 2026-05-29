@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/prices"
+	"github.com/dora-network/bond-trading-strategies/ratelimit"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/streams"
@@ -33,6 +34,20 @@ func main() {
 		"32-byte AES-256 key (hex) for encrypting user API keys at rest")
 	reconnectDelay := flag.DurationP("reconnect-delay", "r", 5*time.Second, "Delay between reconnect attempts") //nolint:mnd
 	logLevel := flag.StringP("log-level", "l", "", "Log level (DEBUG, INFO, WARN, ERROR); overrides LOG_LEVEL env")
+
+	// Rate-limiting flags
+	rateLimitEnabled := flag.Bool("rate-limit", envOrBool("RATE_LIMIT", true), "Enable rate limiting")
+	rateLimitReadRPS := flag.Float64("rate-limit-read-rps", envOrFloat("RATE_LIMIT_READ_RPS", 20), "Per-user read requests per second")
+	rateLimitReadBurst := flag.Int("rate-limit-read-burst", envOrInt("RATE_LIMIT_READ_BURST", 40), "Per-user read burst capacity")
+	rateLimitWriteRPS := flag.Float64("rate-limit-write-rps", envOrFloat("RATE_LIMIT_WRITE_RPS", 2), "Per-user write requests per second")
+	rateLimitWriteBurst := flag.Int("rate-limit-write-burst", envOrInt("RATE_LIMIT_WRITE_BURST", 5), "Per-user write burst capacity")
+	rateLimitGlobalRPS := flag.Float64("rate-limit-global-rps", envOrFloat("RATE_LIMIT_GLOBAL_RPS", 100), "Global requests per second")
+	rateLimitGlobalBurst := flag.Int("rate-limit-global-burst", envOrInt("RATE_LIMIT_GLOBAL_BURST", 200), "Global burst capacity")
+	rateLimitIPRPS := flag.Float64("rate-limit-ip-rps", envOrFloat("RATE_LIMIT_IP_RPS", 30), "Per-IP requests per second")
+	rateLimitIPBurst := flag.Int("rate-limit-ip-burst", envOrInt("RATE_LIMIT_IP_BURST", 60), "Per-IP burst capacity")
+	rateLimitTrustProxy := flag.Bool("rate-limit-trust-proxy",
+		envOrBool("RATE_LIMIT_TRUST_PROXY", false),
+		"Trust X-Forwarded-For for IP extraction")
 	flag.Parse()
 
 	setLogLevel(*logLevel)
@@ -123,9 +138,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	rlCfg := ratelimit.Config{
+		Enabled:    *rateLimitEnabled,
+		TrustProxy: *rateLimitTrustProxy,
+		Read:       ratelimit.TierConfig{RPS: *rateLimitReadRPS, Burst: *rateLimitReadBurst},
+		Write:      ratelimit.TierConfig{RPS: *rateLimitWriteRPS, Burst: *rateLimitWriteBurst},
+		Global:     ratelimit.TierConfig{RPS: *rateLimitGlobalRPS, Burst: *rateLimitGlobalBurst},
+		IP:         ratelimit.TierConfig{RPS: *rateLimitIPRPS, Burst: *rateLimitIPBurst},
+	}
+	rl := ratelimit.NewLimiter(rlCfg, log)
+	defer rl.Stop()
+	wrappedHandler := rl.Middleware(handlerImpl)
+
 	server := &http.Server{
 		Addr:              *addr,
-		Handler:           handlerImpl,
+		Handler:           wrappedHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 	}
@@ -180,4 +207,36 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envOrBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	return v == "true" || v == "1" || v == "yes"
+}
+
+func envOrInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	var n int
+	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+		return fallback
+	}
+	return n
+}
+
+func envOrFloat(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	var f float64
+	if _, err := fmt.Sscanf(v, "%f", &f); err != nil {
+		return fallback
+	}
+	return f
 }
