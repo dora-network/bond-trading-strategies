@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -34,6 +35,9 @@ func main() {
 		"32-byte AES-256 key (hex) for encrypting user API keys at rest")
 	reconnectDelay := flag.DurationP("reconnect-delay", "r", 5*time.Second, "Delay between reconnect attempts") //nolint:mnd
 	logLevel := flag.StringP("log-level", "l", "", "Log level (DEBUG, INFO, WARN, ERROR); overrides LOG_LEVEL env")
+	corsAllowedOrigins := flag.String("cors-allowed-origins",
+		envOr("CORS_ALLOWED_ORIGINS", ""),
+		"Comma-separated list of allowed CORS origins; * allows all")
 
 	// Rate-limiting flags
 	rateLimitEnabled := flag.Bool("rate-limit", envOrBool("RATE_LIMIT", true), "Enable rate limiting")
@@ -150,6 +154,10 @@ func main() {
 	defer rl.Stop()
 	wrappedHandler := rl.Middleware(handlerImpl)
 
+	if *corsAllowedOrigins != "" {
+		wrappedHandler = corsMiddleware(*corsAllowedOrigins, wrappedHandler)
+	}
+
 	server := &http.Server{
 		Addr:              *addr,
 		Handler:           wrappedHandler,
@@ -182,6 +190,47 @@ func main() {
 		}
 	}
 	slog.Info("strategy server stopped")
+}
+
+// corsMiddleware returns an HTTP handler that adds CORS headers. origins is a
+// comma-separated list; a single "*" allows any origin.
+func corsMiddleware(origins string, next http.Handler) http.Handler {
+	allowed := make(map[string]bool)
+	allowAll := false
+	for _, o := range strings.Split(origins, ",") {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		if o == "*" {
+			allowAll = true
+		}
+		allowed[o] = true
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		headers := w.Header()
+
+		if allowAll {
+			headers.Set("Access-Control-Allow-Origin", "*")
+		} else if allowed[origin] {
+			headers.Set("Access-Control-Allow-Origin", origin)
+			headers.Add("Vary", "Origin")
+		}
+
+		headers.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		headers.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		headers.Set("Access-Control-Allow-Credentials", "true")
+		headers.Set("Access-Control-Max-Age", "86400")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func setLogLevel(flagValue string) {

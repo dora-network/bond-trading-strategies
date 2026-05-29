@@ -95,6 +95,7 @@ automatically restores persisted runs and backtests from Postgres.
 | `-e` / `--encryption-key`    | `ENCRYPTION_KEY`         | —                   | 32-byte AES-256 key (hex) for encrypting API keys at rest |
 | `-l` / `--log-level`         | `LOG_LEVEL`              | `INFO`              | Log level (DEBUG, INFO, WARN, ERROR)       |
 | `-r` / `--reconnect-delay`   | —                        | `5s`                | Delay between WebSocket reconnect attempts |
+| `--cors-allowed-origins`     | `CORS_ALLOWED_ORIGINS`   | —                   | Comma-separated allowed CORS origins (`*` for any) |
 
 #### HTTP Endpoints
 

@@ -32,7 +32,7 @@ compose-down:
 	docker compose -f ./docker-compose.yml -p dora down
 
 start-strategy-server:
-	go run ./cmd/strategy-server -a "$(STRATEGY_ADDR)" -d "$(DATABASE_URL)" -b "$(DORA_BASE_URL)" -f "$(FRED_API_KEY)" -e "$(ENCRYPTION_KEY)"
+	go run ./cmd/strategy-server -a "$(STRATEGY_ADDR)" -d "$(DATABASE_URL)" -b "$(DORA_BASE_URL)" -f "$(FRED_API_KEY)" -e "$(ENCRYPTION_KEY)" --cors-allowed-origins "https://dora-awsdev.vercel.app"
 
 start-mcp-server:
 	go run ./cmd/mcp-server -a "$(MCP_ADDR)" -b "$(MCP_BASE_URL)" -s "$(STRATEGY_BASE_URL)" -f "$(FRED_API_KEY)" -k "$(DORA_API_KEY)"
