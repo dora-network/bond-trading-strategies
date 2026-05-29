@@ -659,7 +659,8 @@
           "asset_name": { "type": "string" },
           "asset_symbol": { "type": "string" },
           "created_at": { "type": "string", "format": "date-time" },
-          "completed_at": { "type": "string", "format": "date-time", "nullable": true }
+          "completed_at": { "type": "string", "format": "date-time", "nullable": true },
+          "error": { "type": "string", "description": "Error message if the backtest failed" }
         },
         "required": ["id", "dora_user_id", "strategy_type", "status", "created_at"]
       },

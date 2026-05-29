@@ -243,6 +243,7 @@ type BacktestSummary struct {
 	AssetSymbol  string          `json:"asset_symbol"`
 	CreatedAt    time.Time       `json:"created_at"`
 	CompletedAt  *time.Time      `json:"completed_at,omitempty"`
+	Error        string          `json:"error,omitempty"`
 }
 
 type BacktestDetail struct {
@@ -250,7 +251,6 @@ type BacktestDetail struct {
 	Start  time.Time       `json:"start"`
 	End    time.Time       `json:"end"`
 	Result *BacktestResult `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
 }
 
 type RunSummary struct {

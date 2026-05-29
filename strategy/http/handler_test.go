@@ -285,6 +285,87 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestHandlerFailedBacktestIncludesError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	resultCh := make(chan types.BacktestResult, 1)
+	backtestID := uuid.Must(uuid.NewV7())
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(ctx context.Context, strat strategycore.Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
+			return backtestID, resultCh, nil
+		},
+	}
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time { return now }),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-test-1", nil
+			},
+		}),
+	)
+
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window":   20,
+			"entry_z_score":     2.0,
+			"exit_z_score":      0.5,
+			"stop_loss_z_score": 3.5,
+			"min_std_dev":       0.0005,
+			"max_position_size": 1.0,
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	}
+
+	rec := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	resultCh <- types.BacktestResult{Err: fmt.Errorf("observation load failed")}
+
+	// Full GET endpoint should include the error.
+	require.Eventually(t, func() bool {
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return false
+		}
+		var result strategyhttp.BacktestResultSummary
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			return false
+		}
+		return result.Status == "failed" && result.Error == "observation load failed"
+	}, time.Second, 10*time.Millisecond)
+
+	// Metadata endpoint should also include the error.
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/metadata", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var summary strategyhttp.BacktestSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &summary))
+	assert.Equal(t, "failed", summary.Status)
+	assert.Equal(t, "observation load failed", summary.Error)
+
+	// List endpoint should also include the error.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var listResp struct {
+		Items []strategyhttp.BacktestSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listResp))
+	require.Len(t, listResp.Items, 1)
+	assert.Equal(t, "failed", listResp.Items[0].Status)
+	assert.Equal(t, "observation load failed", listResp.Items[0].Error)
+}
+
 func TestHandlerRejectsNotImplementedBacktest(t *testing.T) {
 	t.Parallel()
 
@@ -814,10 +895,10 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 					Config:       json.RawMessage(`{"lookback_window":10}`),
 					CreatedAt:    now.Add(-time.Minute),
 					CompletedAt:  &completedAt,
+					Error:        "something went wrong",
 				},
 				Start: now.Add(-2 * time.Hour),
 				End:   now.Add(-time.Hour),
-				Error: "something went wrong",
 			},
 			uuid.Must(uuid.NewV7()): {
 				BacktestSummary: strategyhttp.BacktestSummary{
@@ -905,10 +986,10 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 					Status:       "failed",
 					Config:       json.RawMessage(`{"lookback_window":10}`),
 					CreatedAt:    now.Add(-24 * time.Hour),
+					Error:        "error occurred",
 				},
 				Start: now.Add(-25 * time.Hour),
 				End:   now.Add(-24 * time.Hour),
-				Error: "error occurred",
 			},
 			id3: {
 				BacktestSummary: strategyhttp.BacktestSummary{
