@@ -45,12 +45,25 @@ func NewBacktester(s *Strategy) *Backtester {
 //nolint:funlen // backtest simulation with multiple phases
 func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (types.BacktestResult, error) {
 	var (
-		closedTrades     []types.ClosedTrade
-		tradeRecords     []types.TradeRecord
-		openTrade        *types.TradeRecord // nil when flat
-		lastDecision     types.Decision     // last strategy decision, used for force-close z-score
-		remainingBalance = b.strategy.cfg.InitialBalance
+		closedTrades []types.ClosedTrade
+		tradeRecords []types.TradeRecord
+		openTrade    *types.TradeRecord // nil when flat
+		lastDecision types.Decision     // last strategy decision, used for force-close z-score
 	)
+
+	// Effective capital mirrors the live cappedOrderQuantity calculation:
+	//   effectiveCapital = InitialBalance × collateralWeight × Leverage.
+	// collateralWeight is 1.0 during backtests (never fetched from DORA),
+	// so only Leverage is meaningful here.
+	effectiveCapital, err := b.strategy.cfg.InitialBalance.Mul(b.strategy.collateralWeight)
+	if err != nil {
+		return types.BacktestResult{}, err
+	}
+	effectiveCapital, err = effectiveCapital.Mul(b.strategy.cfg.Leverage)
+	if err != nil {
+		return types.BacktestResult{}, err
+	}
+	remainingBalance := effectiveCapital
 
 	for _, o := range obs {
 		select {
