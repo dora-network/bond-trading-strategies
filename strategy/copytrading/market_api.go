@@ -14,7 +14,7 @@ import (
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
 //counterfeiter:generate . marketAPIClient
 
-type marketAPIClient interface { //nolint:unused
+type marketAPIClient interface {
 	GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error)
 	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool) error //nolint:lll
 }

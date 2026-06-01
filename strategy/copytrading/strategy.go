@@ -33,7 +33,6 @@ type Strategy struct {
 	tradesClient  tradesClient
 	log           *slog.Logger
 	tradeStream   *streams.TradeStream
-	subscriberID  uuid.UUID
 	runID         uuid.UUID
 	disallowedSet map[uuid.UUID]struct{}
 }

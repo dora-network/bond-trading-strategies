@@ -128,7 +128,7 @@ func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (t
 	)
 
 	// Use a default initial balance for backtest
-	remainingBalance := decimal.MustNew(10000, 0)
+	remainingBalance := decimal.MustNew(10000, 0) //nolint:mnd
 
 	for _, trade := range trades {
 		select {
