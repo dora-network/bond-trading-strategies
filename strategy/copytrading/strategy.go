@@ -185,10 +185,9 @@ func (s *Strategy) calculateAvailableBalance(portfolio *doraclient.AccountPortfo
 	}
 
 	total := decimal.Zero
-	for _, account := range accounts {
-		assets := account.GetAssets()
-		for _, asset := range assets {
-			available, err := decimal.NewFromString(asset.GetAvailable())
+	for _, accountMap := range accounts {
+		for _, asset := range accountMap {
+			available, err := decimal.Parse(asset.Available)
 			if err == nil {
 				total, _ = total.Add(available)
 			}
@@ -205,13 +204,13 @@ func calculateOrderSize(available, percentage, leverage decimal.Decimal, minOrde
 	orderSize, _ = orderSize.Mul(leverage)
 
 	if minOrderSize > 0 {
-		minSize := decimal.NewFromInt(int64(minOrderSize))
+		minSize := decimal.MustNew(int64(minOrderSize), 0)
 		if orderSize.Cmp(minSize) < 0 {
 			orderSize = minSize
 		}
 	}
 	if maxOrderSize > 0 {
-		maxSize := decimal.NewFromInt(int64(maxOrderSize))
+		maxSize := decimal.MustNew(int64(maxOrderSize), 0)
 		if orderSize.Cmp(maxSize) > 0 {
 			orderSize = maxSize
 		}

@@ -128,7 +128,7 @@ func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (t
 	)
 
 	// Use a default initial balance for backtest
-	remainingBalance := decimal.NewFromInt(10000)
+	remainingBalance := decimal.MustNew(10000, 0)
 
 	for _, trade := range trades {
 		select {
@@ -143,8 +143,8 @@ func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (t
 			continue
 		}
 
-		price, _ := decimal.NewFromString(trade.Price)
-		quantity, _ := decimal.NewFromString(trade.Quantity0)
+		price, _ := decimal.Parse(trade.Price)
+		quantity, _ := decimal.Parse(trade.Quantity0)
 
 		var signal types.Signal
 		if trade.Side == doraclient.SIDE_BUY {
