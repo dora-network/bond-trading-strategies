@@ -3,8 +3,8 @@ package copytrading
 import (
 	"testing"
 
-	"github.com/govalues/decimal"
 	"github.com/google/uuid"
+	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/require"
 )
 

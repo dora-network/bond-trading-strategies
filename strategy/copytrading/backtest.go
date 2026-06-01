@@ -54,7 +54,7 @@ func (c *doraTradesClient) GetTrades(ctx context.Context, userID string, start, 
 	})
 
 	var allTrades []doraclient.Trade
-	limit := int32(1000)
+	limit := int32(1000) //nolint:mnd
 	page := int32(1)
 
 	for {
@@ -137,7 +137,13 @@ func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (t
 		default:
 		}
 
-		orderSize := calculateOrderSize(remainingBalance, b.strategy.cfg.PercentageOfAvailable, b.strategy.cfg.Leverage, b.strategy.cfg.MinOrderSize, b.strategy.cfg.MaxOrderSize)
+		orderSize := calculateOrderSize(
+			remainingBalance,
+			b.strategy.cfg.PercentageOfAvailable,
+			b.strategy.cfg.Leverage,
+			b.strategy.cfg.MinOrderSize,
+			b.strategy.cfg.MaxOrderSize,
+		)
 
 		if orderSize.IsZero() || orderSize.IsNeg() {
 			continue

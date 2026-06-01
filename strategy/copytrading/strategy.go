@@ -6,13 +6,13 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/config"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/dora-network/dora-client-go/doraclient"
-	"github.com/govalues/decimal"
 	"github.com/google/uuid"
+	"github.com/govalues/decimal"
 )
 
 // Config holds the copy trading strategy configuration.
