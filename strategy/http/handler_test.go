@@ -41,11 +41,22 @@ func TestHandlerListsStrategies(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp.Items, 2)
 	assert.Equal(t, "copytrading", resp.Items[0].Type)
-	assert.Equal(t, "not_implemented", resp.Items[0].Status)
-	require.Len(t, resp.Items[0].ConfigFields, 4)
+	assert.Equal(t, "available", resp.Items[0].Status)
+	require.Len(t, resp.Items[0].ConfigFields, 6)
 	assert.Equal(t, "followed_trader", resp.Items[0].ConfigFields[0].Name)
 	assert.True(t, resp.Items[0].ConfigFields[0].Required)
-	assert.Equal(t, "array[string(uuid)]", resp.Items[0].ConfigFields[3].Type)
+	assert.Equal(t, "percentage_of_available", resp.Items[0].ConfigFields[1].Name)
+	assert.Equal(t, "number", resp.Items[0].ConfigFields[1].Type)
+	assert.True(t, resp.Items[0].ConfigFields[1].Required)
+	assert.Equal(t, "leverage", resp.Items[0].ConfigFields[2].Name)
+	assert.Equal(t, "number", resp.Items[0].ConfigFields[2].Type)
+	assert.True(t, resp.Items[0].ConfigFields[2].Required)
+	assert.Equal(t, "min_order_size", resp.Items[0].ConfigFields[3].Name)
+	assert.False(t, resp.Items[0].ConfigFields[3].Required)
+	assert.Equal(t, "max_order_size", resp.Items[0].ConfigFields[4].Name)
+	assert.False(t, resp.Items[0].ConfigFields[4].Required)
+	assert.Equal(t, "disallowed_bonds", resp.Items[0].ConfigFields[5].Name)
+	assert.False(t, resp.Items[0].ConfigFields[5].Required)
 	assert.Equal(t, "mean_reversion", resp.Items[1].Type)
 	assert.Equal(t, "available", resp.Items[1].Status)
 	require.Len(t, resp.Items[1].ConfigFields, 10)
@@ -366,7 +377,7 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 	assert.Equal(t, "observation load failed", listResp.Items[0].Error)
 }
 
-func TestHandlerRejectsNotImplementedBacktest(t *testing.T) {
+func TestHandlerRejectsCopyTradingBacktestMissingRequiredFields(t *testing.T) {
 	t.Parallel()
 
 	handler := strategyhttp.NewHandler(
@@ -377,13 +388,12 @@ func TestHandlerRejectsNotImplementedBacktest(t *testing.T) {
 		"strategy_type": "copytrading",
 		"config": map[string]any{
 			"followed_trader": uuid.Must(uuid.NewV7()).String(),
-			"min_order_size":  1,
-			"max_order_size":  2,
 		},
 		"start": time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 		"end":   time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 	})
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "percentage_of_available")
 }
 
 func TestHandlerCancelBacktest(t *testing.T) {
@@ -563,7 +573,7 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 	assert.NotNil(t, detail.StoppedAt)
 }
 
-func TestHandlerRejectsNotImplementedRun(t *testing.T) {
+func TestHandlerRejectsCopyTradingRunMissingRequiredFields(t *testing.T) {
 	t.Parallel()
 
 	handler := strategyhttp.NewHandler(
@@ -574,11 +584,10 @@ func TestHandlerRejectsNotImplementedRun(t *testing.T) {
 		"strategy_type": "copytrading",
 		"config": map[string]any{
 			"followed_trader": uuid.Must(uuid.NewV7()).String(),
-			"min_order_size":  1,
-			"max_order_size":  2,
 		},
 	})
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "percentage_of_available")
 }
 
 func TestHandlerListRuns(t *testing.T) {
