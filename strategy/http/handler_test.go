@@ -1364,6 +1364,7 @@ type doraClientFunc struct {
 	listOrderBooks func(context.Context) ([]strategyhttp.DORAOrderBookSummary, error)
 	getUserID      func(context.Context) (string, error)
 	getAssetByID   func(context.Context, string) (*strategyhttp.AssetInfo, error)
+	listBotUsers   func(context.Context) ([]strategyhttp.DORABotUser, error)
 }
 
 func (f doraClientFunc) ListOrderBooks(ctx context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
@@ -1385,6 +1386,13 @@ func (f doraClientFunc) GetUserID(ctx context.Context) (string, error) {
 		return "test-user", nil
 	}
 	return f.getUserID(ctx)
+}
+
+func (f doraClientFunc) ListBotUsers(ctx context.Context) ([]strategyhttp.DORABotUser, error) {
+	if f.listBotUsers == nil {
+		return nil, fmt.Errorf("not implemented")
+	}
+	return f.listBotUsers(ctx)
 }
 
 func (s *memoryRunStore) LoadRuns(ctx context.Context) ([]*strategyhttp.RunDetail, error) {
