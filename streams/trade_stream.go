@@ -14,6 +14,7 @@ import (
 	"github.com/govalues/decimal"
 )
 
+// TradeEvent represents a single trade event from the Dora Network trade stream.
 type TradeEvent struct {
 	TraderID    uuid.UUID
 	OrderBookID uuid.UUID
@@ -25,6 +26,8 @@ type TradeEvent struct {
 	ExecutionID string
 }
 
+// TradeStream connects to the Dora Network trade WebSocket, routes trades to
+// subscribers by followedTrader UUID, and blocks until the context is cancelled.
 type TradeStream struct {
 	mu          sync.Mutex
 	subscribers map[uuid.UUID]*subscriber
@@ -79,7 +82,7 @@ func (ts *TradeStream) Start(ctx context.Context, wsURL, apiKey string, orderBoo
 	}
 
 	<-ctx.Done()
-	return ctx.Err()
+	return nil
 }
 
 func (ts *TradeStream) dialTradeStream(ctx context.Context, wsURL, apiKey, orderBookID string) (<-chan []byte, context.CancelFunc, error) {
@@ -149,15 +152,30 @@ func (ts *TradeStream) routeTrade(data []byte, orderBookID uuid.UUID) {
 		return
 	}
 
-	traderID, _ := uuid.Parse(fmt.Sprintf("%v", val["user_id"]))
-	assetID, _ := uuid.Parse(fmt.Sprintf("%v", val["asset_0"]))
-	executionID, _ := uuid.Parse(fmt.Sprintf("%v", val["transaction_id"]))
+	traderID, err := uuid.Parse(fmt.Sprintf("%v", val["user_id"]))
+	if err != nil {
+		slog.Warn("failed to parse trader ID", "raw", val["user_id"])
+	}
+	assetID, err := uuid.Parse(fmt.Sprintf("%v", val["asset_0"]))
+	if err != nil {
+		slog.Warn("failed to parse asset ID", "raw", val["asset_0"])
+	}
+	executionID, err := uuid.Parse(fmt.Sprintf("%v", val["transaction_id"]))
+	if err != nil {
+		slog.Warn("failed to parse execution ID", "raw", val["transaction_id"])
+	}
 	side, _ := val["side"].(string)
 	priceStr, _ := val["price"].(string)
 	quantityStr, _ := val["quantity_0"].(string)
 
-	price, _ := decimal.Parse(priceStr)
-	quantity, _ := decimal.Parse(quantityStr)
+	price, err := decimal.Parse(priceStr)
+	if err != nil {
+		slog.Warn("failed to parse price", "raw", priceStr)
+	}
+	quantity, err := decimal.Parse(quantityStr)
+	if err != nil {
+		slog.Warn("failed to parse quantity", "raw", quantityStr)
+	}
 
 	event := TradeEvent{
 		TraderID:    traderID,
@@ -182,6 +200,8 @@ func (ts *TradeStream) routeTrade(data []byte, orderBookID uuid.UUID) {
 	ts.mu.Unlock()
 }
 
+// Subscribe registers a subscriber for trades from the given followedTrader UUID.
+// Returns a unique subscriber ID and a read-only channel for TradeEvents.
 func (ts *TradeStream) Subscribe(followedTrader uuid.UUID) (uuid.UUID, <-chan TradeEvent) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -195,6 +215,7 @@ func (ts *TradeStream) Subscribe(followedTrader uuid.UUID) (uuid.UUID, <-chan Tr
 	return subscriberID, s.ch
 }
 
+// Unsubscribe removes the subscriber identified by subscriberID and closes its channel.
 func (ts *TradeStream) Unsubscribe(subscriberID uuid.UUID) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
