@@ -35,19 +35,13 @@ Clamped by MinOrderSize/MaxOrderSize if either > 0.
 
 ### TradeStream (`streams/trade_stream.go`)
 
-Pub/sub WebSocket wrapper for Dora's trade stream. Manages one WS connection per order book, with multiple subscribers each filtering by their followed trader.
+Pub/sub WebSocket wrapper for Dora's trade stream. Subscribes to ALL order books at startup. Subscribers only specify a `followedTrader` UUID. Incoming trades are routed to subscribers whose `followedTrader` matches the trade's `TraderID`.
 
 ```go
 type TradeStream struct {
-    streamFunc TradeStreamFunc
-    mu         sync.Mutex
-    streams    map[uuid.UUID]*activeStream
-}
-
-type activeStream struct {
-    subscribers  map[uuid.UUID]*subscriber
-    cancel       context.CancelFunc
-    done         chan struct{}
+    streamFunc  TradeStreamFunc
+    mu          sync.Mutex
+    subscribers map[uuid.UUID]*subscriber // key = subscriber ID
 }
 
 type subscriber struct {
@@ -66,12 +60,15 @@ type TradeEvent struct {
     ExecutionID   string
 }
 
-type TradeStreamFunc func(ctx context.Context, wsURL string, apiKey string, orderBookID string) (<-chan TradeEvent, context.CancelFunc, error)
+type TradeStreamFunc func(ctx context.Context, wsURL string, apiKey string) (<-chan TradeEvent, context.CancelFunc, error)
 ```
 
 Public API:
-- `Subscribe(orderBookID, subscriberID, followedTrader) (<-chan TradeEvent, error)` — creates a new subscriber, opens WS if first for this book
-- `Unsubscribe(subscriberID)` — removes subscriber, closes WS if last for that book
+- `Subscribe(followedTrader) (<-chan TradeEvent, error)` — creates a subscriber, opens WS connections for all OPEN order books if first subscriber
+- `Unsubscribe(subscriberID)` — removes subscriber
+- Trade routing: when a trade arrives from any WS, iterate subscribers whose `followedTrader` matches the trade's `TraderID`, forward to their channels
+
+If no subscribers, trades are still received from the WS but discarded.
 
 ### Strategy (`strategy/copytrading/strategy.go`)
 
@@ -85,10 +82,9 @@ type Strategy struct {
 ```
 
 `Run(ctx, msgCh, runID) error`:
-1. List all OPEN order books via Dora SDK
-2. Subscribe to TradeStream for each order book with the followed trader filter
-3. Main loop: select on trade channels + stop/pause/resume messages
-4. On trade:
+1. Subscribe to TradeStream with the followed trader filter
+2. Main loop: select on trade channel + stop/pause/resume messages
+3. On trade:
    - Check if asset is in DisallowedBonds → skip if yes
    - Query DORA API for current position (available balance + bond quantities)
    - Calculate order size
