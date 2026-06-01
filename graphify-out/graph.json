@@ -6627,7 +6627,7 @@
       "file_type": "code",
       "source_file": "docs/openapi/strategy-server.json",
       "source_location": "L60",
-      "community": 8,
+      "community": 33,
       "norm_label": "500",
       "id": "openapi_strategy_server_responses_500"
     },
@@ -6636,7 +6636,7 @@
       "file_type": "code",
       "source_file": "docs/openapi/strategy-server.json",
       "source_location": "L60",
-      "community": 8,
+      "community": 33,
       "norm_label": "$ref",
       "id": "openapi_strategy_server_500_ref"
     },
@@ -6906,7 +6906,7 @@
       "file_type": "code",
       "source_file": "docs/openapi/strategy-server.json",
       "source_location": "L224",
-      "community": 33,
+      "community": 8,
       "norm_label": "404",
       "id": "openapi_strategy_server_responses_404"
     },
@@ -6915,7 +6915,7 @@
       "file_type": "code",
       "source_file": "docs/openapi/strategy-server.json",
       "source_location": "L224",
-      "community": 33,
+      "community": 8,
       "norm_label": "$ref",
       "id": "openapi_strategy_server_404_ref"
     },
@@ -11016,54 +11016,54 @@
       "file_type": "code",
       "source_file": "strategy.go",
       "source_location": "L1",
-      "id": "strategy_go",
       "community": 0,
-      "norm_label": "strategy.go"
+      "norm_label": "strategy.go",
+      "id": "strategy_go"
     },
     {
       "label": "historical_data_test.go",
       "file_type": "code",
       "source_file": "historical_data_test.go",
       "source_location": "L1",
-      "id": "historical_data_test_go",
       "community": 0,
-      "norm_label": "historical_data_test.go"
+      "norm_label": "historical_data_test.go",
+      "id": "historical_data_test_go"
     },
     {
       "label": "market_api_test.go",
       "file_type": "code",
       "source_file": "market_api_test.go",
       "source_location": "L1",
-      "id": "market_api_test_go",
       "community": 0,
-      "norm_label": "market_api_test.go"
+      "norm_label": "market_api_test.go",
+      "id": "market_api_test_go"
     },
     {
       "label": "strategy_test.go",
       "file_type": "code",
       "source_file": "strategy_test.go",
       "source_location": "L1",
-      "id": "strategy_test_go",
       "community": 0,
-      "norm_label": "strategy_test.go"
+      "norm_label": "strategy_test.go",
+      "id": "strategy_test_go"
     },
     {
       "label": "market_api.go",
       "file_type": "code",
       "source_file": "market_api.go",
       "source_location": "L1",
-      "id": "market_api_go",
       "community": 0,
-      "norm_label": "market_api.go"
+      "norm_label": "market_api.go",
+      "id": "market_api_go"
     },
     {
       "label": "fake_market_apiclient.go",
       "file_type": "code",
       "source_file": "meanreversionfakes/fake_market_apiclient.go",
       "source_location": "L1",
-      "id": "meanreversionfakes_fake_market_apiclient_go",
       "community": 2,
-      "norm_label": "fake_market_apiclient.go"
+      "norm_label": "fake_market_apiclient.go",
+      "id": "meanreversionfakes_fake_market_apiclient_go"
     },
     {
       "label": "bond-trading-strategies Project",
@@ -11074,9 +11074,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_bond_trading_strategies",
       "community": 12,
-      "norm_label": "bond-trading-strategies project"
+      "norm_label": "bond-trading-strategies project",
+      "id": "agentsmd_bond_trading_strategies"
     },
     {
       "label": "MCP Server (cmd/mcp-server)",
@@ -11087,9 +11087,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_mcp_server",
       "community": 12,
-      "norm_label": "mcp server (cmd/mcp-server)"
+      "norm_label": "mcp server (cmd/mcp-server)",
+      "id": "agentsmd_mcp_server"
     },
     {
       "label": "Strategy Server (cmd/strategy-server)",
@@ -11100,9 +11100,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_strategy_server",
       "community": 12,
-      "norm_label": "strategy server (cmd/strategy-server)"
+      "norm_label": "strategy server (cmd/strategy-server)",
+      "id": "agentsmd_strategy_server"
     },
     {
       "label": "Price Daemon (cmd/price-daemon)",
@@ -11113,9 +11113,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_price_daemon",
       "community": 12,
-      "norm_label": "price daemon (cmd/price-daemon)"
+      "norm_label": "price daemon (cmd/price-daemon)",
+      "id": "agentsmd_price_daemon"
     },
     {
       "label": "PostgreSQL Database",
@@ -11126,9 +11126,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_postgresql",
       "community": 12,
-      "norm_label": "postgresql database"
+      "norm_label": "postgresql database",
+      "id": "agentsmd_postgresql"
     },
     {
       "label": "tern Migration Tool",
@@ -11139,9 +11139,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_tern",
       "community": 12,
-      "norm_label": "tern migration tool"
+      "norm_label": "tern migration tool",
+      "id": "agentsmd_tern"
     },
     {
       "label": "testify",
@@ -11152,9 +11152,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_testify",
       "community": 12,
-      "norm_label": "testify"
+      "norm_label": "testify",
+      "id": "agentsmd_testify"
     },
     {
       "label": "counterfeiter",
@@ -11165,9 +11165,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_counterfeiter",
       "community": 12,
-      "norm_label": "counterfeiter"
+      "norm_label": "counterfeiter",
+      "id": "agentsmd_counterfeiter"
     },
     {
       "label": "mcptest",
@@ -11178,9 +11178,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_mcptest",
       "community": 12,
-      "norm_label": "mcptest"
+      "norm_label": "mcptest",
+      "id": "agentsmd_mcptest"
     },
     {
       "label": "golangci-lint",
@@ -11191,9 +11191,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_golangci_lint",
       "community": 12,
-      "norm_label": "golangci-lint"
+      "norm_label": "golangci-lint",
+      "id": "agentsmd_golangci_lint"
     },
     {
       "label": "commitlint",
@@ -11204,9 +11204,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_commitlint",
       "community": 12,
-      "norm_label": "commitlint"
+      "norm_label": "commitlint",
+      "id": "agentsmd_commitlint"
     },
     {
       "label": "Conventional Commits",
@@ -11217,9 +11217,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_conventional_commits",
       "community": 12,
-      "norm_label": "conventional commits"
+      "norm_label": "conventional commits",
+      "id": "agentsmd_conventional_commits"
     },
     {
       "label": "DORA API",
@@ -11230,9 +11230,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_dora_api",
       "community": 12,
-      "norm_label": "dora api"
+      "norm_label": "dora api",
+      "id": "agentsmd_dora_api"
     },
     {
       "label": "FRED API",
@@ -11243,9 +11243,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_fred_api",
       "community": 12,
-      "norm_label": "fred api"
+      "norm_label": "fred api",
+      "id": "agentsmd_fred_api"
     },
     {
       "label": "strategy.Service",
@@ -11256,9 +11256,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_strategy_service",
       "community": 12,
-      "norm_label": "strategy.service"
+      "norm_label": "strategy.service",
+      "id": "agentsmd_strategy_service"
     },
     {
       "label": "streams.Daemon",
@@ -11269,9 +11269,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_streams_daemon",
       "community": 12,
-      "norm_label": "streams.daemon"
+      "norm_label": "streams.daemon",
+      "id": "agentsmd_streams_daemon"
     },
     {
       "label": "strategy/http.RunStore",
@@ -11282,9 +11282,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_runstore",
       "community": 12,
-      "norm_label": "strategy/http.runstore"
+      "norm_label": "strategy/http.runstore",
+      "id": "agentsmd_runstore"
     },
     {
       "label": "strategy/http.BacktestStore",
@@ -11295,9 +11295,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_backteststore",
       "community": 12,
-      "norm_label": "strategy/http.backteststore"
+      "norm_label": "strategy/http.backteststore",
+      "id": "agentsmd_backteststore"
     },
     {
       "label": "strategy/http.Handler",
@@ -11308,9 +11308,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_handler",
       "community": 12,
-      "norm_label": "strategy/http.handler"
+      "norm_label": "strategy/http.handler",
+      "id": "agentsmd_handler"
     },
     {
       "label": "govalues/decimal",
@@ -11321,9 +11321,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_govalues_decimal",
       "community": 12,
-      "norm_label": "govalues/decimal"
+      "norm_label": "govalues/decimal",
+      "id": "agentsmd_govalues_decimal"
     },
     {
       "label": "dora-client-go",
@@ -11334,9 +11334,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_dora_client_go",
       "community": 12,
-      "norm_label": "dora-client-go"
+      "norm_label": "dora-client-go",
+      "id": "agentsmd_dora_client_go"
     },
     {
       "label": "graphify Knowledge Graph",
@@ -11347,9 +11347,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "agentsmd_graphify",
       "community": 12,
-      "norm_label": "graphify knowledge graph"
+      "norm_label": "graphify knowledge graph",
+      "id": "agentsmd_graphify"
     },
     {
       "label": "pre-commit Framework",
@@ -11360,9 +11360,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "precommitconfig_pre_commit",
       "community": 12,
-      "norm_label": "pre-commit framework"
+      "norm_label": "pre-commit framework",
+      "id": "precommitconfig_pre_commit"
     },
     {
       "label": "pre-commit-hooks (generic)",
@@ -11373,9 +11373,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "precommitconfig_pre_commit_hooks",
       "community": 12,
-      "norm_label": "pre-commit-hooks (generic)"
+      "norm_label": "pre-commit-hooks (generic)",
+      "id": "precommitconfig_pre_commit_hooks"
     },
     {
       "label": "commitlint Pre-commit Hook",
@@ -11386,9 +11386,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "precommitconfig_commitlint_hook",
       "community": 12,
-      "norm_label": "commitlint pre-commit hook"
+      "norm_label": "commitlint pre-commit hook",
+      "id": "precommitconfig_commitlint_hook"
     },
     {
       "label": "golangci-lint Pre-commit Hook",
@@ -11399,9 +11399,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "precommitconfig_golangci_lint_hook",
       "community": 12,
-      "norm_label": "golangci-lint pre-commit hook"
+      "norm_label": "golangci-lint pre-commit hook",
+      "id": "precommitconfig_golangci_lint_hook"
     },
     {
       "label": "go-imports Pre-commit Hook",
@@ -11412,9 +11412,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "precommitconfig_go_imports_hook",
       "community": 12,
-      "norm_label": "go-imports pre-commit hook"
+      "norm_label": "go-imports pre-commit hook",
+      "id": "precommitconfig_go_imports_hook"
     },
     {
       "label": "go-mod-tidy Pre-commit Hook",
@@ -11425,9 +11425,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "precommitconfig_go_mod_tidy_hook",
       "community": 12,
-      "norm_label": "go-mod-tidy pre-commit hook"
+      "norm_label": "go-mod-tidy pre-commit hook",
+      "id": "precommitconfig_go_mod_tidy_hook"
     },
     {
       "label": "go-vet Pre-commit Hook",
@@ -11438,9 +11438,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "precommitconfig_go_vet_hook",
       "community": 12,
-      "norm_label": "go-vet pre-commit hook"
+      "norm_label": "go-vet pre-commit hook",
+      "id": "precommitconfig_go_vet_hook"
     },
     {
       "label": "go-test Pre-commit Hook",
@@ -11451,9 +11451,9 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "id": "precommitconfig_go_test_hook",
       "community": 12,
-      "norm_label": "go-test pre-commit hook"
+      "norm_label": "go-test pre-commit hook",
+      "id": "precommitconfig_go_test_hook"
     }
   ],
   "links": [
@@ -11465,6 +11465,16 @@
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "strategy_meanreversion_historical_data_test_go",
+      "target": "meanreversion_historical_data_test_teststrategygetobservations"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "historical_data_test.go",
+      "source_location": "L20",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "historical_data_test_go",
       "target": "meanreversion_historical_data_test_teststrategygetobservations"
     },
     {
@@ -11525,16 +11535,6 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
-      "source_file": "historical_data_test.go",
-      "source_location": "L20",
-      "weight": 1.0,
-      "source": "historical_data_test_go",
-      "target": "meanreversion_historical_data_test_teststrategygetobservations",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
       "source_file": "strategy/meanreversion/market_api.go",
       "source_location": "L25",
       "weight": 1.0,
@@ -11578,9 +11578,19 @@
       "source_file": "market_api.go",
       "source_location": "L16",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "market_api_go",
-      "target": "meanreversion_marketapiclient",
-      "confidence_score": 1.0
+      "target": "meanreversion_marketapiclient"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "market_api.go",
+      "source_location": "L26",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "market_api_go",
+      "target": "meanreversion_doraapiclient"
     },
     {
       "relation": "method",
@@ -11666,11 +11676,22 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "market_api.go",
-      "source_location": "L26",
+      "source_location": "L36",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "market_api_go",
-      "target": "meanreversion_doraapiclient",
-      "confidence_score": 1.0
+      "target": "meanreversion_market_api_newdoraclientwithkey"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "market_api.go",
+      "source_location": "L51",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "meanreversion_market_api_newdoraclient",
+      "target": "meanreversion_market_api_newdoraclientwithkey"
     },
     {
       "relation": "calls",
@@ -11717,25 +11738,14 @@
       "target": "meanreversion_dora_client_test_testdoraapiclient_createmarketorder_errorhandling"
     },
     {
-      "relation": "calls",
-      "context": "call",
-      "confidence": "EXTRACTED",
-      "source_file": "market_api.go",
-      "source_location": "L51",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "meanreversion_market_api_newdoraclient",
-      "target": "meanreversion_market_api_newdoraclientwithkey"
-    },
-    {
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "market_api.go",
-      "source_location": "L36",
+      "source_location": "L50",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "market_api_go",
-      "target": "meanreversion_market_api_newdoraclientwithkey",
-      "confidence_score": 1.0
+      "target": "meanreversion_market_api_newdoraclient"
     },
     {
       "relation": "calls",
@@ -11747,16 +11757,6 @@
       "weight": 1.0,
       "source": "meanreversion_strategy_new",
       "target": "meanreversion_market_api_newdoraclient"
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "market_api.go",
-      "source_location": "L50",
-      "weight": 1.0,
-      "source": "market_api_go",
-      "target": "meanreversion_market_api_newdoraclient",
-      "confidence_score": 1.0
     },
     {
       "relation": "calls",
@@ -11877,6 +11877,16 @@
       "target": "meanreversion_market_api_test_teststrategylookupassetid"
     },
     {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "market_api_test.go",
+      "source_location": "L16",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "market_api_test_go",
+      "target": "meanreversion_market_api_test_teststrategylookupassetid"
+    },
+    {
       "relation": "calls",
       "context": "call",
       "confidence": "INFERRED",
@@ -11913,11 +11923,11 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "market_api_test.go",
-      "source_location": "L16",
+      "source_location": "L66",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "market_api_test_go",
-      "target": "meanreversion_market_api_test_teststrategylookupassetid",
-      "confidence_score": 1.0
+      "target": "meanreversion_market_api_test_teststrategycurrentposition"
     },
     {
       "relation": "calls",
@@ -11956,11 +11966,11 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "market_api_test.go",
-      "source_location": "L66",
+      "source_location": "L99",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "market_api_test_go",
-      "target": "meanreversion_market_api_test_teststrategycurrentposition",
-      "confidence_score": 1.0
+      "target": "meanreversion_market_api_test_teststrategycappedorderquantity"
     },
     {
       "relation": "calls",
@@ -11987,21 +11997,21 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
-      "source_file": "market_api_test.go",
-      "source_location": "L99",
-      "weight": 1.0,
-      "source": "market_api_test_go",
-      "target": "meanreversion_market_api_test_teststrategycappedorderquantity",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
       "source_file": "strategy/meanreversion/meanreversionfakes/fake_market_apiclient.go",
       "source_location": "L12",
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "strategy_meanreversion_meanreversionfakes_fake_market_apiclient_go",
+      "target": "meanreversionfakes_fakemarketapiclient"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "meanreversionfakes/fake_market_apiclient.go",
+      "source_location": "L12",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "meanreversionfakes_fake_market_apiclient_go",
       "target": "meanreversionfakes_fakemarketapiclient"
     },
     {
@@ -12445,16 +12455,6 @@
       "target": "meanreversionfakes_fakemarketapiclient_selfuseridreturnsoncall"
     },
     {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "meanreversionfakes/fake_market_apiclient.go",
-      "source_location": "L12",
-      "weight": 1.0,
-      "source": "meanreversionfakes_fake_market_apiclient_go",
-      "target": "meanreversionfakes_fakemarketapiclient",
-      "confidence_score": 1.0
-    },
-    {
       "relation": "calls",
       "context": "call",
       "confidence": "EXTRACTED",
@@ -12597,9 +12597,9 @@
       "source_file": "strategy.go",
       "source_location": "L25",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_go",
-      "target": "meanreversion_config",
-      "confidence_score": 1.0
+      "target": "meanreversion_config"
     },
     {
       "relation": "contains",
@@ -12607,9 +12607,9 @@
       "source_file": "strategy.go",
       "source_location": "L69",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_go",
-      "target": "meanreversion_strategy_defaultconfig",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_defaultconfig"
     },
     {
       "relation": "method",
@@ -12757,9 +12757,9 @@
       "source_file": "strategy.go",
       "source_location": "L88",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_go",
-      "target": "meanreversion_strategy",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy"
     },
     {
       "relation": "calls",
@@ -13009,9 +13009,9 @@
       "source_file": "strategy.go",
       "source_location": "L127",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_go",
-      "target": "meanreversion_strategy_new",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_new"
     },
     {
       "relation": "calls",
@@ -13063,9 +13063,9 @@
       "source_file": "strategy.go",
       "source_location": "L147",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_go",
-      "target": "meanreversion_strategy_withlogger",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_withlogger"
     },
     {
       "relation": "calls",
@@ -13106,9 +13106,9 @@
       "source_file": "strategy.go",
       "source_location": "L157",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_go",
-      "target": "meanreversion_strategy_withmarketapiclient",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_withmarketapiclient"
     },
     {
       "relation": "calls",
@@ -13651,9 +13651,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L33",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_bondpricefromytm",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_bondpricefromytm"
     },
     {
       "relation": "calls",
@@ -13837,9 +13837,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L47",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_defaultconfig",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_defaultconfig"
     },
     {
       "relation": "calls",
@@ -13902,9 +13902,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L59",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_obs",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_obs"
     },
     {
       "relation": "calls",
@@ -13934,9 +13934,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L70",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_makeobs",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_makeobs"
     },
     {
       "relation": "calls",
@@ -13955,9 +13955,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L80",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testrollingwindow_notreadyuntilfull",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testrollingwindow_notreadyuntilfull"
     },
     {
       "relation": "calls",
@@ -13976,9 +13976,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L90",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testrollingwindow_meanandstddev_constantseries",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testrollingwindow_meanandstddev_constantseries"
     },
     {
       "relation": "calls",
@@ -13997,9 +13997,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L101",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testrollingwindow_meanupdatescorrectly",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testrollingwindow_meanupdatescorrectly"
     },
     {
       "relation": "calls",
@@ -14029,9 +14029,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L112",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testrollingwindow_stddev_knownvalues",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testrollingwindow_stddev_knownvalues"
     },
     {
       "relation": "calls",
@@ -14050,9 +14050,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L139",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testrollingwindow_zscore",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testrollingwindow_zscore"
     },
     {
       "relation": "contains",
@@ -14060,9 +14060,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L160",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_teststrategy_holdbeforewindowfull",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_teststrategy_holdbeforewindowfull"
     },
     {
       "relation": "contains",
@@ -14070,9 +14070,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L172",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_teststrategy_buysignalonwidespread",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_teststrategy_buysignalonwidespread"
     },
     {
       "relation": "contains",
@@ -14080,9 +14080,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L205",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_teststrategy_sellsignalontightspread",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_teststrategy_sellsignalontightspread"
     },
     {
       "relation": "contains",
@@ -14090,9 +14090,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L229",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_teststrategy_holdwithinneutralband",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_teststrategy_holdwithinneutralband"
     },
     {
       "relation": "contains",
@@ -14100,9 +14100,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L252",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_teststrategy_shouldexit_profittake",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_teststrategy_shouldexit_profittake"
     },
     {
       "relation": "contains",
@@ -14110,9 +14110,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L269",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_teststrategy_shouldexit_stoploss",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_teststrategy_shouldexit_stoploss"
     },
     {
       "relation": "contains",
@@ -14120,9 +14120,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L290",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_teststrategy_shouldexit_stoplossdisabled",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_teststrategy_shouldexit_stoplossdisabled"
     },
     {
       "relation": "contains",
@@ -14130,9 +14130,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L304",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testbacktester_notradesbeforewindowfull",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testbacktester_notradesbeforewindowfull"
     },
     {
       "relation": "contains",
@@ -14140,9 +14140,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L317",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testbacktester_profitablereversion",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testbacktester_profitablereversion"
     },
     {
       "relation": "contains",
@@ -14150,9 +14150,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L374",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testbacktester_lossingtradeforceclosedatend",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testbacktester_lossingtradeforceclosedatend"
     },
     {
       "relation": "contains",
@@ -14160,9 +14160,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L424",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testbacktestresult_maxdrawdown",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testbacktestresult_maxdrawdown"
     },
     {
       "relation": "contains",
@@ -14170,9 +14170,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L440",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testsignalstring",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testsignalstring"
     },
     {
       "relation": "calls",
@@ -14202,9 +14202,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L452",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testinitializebalances_setsopensignalfromdoraposition",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testinitializebalances_setsopensignalfromdoraposition"
     },
     {
       "relation": "calls",
@@ -14234,9 +14234,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L495",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testrunloop_nonewentrywhenpositionopen",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testrunloop_nonewentrywhenpositionopen"
     },
     {
       "relation": "calls",
@@ -14277,9 +14277,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L576",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testrunloop_closespositiononshouldexit",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testrunloop_closespositiononshouldexit"
     },
     {
       "relation": "calls",
@@ -14320,9 +14320,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L658",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testrunloop_nonewentrywhenquantityzero",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testrunloop_nonewentrywhenquantityzero"
     },
     {
       "relation": "calls",
@@ -14374,9 +14374,9 @@
       "source_file": "strategy_test.go",
       "source_location": "L734",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "strategy_test_go",
-      "target": "meanreversion_strategy_test_testrunloop_selfhealswhenpositiondoesnotexistonexchange",
-      "confidence_score": 1.0
+      "target": "meanreversion_strategy_test_testrunloop_selfhealswhenpositiondoesnotexistonexchange"
     },
     {
       "relation": "contains",
@@ -15195,6 +15195,15 @@
     },
     {
       "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "fred/tenor.go",
+      "source_location": 148,
+      "source": "fred_client_fetchseries",
+      "target": "fred_client_fetchyieldcurve"
+    },
+    {
+      "relation": "calls",
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "fred/client.go",
@@ -15203,15 +15212,6 @@
       "confidence_score": 1.0,
       "source": "fred_client_fetchseries",
       "target": "fred_client_parseobservations"
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "fred/tenor.go",
-      "source_location": 148,
-      "source": "fred_client_fetchseries",
-      "target": "fred_client_fetchyieldcurve"
     },
     {
       "relation": "calls",
@@ -16068,17 +16068,6 @@
     {
       "relation": "calls",
       "context": "call",
-      "confidence": "INFERRED",
-      "confidence_score": 0.8,
-      "source_file": "fred/client_test.go",
-      "source_location": "L39",
-      "weight": 1.0,
-      "source": "fred_client_test_newtestclient",
-      "target": "mcp_server_newserver"
-    },
-    {
-      "relation": "calls",
-      "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "fred/client_test.go",
       "source_location": "L245",
@@ -16218,6 +16207,17 @@
       "confidence_score": 1.0,
       "source": "fred_client_test_newtestclient",
       "target": "fred_client_test_testfetchseries_yieldconversionpercent"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "fred/client_test.go",
+      "source_location": "L39",
+      "weight": 1.0,
+      "source": "fred_client_test_newtestclient",
+      "target": "mcp_server_newserver"
     },
     {
       "relation": "calls",
@@ -16834,22 +16834,22 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "cmd/price-daemon/health.go",
-      "source_location": "L161",
+      "source_location": "L110",
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "price_daemon_healthchecker_status",
-      "target": "price_daemon_health_newhealthhandler"
+      "target": "price_daemon_health_isstale"
     },
     {
       "relation": "calls",
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "cmd/price-daemon/health.go",
-      "source_location": "L110",
+      "source_location": "L161",
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "price_daemon_healthchecker_status",
-      "target": "price_daemon_health_isstale"
+      "target": "price_daemon_health_newhealthhandler"
     },
     {
       "relation": "calls",
@@ -19508,22 +19508,22 @@
       "context": "call",
       "confidence": "INFERRED",
       "confidence_score": 0.8,
-      "source_file": "strategy/http/auth.go",
-      "source_location": "L37",
+      "source_file": "strategy/http/handler.go",
+      "source_location": "L423",
       "weight": 1.0,
       "source": "http_auth_requireauth",
-      "target": "http_handler_writeerror"
+      "target": "http_handler_newhandler"
     },
     {
       "relation": "calls",
       "context": "call",
       "confidence": "INFERRED",
       "confidence_score": 0.8,
-      "source_file": "strategy/http/handler.go",
-      "source_location": "L423",
+      "source_file": "strategy/http/auth.go",
+      "source_location": "L37",
       "weight": 1.0,
       "source": "http_auth_requireauth",
-      "target": "http_handler_newhandler"
+      "target": "http_handler_writeerror"
     },
     {
       "relation": "calls",
@@ -20850,6 +20850,17 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "strategy/http/handler.go",
+      "source_location": "L1130",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "http_handler_listitems",
+      "target": "http_handler_listruns"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "strategy/http/handler.go",
       "source_location": "L327",
       "weight": 1.0,
       "confidence_score": 1.0,
@@ -20877,17 +20888,6 @@
       "confidence_score": 1.0,
       "source": "http_handler_listitems",
       "target": "http_handler_writejson"
-    },
-    {
-      "relation": "calls",
-      "context": "call",
-      "confidence": "EXTRACTED",
-      "source_file": "strategy/http/handler.go",
-      "source_location": "L1130",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "http_handler_listitems",
-      "target": "http_handler_listruns"
     },
     {
       "relation": "calls",
@@ -22434,44 +22434,22 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "strategy/http/handler.go",
-      "source_location": "L1136",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "http_handler_getrun",
-      "target": "http_handler_resolvedorauserid"
-    },
-    {
-      "relation": "calls",
-      "context": "call",
-      "confidence": "EXTRACTED",
-      "source_file": "strategy/http/handler.go",
-      "source_location": "L1138",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "http_handler_getrun",
-      "target": "http_handler_writeerror"
-    },
-    {
-      "relation": "calls",
-      "context": "call",
-      "confidence": "EXTRACTED",
-      "source_file": "strategy/http/handler.go",
-      "source_location": "L1153",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "http_handler_getrun",
-      "target": "http_handler_writejson"
-    },
-    {
-      "relation": "calls",
-      "context": "call",
-      "confidence": "EXTRACTED",
-      "source_file": "strategy/http/handler.go",
       "source_location": "L1241",
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "http_handler_getrun",
       "target": "http_handler_pauserun"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "strategy/http/handler.go",
+      "source_location": "L1136",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "http_handler_getrun",
+      "target": "http_handler_resolvedorauserid"
     },
     {
       "relation": "calls",
@@ -22494,6 +22472,28 @@
       "confidence_score": 1.0,
       "source": "http_handler_getrun",
       "target": "http_handler_stoprun"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "strategy/http/handler.go",
+      "source_location": "L1138",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "http_handler_getrun",
+      "target": "http_handler_writeerror"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "strategy/http/handler.go",
+      "source_location": "L1153",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "http_handler_getrun",
+      "target": "http_handler_writejson"
     },
     {
       "relation": "calls",
@@ -24458,22 +24458,22 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "strategy/meanreversion/historical_data.go",
-      "source_location": "L275",
+      "source_location": "L164",
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "meanreversion_strategy_setbenchmarkobservations",
-      "target": "meanreversion_strategy_prefillwindow"
+      "target": "meanreversion_historical_data_normalizedate"
     },
     {
       "relation": "calls",
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "strategy/meanreversion/historical_data.go",
-      "source_location": "L164",
+      "source_location": "L275",
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "meanreversion_strategy_setbenchmarkobservations",
-      "target": "meanreversion_historical_data_normalizedate"
+      "target": "meanreversion_strategy_prefillwindow"
     },
     {
       "relation": "calls",
@@ -25694,26 +25694,6 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "docs/openapi/strategy-server.json",
-      "source_location": "L402",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "openapi_strategy_server_responses_200",
-      "target": "openapi_strategy_server_delete_responses"
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "docs/openapi/strategy-server.json",
-      "source_location": "L443",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "openapi_strategy_server_responses_200",
-      "target": "openapi_strategy_server_post_responses"
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "docs/openapi/strategy-server.json",
       "source_location": "L445",
       "weight": 1.0,
       "confidence_score": 1.0,
@@ -25729,6 +25709,26 @@
       "confidence_score": 1.0,
       "source": "openapi_strategy_server_responses_200",
       "target": "openapi_strategy_server_200_description"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/openapi/strategy-server.json",
+      "source_location": "L402",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "openapi_strategy_server_responses_200",
+      "target": "openapi_strategy_server_delete_responses"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/openapi/strategy-server.json",
+      "source_location": "L443",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "openapi_strategy_server_responses_200",
+      "target": "openapi_strategy_server_post_responses"
     },
     {
       "relation": "contains",
@@ -25764,6 +25764,16 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "docs/openapi/strategy-server.json",
+      "source_location": "L524",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "openapi_strategy_server_content_application_json",
+      "target": "openapi_strategy_server_application_json_schema"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/openapi/strategy-server.json",
       "source_location": "L491",
       "weight": 1.0,
       "confidence_score": 1.0,
@@ -25779,16 +25789,6 @@
       "confidence_score": 1.0,
       "source": "openapi_strategy_server_content_application_json",
       "target": "openapi_strategy_server_conflict_content"
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "docs/openapi/strategy-server.json",
-      "source_location": "L524",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "openapi_strategy_server_content_application_json",
-      "target": "openapi_strategy_server_application_json_schema"
     },
     {
       "relation": "contains",
@@ -25954,6 +25954,16 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "docs/openapi/strategy-server.json",
+      "source_location": "L453",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "openapi_strategy_server_responses_500",
+      "target": "openapi_strategy_server_500_ref"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/openapi/strategy-server.json",
       "source_location": "L411",
       "weight": 1.0,
       "confidence_score": 1.0,
@@ -25969,16 +25979,6 @@
       "confidence_score": 1.0,
       "source": "openapi_strategy_server_responses_500",
       "target": "openapi_strategy_server_post_responses"
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "docs/openapi/strategy-server.json",
-      "source_location": "L453",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "openapi_strategy_server_responses_500",
-      "target": "openapi_strategy_server_500_ref"
     },
     {
       "relation": "contains",
@@ -26394,21 +26394,21 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "docs/openapi/strategy-server.json",
-      "source_location": "L410",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "openapi_strategy_server_responses_404",
-      "target": "openapi_strategy_server_delete_responses"
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "docs/openapi/strategy-server.json",
       "source_location": "L452",
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "openapi_strategy_server_responses_404",
       "target": "openapi_strategy_server_404_ref"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/openapi/strategy-server.json",
+      "source_location": "L410",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "openapi_strategy_server_responses_404",
+      "target": "openapi_strategy_server_delete_responses"
     },
     {
       "relation": "contains",
@@ -27658,7 +27658,7 @@
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "openapi_strategy_server_properties_type",
-      "target": "openapi_strategy_server_type_type"
+      "target": "openapi_strategy_server_strategyconfigfield_properties"
     },
     {
       "relation": "contains",
@@ -27668,7 +27668,7 @@
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "openapi_strategy_server_properties_type",
-      "target": "openapi_strategy_server_strategyconfigfield_properties"
+      "target": "openapi_strategy_server_type_type"
     },
     {
       "relation": "contains",
@@ -27924,16 +27924,6 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "docs/openapi/strategy-server.json",
-      "source_location": "L601",
-      "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "openapi_strategy_server_properties_config",
-      "target": "openapi_strategy_server_createrunrequest_properties"
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "docs/openapi/strategy-server.json",
       "source_location": "L658",
       "weight": 1.0,
       "confidence_score": 1.0,
@@ -27949,6 +27939,16 @@
       "confidence_score": 1.0,
       "source": "openapi_strategy_server_properties_config",
       "target": "openapi_strategy_server_config_oneof"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/openapi/strategy-server.json",
+      "source_location": "L601",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "openapi_strategy_server_properties_config",
+      "target": "openapi_strategy_server_createrunrequest_properties"
     },
     {
       "relation": "contains",
@@ -30276,16 +30276,6 @@
     },
     {
       "relation": "references",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "README.md",
-      "source_location": null,
-      "weight": 1.0,
-      "source": "strategy_server",
-      "target": "readme_document"
-    },
-    {
-      "relation": "references",
       "confidence": "INFERRED",
       "confidence_score": 0.9,
       "source_file": "docker-compose.yml",
@@ -30293,6 +30283,16 @@
       "weight": 1.0,
       "source": "strategy_server",
       "target": "postgres_database"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": null,
+      "weight": 1.0,
+      "source": "strategy_server",
+      "target": "readme_document"
     },
     {
       "relation": "references",
@@ -30408,6 +30408,16 @@
       "relation": "references",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": null,
+      "weight": 1.0,
+      "source": "postgres_database",
+      "target": "readme_document"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
       "source_file": "migrations/004_create_strategy_backtests.sql",
       "source_location": null,
       "weight": 1.0,
@@ -30423,36 +30433,6 @@
       "weight": 1.0,
       "source": "postgres_database",
       "target": "strategy_runs_table"
-    },
-    {
-      "relation": "references",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "README.md",
-      "source_location": null,
-      "weight": 1.0,
-      "source": "postgres_database",
-      "target": "readme_document"
-    },
-    {
-      "relation": "references",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "docs/bond-trading-strategy-service.md",
-      "source_location": null,
-      "weight": 1.0,
-      "source": "strategy_rest_api",
-      "target": "design_doc"
-    },
-    {
-      "relation": "references",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "docs/openapi/strategy-server.json",
-      "source_location": null,
-      "weight": 1.0,
-      "source": "strategy_rest_api",
-      "target": "openapi_document"
     },
     {
       "relation": "references",
@@ -30478,11 +30458,31 @@
       "relation": "references",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
+      "source_file": "docs/bond-trading-strategy-service.md",
+      "source_location": null,
+      "weight": 1.0,
+      "source": "strategy_rest_api",
+      "target": "design_doc"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
       "source_file": "docs/openapi/strategy-server.json",
       "source_location": null,
       "weight": 1.0,
       "source": "strategy_rest_api",
       "target": "mean_reversion"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "docs/openapi/strategy-server.json",
+      "source_location": null,
+      "weight": 1.0,
+      "source": "strategy_rest_api",
+      "target": "openapi_document"
     },
     {
       "relation": "references",
@@ -30755,15 +30755,6 @@
       "target": "fred_CurvePoint"
     },
     {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "cmd/strategy-server/main.go",
-      "source_location": 112,
-      "source": "cmd_strategy_server_main",
-      "target": "strategy_Service"
-    },
-    {
       "relation": "references",
       "confidence": "INFERRED",
       "confidence_score": 0.9,
@@ -30771,6 +30762,15 @@
       "source_location": 16,
       "source": "cmd_strategy_server_main",
       "target": "mcp_strategyClient"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "cmd/strategy-server/main.go",
+      "source_location": 112,
+      "source": "cmd_strategy_server_main",
+      "target": "strategy_Service"
     },
     {
       "relation": "calls",
@@ -30809,15 +30809,6 @@
       "target": "cmd_price_daemon_healthHandler"
     },
     {
-      "relation": "references",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "cmd/price-daemon/health.go",
-      "source_location": 13,
-      "source": "cmd_price_daemon_healthChecker",
-      "target": "cmd_price_daemon_healthStatus"
-    },
-    {
       "relation": "calls",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
@@ -30825,6 +30816,15 @@
       "source_location": 161,
       "source": "cmd_price_daemon_healthChecker",
       "target": "cmd_price_daemon_healthHandler"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "cmd/price-daemon/health.go",
+      "source_location": 13,
+      "source": "cmd_price_daemon_healthChecker",
+      "target": "cmd_price_daemon_healthStatus"
     },
     {
       "relation": "calls",
@@ -31016,21 +31016,21 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
-      "source_file": "strategy/http/handler.go",
-      "source_location": null,
-      "weight": 1.0,
-      "source": "strategy_http_Handler",
-      "target": "strategy_meanreversion_historicaldata"
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
       "source_file": "strategy/http/handler_test.go",
       "source_location": null,
       "weight": 1.0,
       "source": "strategy_http_Handler",
       "target": "strategy_http_handler_test"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "strategy/http/handler.go",
+      "source_location": null,
+      "weight": 1.0,
+      "source": "strategy_http_Handler",
+      "target": "strategy_meanreversion_historicaldata"
     },
     {
       "relation": "calls",
@@ -31143,16 +31143,6 @@
       "target": "candles_Config"
     },
     {
-      "relation": "semantically_similar_to",
-      "confidence": "INFERRED",
-      "confidence_score": 0.7,
-      "source_file": "candles/handler.go",
-      "source_location": null,
-      "weight": 1.0,
-      "source": "candles_Handler",
-      "target": "streams_Daemon"
-    },
-    {
       "relation": "calls",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
@@ -31161,6 +31151,16 @@
       "weight": 1.0,
       "source": "candles_Handler",
       "target": "candles_Subscriber"
+    },
+    {
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.7,
+      "source_file": "candles/handler.go",
+      "source_location": null,
+      "weight": 1.0,
+      "source": "candles_Handler",
+      "target": "streams_Daemon"
     },
     {
       "relation": "implements",
@@ -31621,5 +31621,5 @@
       "source_file": "AGENTS.md"
     }
   ],
-  "built_at_commit": "30be47ec9eefa9398217091d6595fd5e90711da2"
+  "built_at_commit": "d3bc06b1012408bd98867a9986db69f5b6d44a4e"
 }
