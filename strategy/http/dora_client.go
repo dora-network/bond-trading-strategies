@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/dora-network/dora-client-go/doraclient"
 )
@@ -13,6 +14,26 @@ type doraClient interface {
 	ListOrderBooks(context.Context) ([]DORAOrderBookSummary, error)
 	GetAssetByID(context.Context, string) (*AssetInfo, error)
 	GetUserID(context.Context) (string, error)
+}
+
+// DORABotUser is a simplified view of a DORA user that is exposed by the
+// list-copy-traders placeholder endpoint.
+type DORABotUser struct {
+	ID        string `json:"id"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+}
+
+// isBotUser reports whether a user's first or last name starts with the
+// bot-naming prefix. This is a placeholder heuristic; once DORA exposes a
+// dedicated "list available copy traders" endpoint, the filter is removed.
+func isBotUser(firstName, lastName string) bool {
+	return hasBotPrefix(firstName) || hasBotPrefix(lastName)
+}
+
+func hasBotPrefix(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.HasPrefix(lower, "trader_") || strings.HasPrefix(lower, "mm_")
 }
 
 const apiKeyPrefix = "ApiKey"
