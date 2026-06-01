@@ -1566,13 +1566,25 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 func newCopyTradingDefinition() StrategyDefinition {
 	return StrategyDefinition{
 		Type:        "copytrading",
-		Status:      strategyStatusNotImplemented,
+		Status:      strategyStatusAvailable,
 		Description: "Copy trades from a followed trader subject to limits.",
 		ConfigFields: []StrategyConfigField{
 			{
 				Name:        "followed_trader",
 				Type:        "string(uuid)",
 				Description: "Trader UUID to mirror. Required.",
+				Required:    true,
+			},
+			{
+				Name:        "percentage_of_available",
+				Type:        "number",
+				Description: "Percentage of available balance to use per trade (0-1). Must be greater than 0.",
+				Required:    true,
+			},
+			{
+				Name:        "leverage",
+				Type:        "number",
+				Description: "Leverage multiplier for copied orders. Must be greater than 0.",
 				Required:    true,
 			},
 			{
@@ -1588,20 +1600,20 @@ func newCopyTradingDefinition() StrategyDefinition {
 				Required:    false,
 			},
 			{
-				Name:        "allowed_bonds",
+				Name:        "disallowed_bonds",
 				Type:        "array[string(uuid)]",
-				Description: "Optional allowlist of bond UUIDs. Empty means all bonds are eligible.",
+				Description: "Optional list of bond UUIDs to skip. Empty means no bonds are disallowed.",
 				Required:    false,
 			},
 		},
-		SupportsRun:      false,
-		SupportsBacktest: false,
-		DecodeConfig: func(raw json.RawMessage, _ string) (json.RawMessage, strategycore.Strategy, error) {
+		SupportsRun:      true,
+		SupportsBacktest: true,
+		DecodeConfig: func(raw json.RawMessage, capability string) (json.RawMessage, strategycore.Strategy, error) {
 			cfg, normalised, err := decodeCopyTradingConfig(raw)
 			if err != nil {
 				return nil, nil, err
 			}
-			return normalised, copytrading.New(cfg), nil
+			return normalised, copytrading.New(cfg, copytrading.WithLogger(slog.Default())), nil
 		},
 	}
 }
@@ -1743,10 +1755,12 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 }
 
 type copyTradingConfigPayload struct {
-	FollowedTrader string   `json:"followed_trader"`
-	MinOrderSize   int      `json:"min_order_size"`
-	MaxOrderSize   int      `json:"max_order_size"`
-	AllowedBonds   []string `json:"allowed_bonds"`
+	FollowedTrader        string   `json:"followed_trader"`
+	PercentageOfAvailable float64  `json:"percentage_of_available"`
+	Leverage              float64  `json:"leverage"`
+	MinOrderSize          int      `json:"min_order_size"`
+	MaxOrderSize          int      `json:"max_order_size"`
+	DisallowedBonds       []string `json:"disallowed_bonds"`
 }
 
 func decodeCopyTradingConfig(raw json.RawMessage) (copytrading.Config, json.RawMessage, error) {
@@ -1757,9 +1771,15 @@ func decodeCopyTradingConfig(raw json.RawMessage) (copytrading.Config, json.RawM
 	if payload.FollowedTrader == "" {
 		return copytrading.Config{}, nil, fmt.Errorf("config.followed_trader is required")
 	}
-	followedTrader, err := uuid.Parse(payload.FollowedTrader)
+	followedTrader, err := uuid.Parse(strings.TrimSpace(payload.FollowedTrader))
 	if err != nil {
 		return copytrading.Config{}, nil, fmt.Errorf("config.followed_trader: %w", err)
+	}
+	if payload.PercentageOfAvailable <= 0 || payload.PercentageOfAvailable > 1 {
+		return copytrading.Config{}, nil, fmt.Errorf("config.percentage_of_available must be in (0,1]")
+	}
+	if payload.Leverage <= 0 {
+		return copytrading.Config{}, nil, fmt.Errorf("config.leverage must be greater than 0")
 	}
 	if payload.MinOrderSize < 0 {
 		return copytrading.Config{}, nil, fmt.Errorf("config.min_order_size must be non-negative")
@@ -1767,23 +1787,35 @@ func decodeCopyTradingConfig(raw json.RawMessage) (copytrading.Config, json.RawM
 	if payload.MaxOrderSize < payload.MinOrderSize {
 		return copytrading.Config{}, nil, fmt.Errorf("config.max_order_size must be greater than or equal to min_order_size")
 	}
-	allowedBonds := make([]uuid.UUID, 0, len(payload.AllowedBonds))
-	for i, bond := range payload.AllowedBonds {
+	disallowedBonds := make([]uuid.UUID, 0, len(payload.DisallowedBonds))
+	for i, bond := range payload.DisallowedBonds {
 		id, err := uuid.Parse(bond)
 		if err != nil {
-			return copytrading.Config{}, nil, fmt.Errorf("config.allowed_bonds[%d]: %w", i, err)
+			return copytrading.Config{}, nil, fmt.Errorf("config.disallowed_bonds[%d]: %w", i, err)
 		}
-		allowedBonds = append(allowedBonds, id)
+		disallowedBonds = append(disallowedBonds, id)
 	}
+
+	poa, err := decimal.NewFromFloat64(payload.PercentageOfAvailable)
+	if err != nil {
+		return copytrading.Config{}, nil, fmt.Errorf("config.percentage_of_available: %w", err)
+	}
+	lev, err := decimal.NewFromFloat64(payload.Leverage)
+	if err != nil {
+		return copytrading.Config{}, nil, fmt.Errorf("config.leverage: %w", err)
+	}
+
 	normalised, err := json.Marshal(payload)
 	if err != nil {
 		return copytrading.Config{}, nil, fmt.Errorf("marshal normalised config: %w", err)
 	}
 	return copytrading.Config{
-		FollowedTrader: followedTrader,
-		MinOrderSize:   payload.MinOrderSize,
-		MaxOrderSize:   payload.MaxOrderSize,
-		AllowedBonds:   allowedBonds,
+		FollowedTrader:        followedTrader,
+		PercentageOfAvailable: poa,
+		Leverage:              lev,
+		MinOrderSize:          payload.MinOrderSize,
+		MaxOrderSize:          payload.MaxOrderSize,
+		DisallowedBonds:       disallowedBonds,
 	}, normalised, nil
 }
 
