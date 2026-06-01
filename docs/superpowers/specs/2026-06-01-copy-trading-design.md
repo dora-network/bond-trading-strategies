@@ -56,14 +56,14 @@ type subscriber struct {
 }
 
 type TradeEvent struct {
-    TraderID        string
-    OrderBookID     string
-    AssetID         string
-    Side            string
-    Quantity        decimal.Decimal
-    Price           decimal.Decimal
-    Timestamp       time.Time
-    ExecutionID     string
+    TraderID      uuid.UUID
+    OrderBookID   uuid.UUID
+    AssetID       uuid.UUID
+    Side          string
+    Quantity      decimal.Decimal
+    Price         decimal.Decimal
+    Timestamp     time.Time
+    ExecutionID   string
 }
 
 type TradeStreamFunc func(ctx context.Context, wsURL string, apiKey string, orderBookID string) (<-chan TradeEvent, context.CancelFunc, error)
