@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
@@ -171,39 +170,19 @@ func (b *Backtester) Run(ctx context.Context, start, end time.Time) (BacktestRes
 		b.trades = newDoraTradesClient(apiKey)
 	}
 
-	orderBooks, err := b.trades.ListOrderBooks(ctx)
-	if err != nil {
-		return BacktestResult{}, fmt.Errorf("list order books: %w", err)
-	}
-
 	followedTrader := b.strategy.cfg.FollowedTrader.String()
-	var allTrades []doraclient.Trade
-	for _, obID := range orderBooks {
-		select {
-		case <-ctx.Done():
-			return BacktestResult{}, errors.New("backtest cancelled")
-		default:
-		}
-		trades, err := b.trades.GetTrades(ctx, followedTrader, []string{obID}, start, end)
-		if err != nil {
-			return BacktestResult{}, fmt.Errorf("get trades for order book %s: %w", obID, err)
-		}
-		allTrades = append(allTrades, trades...)
+	ch, done := b.trades.GetTradeStream(ctx, followedTrader, start, end)
+
+	result, simErr := b.simulate(ctx, ch)
+	prodErr := <-done
+
+	if prodErr != nil {
+		return BacktestResult{}, fmt.Errorf("get trade stream: %w", prodErr)
 	}
-
-	filtered := allTrades[:0]
-	for _, tr := range allTrades {
-		if tr.UserId == followedTrader {
-			filtered = append(filtered, tr)
-		}
+	if simErr != nil {
+		return BacktestResult{}, simErr
 	}
-	allTrades = filtered
-
-	sort.Slice(allTrades, func(i, j int) bool {
-		return allTrades[i].CreatedAt.Before(allTrades[j].CreatedAt)
-	})
-
-	return b.simulate(ctx, allTrades)
+	return result, nil
 }
 
 type position struct {
