@@ -80,79 +80,54 @@ func feedChannel(t *testing.T, trades []doraclient.Trade) <-chan doraclient.Trad
 	return ch
 }
 
-func TestBacktesterRunWalksAllOrderBooks(t *testing.T) {
+func TestBacktesterRunCallsGetTradeStream(t *testing.T) {
 	t.Parallel()
 
 	followed := uuid.New()
-	ob1 := "ob-1"
-	ob2 := "ob-2"
-	other := "ob-other"
-
 	t1 := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
 	t2 := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
 
-	tradesOB1 := []doraclient.Trade{
-		{TransactionId: "tx-1", UserId: followed.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: t1, Asset0: "bond-a"},
-	}
-	tradesOB2 := []doraclient.Trade{
-		{TransactionId: "tx-2", UserId: followed.String(), OrderBookId: ob2, Side: doraclient.SIDE_SELL, Price: "101", Quantity0: "1", CreatedAt: t2, Asset0: "bond-b"},
+	trades := []doraclient.Trade{
+		{TransactionId: uuid.New().String(), UserId: followed.String(), Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: t1, Asset0: "bond-a"},
+		{TransactionId: uuid.New().String(), UserId: followed.String(), Side: doraclient.SIDE_SELL, Price: "101", Quantity0: "1", CreatedAt: t2, Asset0: "bond-b"},
 	}
 
-	fake := &fakeTradesClient{
-		orderBooks: []string{ob1, ob2, other},
-		tradesByOrderBK: map[string][]doraclient.Trade{
-			ob1: tradesOB1,
-			ob2: tradesOB2,
-		},
-	}
-
+	fake := &fakeTradesClient{trades: trades}
 	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
 	start := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
 	result, err := b.Run(t.Context(), start, end)
 	require.NoError(t, err)
 
-	require.Len(t, fake.getTradesCalls, 3, "GetTrades must be called once per order book")
-	for i, call := range fake.getTradesCalls {
-		require.Equal(t, followed.String(), call.userID, "call %d must filter by followed trader", i)
-		require.Len(t, call.orderBookIDs, 1, "call %d must target exactly one order book", i)
-	}
-	require.Equal(t, []string{ob1, ob2, other}, []string{
-		fake.getTradesCalls[0].orderBookIDs[0],
-		fake.getTradesCalls[1].orderBookIDs[0],
-		fake.getTradesCalls[2].orderBookIDs[0],
-	})
+	require.Equal(t, followed.String(), fake.streamCall.userID,
+		"GetTradeStream must filter by the followed trader")
+	require.True(t, fake.streamCall.start.Equal(start))
+	require.True(t, fake.streamCall.end.Equal(end))
 
 	records, ok := result.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 2)
 }
 
-func TestBacktesterRunSortsByCreatedAt(t *testing.T) {
+func TestBacktesterRunPreservesStreamOrder(t *testing.T) {
 	t.Parallel()
 
 	followed := uuid.New()
-	ob1 := "ob-1"
-	ob2 := "ob-2"
 
 	later := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
 	earlier := time.Date(2026, 5, 26, 9, 0, 0, 0, time.UTC)
 
-	tradesOB1 := []doraclient.Trade{
-		{TransactionId: "tx-later", UserId: followed.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: later, Asset0: "bond-a"},
-	}
-	tradesOB2 := []doraclient.Trade{
-		{TransactionId: "tx-earlier", UserId: followed.String(), OrderBookId: ob2, Side: doraclient.SIDE_SELL, Price: "101", Quantity0: "1", CreatedAt: earlier, Asset0: "bond-b"},
+	earlierID := uuid.New()
+	laterID := uuid.New()
+
+	// Fake delivers trades in this order; the simulation must consume
+	// them in the same order (no consumer-side sort).
+	trades := []doraclient.Trade{
+		{TransactionId: earlierID.String(), UserId: followed.String(), Side: doraclient.SIDE_SELL, Price: "101", Quantity0: "1", CreatedAt: earlier, Asset0: "bond-b"},
+		{TransactionId: laterID.String(), UserId: followed.String(), Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: later, Asset0: "bond-a"},
 	}
 
-	fake := &fakeTradesClient{
-		orderBooks: []string{ob1, ob2},
-		tradesByOrderBK: map[string][]doraclient.Trade{
-			ob1: tradesOB1,
-			ob2: tradesOB2,
-		},
-	}
-
+	fake := &fakeTradesClient{trades: trades}
 	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
 	start := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
@@ -162,30 +137,30 @@ func TestBacktesterRunSortsByCreatedAt(t *testing.T) {
 	records, ok := result.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok)
 	require.Len(t, records, 2)
-	require.True(t, records[0].Time.Before(records[1].Time),
-		"trades must be sorted by time ascending, got %v then %v",
-		records[0].Time, records[1].Time)
+	require.Equal(t, earlierID, records[0].TradeID,
+		"the first record must be the trade the stream delivered first")
+	require.Equal(t, laterID, records[1].TradeID,
+		"the second record must be the trade the stream delivered second")
 }
 
-func TestBacktesterRunFiltersNonFollowedTraders(t *testing.T) {
+func TestBacktesterRunSimulatesOnlyFollowedTradersTrades(t *testing.T) {
 	t.Parallel()
 
 	followed := uuid.New()
 	stranger := uuid.New()
-	ob1 := "ob-1"
+	t1 := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC)
 
-	tradesOB1 := []doraclient.Trade{
-		{TransactionId: "tx-followed", UserId: followed.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC), Asset0: "bond-a"},
-		{TransactionId: "tx-stranger", UserId: stranger.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC), Asset0: "bond-a"},
+	// The fake does not pre-filter; the test asserts the production
+	// client uses the user_ids query parameter. Here we just verify
+	// every trade in the stream is processed (the production
+	// filtering is the API's job, not the backtest's).
+	trades := []doraclient.Trade{
+		{TransactionId: uuid.New().String(), UserId: followed.String(), Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: t1, Asset0: "bond-a"},
+		{TransactionId: uuid.New().String(), UserId: stranger.String(), Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: t2, Asset0: "bond-a"},
 	}
 
-	fake := &fakeTradesClient{
-		orderBooks: []string{ob1},
-		tradesByOrderBK: map[string][]doraclient.Trade{
-			ob1: tradesOB1,
-		},
-	}
-
+	fake := &fakeTradesClient{trades: trades}
 	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
 	start := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
@@ -194,7 +169,9 @@ func TestBacktesterRunFiltersNonFollowedTraders(t *testing.T) {
 
 	records, ok := result.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok)
-	require.Len(t, records, 1, "only the followed trader's trades must be simulated")
+	require.Len(t, records, 2, "the backtest must process every trade the stream delivers")
+	require.Equal(t, followed.String(), fake.streamCall.userID,
+		"the backtest must request trades filtered by the followed trader")
 }
 
 func TestSimulate_BuyOpensLong(t *testing.T) {
