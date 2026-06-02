@@ -164,7 +164,7 @@ type position struct {
 	openTradeID uuid.UUID
 }
 
-func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (BacktestResult, error) {
+func (b *Backtester) simulate(ctx context.Context, ch <-chan doraclient.Trade) (BacktestResult, error) {
 	var (
 		tradeRecords []TradeRecord
 		closedTrades []ClosedTrade
@@ -191,7 +191,7 @@ func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (B
 	scale, _ := margin.Quo(decimal.MustNew(bondQuantityScale, 0))
 	scale = scale.Round(0)
 
-	for _, trade := range trades {
+	for trade := range ch {
 		select {
 		case <-ctx.Done():
 			return BacktestResult{}, errors.New("backtest cancelled")
