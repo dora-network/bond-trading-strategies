@@ -109,6 +109,12 @@ type DORAUserSummary struct {
 	ID string `json:"id"`
 }
 
+// CopyTraderSummary is a single entry in the list-copy-traders response.
+type CopyTraderSummary struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+}
+
 type AssetInfo struct {
 	Name   string `json:"name"`
 	Symbol string `json:"symbol"`
@@ -414,6 +420,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 	h.mux.HandleFunc("/healthz", h.handleHealth)
 	h.mux.HandleFunc("/v1/dora/orderbooks", h.handleDORAOrderBooks)
 	h.mux.HandleFunc("/v1/dora/user", h.handleDORAUser)
+	h.mux.HandleFunc("/v1/copy-traders", h.handleCopyTraders)
 	h.mux.HandleFunc("/v1/tenors", h.handleTenors)
 	h.mux.HandleFunc("/v1/strategies", h.handleStrategies)
 	h.mux.HandleFunc("/v1/backtests", h.handleBacktests)
@@ -568,6 +575,37 @@ func (h *Handler) handleDORAUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, DORAUserSummary{ID: userID})
+}
+
+// handleCopyTraders returns the list of traders available to be followed by
+// copy-trading runs. This is a placeholder that filters DORA users by name
+// prefix until DORA exposes a dedicated "list available copy traders" endpoint.
+// TODO(remove-placeholder): when DORA ships the new endpoint, swap the body of
+// this handler to call it directly. The response shape must stay the same.
+func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	client := h.doraClient
+	if client == nil {
+		client = newDORAClient()
+	}
+	users, err := client.ListBotUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list copy traders: %v", err))
+		return
+	}
+
+	items := make([]CopyTraderSummary, 0, len(users))
+	for _, u := range users {
+		items = append(items, CopyTraderSummary{
+			ID:          u.ID,
+			DisplayName: strings.TrimSpace(u.FirstName + " " + u.LastName),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (h *Handler) handleBacktests(w http.ResponseWriter, r *http.Request) {

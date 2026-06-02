@@ -22,6 +22,105 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHandlerListsCopyTraders(t *testing.T) {
+	t.Parallel()
+
+	trader1 := "11111111-1111-1111-1111-111111111111"
+	trader2 := "22222222-2222-2222-2222-222222222222"
+
+	fake := doraClientFunc{
+		listBotUsers: func(_ context.Context) ([]strategyhttp.DORABotUser, error) {
+			return []strategyhttp.DORABotUser{
+				{ID: trader1, FirstName: "TRADER_01", LastName: "Smith"},
+				{ID: trader2, FirstName: "MM", LastName: "Alice"},
+			}, nil
+		},
+	}
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(fake),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Items []strategyhttp.CopyTraderSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Items, 2)
+	assert.Equal(t, trader1, body.Items[0].ID)
+	assert.Equal(t, "TRADER_01 Smith", body.Items[0].DisplayName)
+	assert.Equal(t, trader2, body.Items[1].ID)
+	assert.Equal(t, "MM Alice", body.Items[1].DisplayName)
+}
+
+func TestHandlerListsCopyTradersRequiresAuth(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestHandlerListsCopyTradersEmpty(t *testing.T) {
+	t.Parallel()
+
+	fake := doraClientFunc{
+		listBotUsers: func(_ context.Context) ([]strategyhttp.DORABotUser, error) {
+			return nil, nil
+		},
+	}
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(fake),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Items []strategyhttp.CopyTraderSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.Items)
+	require.Empty(t, body.Items)
+}
+
+func TestHandlerListsCopyTradersDORAError(t *testing.T) {
+	t.Parallel()
+
+	fake := doraClientFunc{
+		listBotUsers: func(_ context.Context) ([]strategyhttp.DORABotUser, error) {
+			return nil, assert.AnError
+		},
+	}
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(fake),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 func TestHandlerListsStrategies(t *testing.T) {
 	t.Parallel()
 
