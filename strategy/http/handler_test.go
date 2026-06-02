@@ -1120,7 +1120,7 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 				},
 				Start: now.Add(-time.Hour),
 				End:   now,
-				Result: mustMarshalResult(t, strategyhttp.BacktestResult{
+				Result: mustMarshalResult(t, strategyhttp.MeanReversionBacktestResult{
 					TotalPnL:    "0.05",
 					WinCount:    3,
 					LossCount:   1,
@@ -1770,7 +1770,7 @@ func testExtractTradeRecords(result json.RawMessage, strategyType string) ([]jso
 		}
 		return out, nil
 	default:
-		var r strategyhttp.BacktestResult
+		var r strategyhttp.MeanReversionBacktestResult
 		if err := json.Unmarshal(result, &r); err != nil {
 			return nil, err
 		}
@@ -1803,7 +1803,7 @@ func testExtractClosedTrades(result json.RawMessage, strategyType string) ([]jso
 		}
 		return out, nil
 	default:
-		var r strategyhttp.BacktestResult
+		var r strategyhttp.MeanReversionBacktestResult
 		if err := json.Unmarshal(result, &r); err != nil {
 			return nil, err
 		}
@@ -1916,7 +1916,7 @@ func TestHandlerBacktestSummary(t *testing.T) {
 				},
 				Start: now.Add(-time.Hour),
 				End:   now,
-				Result: mustMarshalResult(t, strategyhttp.BacktestResult{
+				Result: mustMarshalResult(t, strategyhttp.MeanReversionBacktestResult{
 					TotalPnL:    "100.0",
 					WinCount:    5,
 					LossCount:   2,
@@ -2064,14 +2064,14 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 
 	// Create 15 trade records and 15 closed trades
-	tradeRecords := make([]strategyhttp.TradeRecord, 15)
-	closedTrades := make([]strategyhttp.ClosedTrade, 15)
+	tradeRecords := make([]strategyhttp.MeanReversionTradeRecord, 15)
+	closedTrades := make([]strategyhttp.MeanReversionClosedTrade, 15)
 	for i := 0; i < 15; i++ {
-		tradeRecords[i] = strategyhttp.TradeRecord{
+		tradeRecords[i] = strategyhttp.MeanReversionTradeRecord{
 			BondID: fmt.Sprintf("bond-%d", i),
 			Signal: "BUY",
 		}
-		closedTrades[i] = strategyhttp.ClosedTrade{
+		closedTrades[i] = strategyhttp.MeanReversionClosedTrade{
 			BondID:     fmt.Sprintf("bond-%d", i),
 			Signal:     "BUY",
 			ExitSignal: "SELL",
@@ -2088,7 +2088,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 					Status:       "completed",
 					CreatedAt:    now,
 				},
-				Result: mustMarshalResult(t, strategyhttp.BacktestResult{
+				Result: mustMarshalResult(t, strategyhttp.MeanReversionBacktestResult{
 					TradeRecords: tradeRecords,
 					ClosedTrades: closedTrades,
 					TotalPnL:     "100.0",
@@ -2118,7 +2118,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp struct {
-			Items []strategyhttp.TradeRecord `json:"items"`
+			Items []strategyhttp.MeanReversionTradeRecord `json:"items"`
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		assert.Len(t, resp.Items, 10)
@@ -2134,7 +2134,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp struct {
-			Items []strategyhttp.TradeRecord `json:"items"`
+			Items []strategyhttp.MeanReversionTradeRecord `json:"items"`
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		assert.Len(t, resp.Items, 5)
@@ -2150,7 +2150,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp struct {
-			Items []strategyhttp.ClosedTrade `json:"items"`
+			Items []strategyhttp.MeanReversionClosedTrade `json:"items"`
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		// Our sample has 15, so it should return all 15 if limit is clamped to 50

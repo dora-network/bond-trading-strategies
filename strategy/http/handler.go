@@ -364,17 +364,17 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-type BacktestResult struct {
-	ClosedTrades []ClosedTrade `json:"closed_trades"`
-	TradeRecords []TradeRecord `json:"trade_records"`
-	TotalPnL     string        `json:"total_pnl"` //nolint:tagliatelle
-	WinCount     int           `json:"win_count"`
-	LossCount    int           `json:"loss_count"`
-	MaxDrawdown  string        `json:"max_drawdown"`
-	SharpeRatio  string        `json:"sharpe_ratio"`
+type MeanReversionBacktestResult struct {
+	ClosedTrades []MeanReversionClosedTrade `json:"closed_trades"`
+	TradeRecords []MeanReversionTradeRecord `json:"trade_records"`
+	TotalPnL     string                     `json:"total_pnl"` //nolint:tagliatelle
+	WinCount     int                        `json:"win_count"`
+	LossCount    int                        `json:"loss_count"`
+	MaxDrawdown  string                     `json:"max_drawdown"`
+	SharpeRatio  string                     `json:"sharpe_ratio"`
 }
 
-type ClosedTrade struct {
+type MeanReversionClosedTrade struct {
 	BondID       string    `json:"bond_id"`
 	OpenTime     time.Time `json:"open_time"`
 	CloseTime    time.Time `json:"close_time"`
@@ -393,7 +393,7 @@ type ClosedTrade struct {
 	EntryBalance string    `json:"entry_balance"`
 }
 
-type TradeRecord struct {
+type MeanReversionTradeRecord struct {
 	Time         time.Time `json:"time"`
 	BondID       string    `json:"bond_id"`
 	Signal       string    `json:"signal"`
@@ -1898,9 +1898,9 @@ func decodeRawConfig(raw json.RawMessage, dst any) error {
 }
 
 func newBacktestResult(result meanreversion.BacktestResult) (json.RawMessage, error) {
-	closedTrades := make([]ClosedTrade, 0, len(result.ClosedTrades))
+	closedTrades := make([]MeanReversionClosedTrade, 0, len(result.ClosedTrades))
 	for _, trade := range result.ClosedTrades {
-		closedTrades = append(closedTrades, ClosedTrade{
+		closedTrades = append(closedTrades, MeanReversionClosedTrade{
 			BondID:       trade.BondID,
 			OpenTime:     trade.OpenTime,
 			CloseTime:    trade.CloseTime,
@@ -1919,9 +1919,9 @@ func newBacktestResult(result meanreversion.BacktestResult) (json.RawMessage, er
 			EntryBalance: trade.EntryBalance.String(),
 		})
 	}
-	tradeRecords := make([]TradeRecord, 0, len(result.TradeRecords))
+	tradeRecords := make([]MeanReversionTradeRecord, 0, len(result.TradeRecords))
 	for _, tr := range result.TradeRecords {
-		tradeRecords = append(tradeRecords, TradeRecord{
+		tradeRecords = append(tradeRecords, MeanReversionTradeRecord{
 			Time:         tr.Time,
 			BondID:       tr.BondID,
 			Signal:       tr.Signal.String(),
@@ -1933,7 +1933,7 @@ func newBacktestResult(result meanreversion.BacktestResult) (json.RawMessage, er
 			EntryBalance: tr.EntryBalance.String(),
 		})
 	}
-	out := BacktestResult{
+	out := MeanReversionBacktestResult{
 		ClosedTrades: closedTrades,
 		TradeRecords: tradeRecords,
 		TotalPnL:     result.TotalPnL.String(),

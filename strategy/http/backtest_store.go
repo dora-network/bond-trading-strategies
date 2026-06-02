@@ -175,7 +175,7 @@ func extractTradeRecords(result json.RawMessage, strategyType string) ([]json.Ra
 		}
 		return marshalSlice(r.TradeRecords)
 	default:
-		var r BacktestResult
+		var r MeanReversionBacktestResult
 		if err := json.Unmarshal(result, &r); err != nil {
 			return nil, fmt.Errorf("unmarshal backtest result: %w", err)
 		}
@@ -192,7 +192,7 @@ func extractClosedTrades(result json.RawMessage, strategyType string) ([]json.Ra
 		}
 		return marshalSlice(r.ClosedTrades)
 	default:
-		var r BacktestResult
+		var r MeanReversionBacktestResult
 		if err := json.Unmarshal(result, &r); err != nil {
 			return nil, fmt.Errorf("unmarshal backtest result: %w", err)
 		}
