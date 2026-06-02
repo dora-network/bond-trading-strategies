@@ -14,6 +14,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
+	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/google/uuid"
@@ -355,8 +356,8 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 	assert.JSONEq(t, `{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`, string(accepted.Config))
 	assert.Equal(t, "user-test-1", accepted.DORAUserID)
 
-	resultCh <- types.BacktestResult{
-		ClosedTrades: []types.ClosedTrade{{
+	resultCh <- meanreversion.BacktestResult{
+		ClosedTrades: []meanreversion.ClosedTrade{{
 			BondID:       "BOND-1",
 			OpenTime:     now.Add(-2 * time.Hour),
 			CloseTime:    now.Add(-time.Hour),
@@ -432,7 +433,7 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 	rec := performJSONRequest(t, handler, "/v1/backtests", body)
 	require.Equal(t, http.StatusAccepted, rec.Code)
 
-	resultCh <- types.BacktestResult{Err: fmt.Errorf("observation load failed")}
+	resultCh <- types.ErrorResult{Err: fmt.Errorf("observation load failed")}
 
 	// Full GET endpoint should include the error.
 	require.Eventually(t, func() bool {

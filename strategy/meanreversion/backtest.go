@@ -43,12 +43,12 @@ func NewBacktester(s *Strategy) *Backtester {
 // and exit, so the simulation respects the capital constraint.
 //
 //nolint:funlen // backtest simulation with multiple phases
-func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (types.BacktestResult, error) {
+func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (BacktestResult, error) {
 	var (
-		closedTrades []types.ClosedTrade
-		tradeRecords []types.TradeRecord
-		openTrade    *types.TradeRecord // nil when flat
-		lastDecision types.Decision     // last strategy decision, used for force-close z-score
+		closedTrades []ClosedTrade
+		tradeRecords []TradeRecord
+		openTrade    *TradeRecord   // nil when flat
+		lastDecision types.Decision // last strategy decision, used for force-close z-score
 	)
 
 	// Effective capital mirrors the live cappedOrderQuantity calculation:
@@ -57,22 +57,22 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 	// so only Leverage is meaningful here.
 	effectiveCapital, err := b.strategy.cfg.InitialBalance.Mul(b.strategy.collateralWeight)
 	if err != nil {
-		return types.BacktestResult{}, err
+		return BacktestResult{}, err
 	}
 	effectiveCapital, err = effectiveCapital.Mul(b.strategy.cfg.Leverage)
 	if err != nil {
-		return types.BacktestResult{}, err
+		return BacktestResult{}, err
 	}
 	remainingBalance := effectiveCapital
 
 	for _, o := range obs {
 		select {
 		case <-ctx.Done():
-			return types.BacktestResult{}, errors.New("backtest cancelled by user")
+			return BacktestResult{}, errors.New("backtest cancelled by user")
 		default:
 			decision, err := b.strategy.Update(o)
 			if err != nil {
-				return types.BacktestResult{}, err
+				return BacktestResult{}, err
 			}
 			lastDecision = decision
 
@@ -86,7 +86,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 					// Record the exit trade event (use the open trade's signal so the
 					// exit record carries the original direction, not the HOLD signal
 					// generated once the spread has reverted).
-					tradeRecords = append(tradeRecords, types.TradeRecord{
+					tradeRecords = append(tradeRecords, TradeRecord{
 						Time:         decision.Time,
 						BondID:       openTrade.BondID,
 						Signal:       openTrade.Signal,
@@ -103,26 +103,26 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 						// Close long: we receive cash = exitPrice × quantity.
 						proceeds, err := exitPrice.Mul(exitQty)
 						if err != nil {
-							return types.BacktestResult{}, err
+							return BacktestResult{}, err
 						}
 						remainingBalance, err = remainingBalance.Add(proceeds)
 						if err != nil {
-							return types.BacktestResult{}, err
+							return BacktestResult{}, err
 						}
 					case types.SignalSell:
 						// Close short: we spend cash to buy back = exitPrice × quantity.
 						cost, err := exitPrice.Mul(exitQty)
 						if err != nil {
-							return types.BacktestResult{}, err
+							return BacktestResult{}, err
 						}
 						remainingBalance, err = remainingBalance.Sub(cost)
 						if err != nil {
-							return types.BacktestResult{}, err
+							return BacktestResult{}, err
 						}
 					default:
 					}
 
-					ct := types.ClosedTrade{
+					ct := ClosedTrade{
 						BondID:       openTrade.BondID,
 						OpenTime:     openTrade.Time,
 						CloseTime:    decision.Time,
@@ -141,7 +141,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 					}
 					pnl, err := computePnL(ct)
 					if err != nil {
-						return types.BacktestResult{}, err
+						return BacktestResult{}, err
 					}
 					ct.PnL = pnl
 					closedTrades = append(closedTrades, ct)
@@ -156,13 +156,13 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 				entryPrice := decision.Price
 				budget, err := remainingBalance.Mul(decision.PositionSize)
 				if err != nil {
-					return types.BacktestResult{}, err
+					return BacktestResult{}, err
 				}
 				// Compute the number of bonds we can buy/sell with this budget.
 				// Bond quantity must be a whole number (no fractional bonds).
 				qty, err := budget.Quo(entryPrice)
 				if err != nil {
-					return types.BacktestResult{}, err
+					return BacktestResult{}, err
 				}
 				qty = qty.Floor(0)
 				if qty.IsZero() {
@@ -173,7 +173,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 				// Record the entry trade event with the remaining balance before
 				// any cash-flow adjustment, so the PnL of the closed trade
 				// matches the actual return on the deployed capital.
-				tradeRecords = append(tradeRecords, types.TradeRecord{
+				tradeRecords = append(tradeRecords, TradeRecord{
 					Time:         decision.Time,
 					BondID:       decision.BondID,
 					Signal:       decision.Signal,
@@ -191,7 +191,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 				// floored quantity may not use the full budget.
 				cashFlow, err := entryPrice.Mul(qty)
 				if err != nil {
-					return types.BacktestResult{}, err
+					return BacktestResult{}, err
 				}
 				switch decision.Signal {
 				case types.SignalBuy:
@@ -204,7 +204,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 					_ = remainingBalance
 				}
 				if err != nil {
-					return types.BacktestResult{}, err
+					return BacktestResult{}, err
 				}
 			}
 		}
@@ -215,7 +215,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 		last := obs[len(obs)-1]
 		lastSpread, err := last.Spread()
 		if err != nil {
-			return types.BacktestResult{}, err
+			return BacktestResult{}, err
 		}
 		exitPrice := lastDecision.Price
 		exitQty := openTrade.Quantity
@@ -225,18 +225,18 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 		case types.SignalBuy:
 			proceeds, err := exitPrice.Mul(exitQty)
 			if err != nil {
-				return types.BacktestResult{}, err
+				return BacktestResult{}, err
 			}
 			if _, err = remainingBalance.Add(proceeds); err != nil {
-				return types.BacktestResult{}, err
+				return BacktestResult{}, err
 			}
 		case types.SignalSell:
 			cost, err := exitPrice.Mul(exitQty)
 			if err != nil {
-				return types.BacktestResult{}, err
+				return BacktestResult{}, err
 			}
 			if _, err = remainingBalance.Sub(cost); err != nil {
-				return types.BacktestResult{}, err
+				return BacktestResult{}, err
 			}
 		default:
 		}
@@ -244,7 +244,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 		// Record the exit trade event (use the original signal for direction,
 		// not the HOLD signal from the last observation). The z-score comes
 		// from the last strategy decision captured in the loop above.
-		tradeRecords = append(tradeRecords, types.TradeRecord{
+		tradeRecords = append(tradeRecords, TradeRecord{
 			Time:         last.Time,
 			BondID:       openTrade.BondID,
 			Signal:       openTrade.Signal,
@@ -255,7 +255,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 			Quantity:     exitQty,
 		})
 
-		ct := types.ClosedTrade{
+		ct := ClosedTrade{
 			BondID:       openTrade.BondID,
 			OpenTime:     openTrade.Time,
 			CloseTime:    last.Time,
@@ -266,7 +266,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 			EntryZScore:  openTrade.ZScore,
 			ExitZScore:   lastDecision.ZScore,
 			PositionSize: openTrade.PositionSize,
-			ExitReason:   types.ExitReasonForceClose,
+			ExitReason:   ExitReasonForceClose,
 			EntryPrice:   openTrade.Price,
 			ExitPrice:    exitPrice,
 			Quantity:     exitQty,
@@ -274,7 +274,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 		}
 		pnl, err := computePnL(ct)
 		if err != nil {
-			return types.BacktestResult{}, err
+			return BacktestResult{}, err
 		}
 		ct.PnL = pnl
 		closedTrades = append(closedTrades, ct)
@@ -298,7 +298,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (typ
 //   - SELL (short): PnL = Quantity × (EntryPrice − ExitPrice)
 //
 // In both cases a positive PnL means the reversion prediction was correct.
-func computePnL(ct types.ClosedTrade) (decimal.Decimal, error) {
+func computePnL(ct ClosedTrade) (decimal.Decimal, error) {
 	costBasis, err := ct.EntryPrice.Mul(ct.Quantity)
 	if err != nil {
 		return decimal.Zero, err
@@ -321,8 +321,8 @@ func computePnL(ct types.ClosedTrade) (decimal.Decimal, error) {
 }
 
 // summarise aggregates closed trades into a BacktestResult.
-func summarise(trades []types.ClosedTrade, tradeRecords []types.TradeRecord, start, end time.Time) (types.BacktestResult, error) {
-	res := types.BacktestResult{ClosedTrades: trades, TradeRecords: tradeRecords}
+func summarise(trades []ClosedTrade, tradeRecords []TradeRecord, start, end time.Time) (BacktestResult, error) {
+	res := BacktestResult{ClosedTrades: trades, TradeRecords: tradeRecords}
 
 	if len(trades) == 0 {
 		return res, nil
@@ -340,7 +340,7 @@ func summarise(trades []types.ClosedTrade, tradeRecords []types.TradeRecord, sta
 		var err error
 		res.TotalPnL, err = res.TotalPnL.Add(t.PnL)
 		if err != nil {
-			return types.BacktestResult{}, err
+			return BacktestResult{}, err
 		}
 
 		// Accumulate daily PnL based on trade close time
@@ -351,7 +351,7 @@ func summarise(trades []types.ClosedTrade, tradeRecords []types.TradeRecord, sta
 		}
 		dailyPnLMap[dateStr], err = current.Add(t.PnL)
 		if err != nil {
-			return types.BacktestResult{}, err
+			return BacktestResult{}, err
 		}
 
 		if t.PnL.IsPos() {
@@ -362,14 +362,14 @@ func summarise(trades []types.ClosedTrade, tradeRecords []types.TradeRecord, sta
 
 		equity, err = equity.Add(t.PnL)
 		if err != nil {
-			return types.BacktestResult{}, err
+			return BacktestResult{}, err
 		}
 		if equity.Cmp(peak) > 0 {
 			peak = equity
 		}
 		dd, err := peak.Sub(equity)
 		if err != nil {
-			return types.BacktestResult{}, err
+			return BacktestResult{}, err
 		}
 		if dd.Cmp(maxDD) > 0 {
 			maxDD = dd
@@ -394,7 +394,7 @@ func summarise(trades []types.ClosedTrade, tradeRecords []types.TradeRecord, sta
 	var err error
 	res.SharpeRatio, err = sharpe(dailyPnLs)
 	if err != nil {
-		return types.BacktestResult{}, err
+		return BacktestResult{}, err
 	}
 
 	return res, nil

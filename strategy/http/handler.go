@@ -796,7 +796,7 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.BacktestResult) {
 	result, ok := <-resultCh
 	if !ok {
-		result = types.BacktestResult{Err: errors.New("backtest result channel closed")}
+		result = types.ErrorResult{Err: errors.New("backtest result channel closed")}
 	}
 	now := h.now().UTC()
 
@@ -808,12 +808,16 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 	}
 	completedAt := now
 	detail.CompletedAt = &completedAt
-	if result.Err != nil {
+	switch r := result.(type) {
+	case types.ErrorResult:
 		detail.Status = "failed"
-		detail.Error = result.Err.Error()
-	} else {
+		detail.Error = r.Err.Error()
+	case meanreversion.BacktestResult:
 		detail.Status = "completed"
-		detail.Result = newBacktestResult(result)
+		detail.Result = newBacktestResult(r)
+	default:
+		detail.Status = "failed"
+		detail.Error = fmt.Sprintf("unknown backtest result type %T", result)
 	}
 	h.mu.Unlock()
 
@@ -1869,7 +1873,7 @@ func decodeRawConfig(raw json.RawMessage, dst any) error {
 	return nil
 }
 
-func newBacktestResult(result types.BacktestResult) *BacktestResult {
+func newBacktestResult(result meanreversion.BacktestResult) *BacktestResult {
 	closedTrades := make([]ClosedTrade, 0, len(result.ClosedTrades))
 	for _, trade := range result.ClosedTrades {
 		closedTrades = append(closedTrades, ClosedTrade{

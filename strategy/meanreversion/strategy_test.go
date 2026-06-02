@@ -255,15 +255,15 @@ func TestStrategy_ShouldExit_ProfitTake(t *testing.T) {
 
 	exit, reason := s.ShouldExit(types.SignalBuy, decimal.MustNew(3, 1))
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonTakeProfit, reason)
+	assert.Equal(t, meanreversion.ExitReasonTakeProfit, reason)
 
 	exit, reason = s.ShouldExit(types.SignalSell, decimal.MustNew(-2, 1))
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonTakeProfit, reason)
+	assert.Equal(t, meanreversion.ExitReasonTakeProfit, reason)
 
 	exit, reason = s.ShouldExit(types.SignalBuy, decimal.Zero)
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonTakeProfit, reason)
+	assert.Equal(t, meanreversion.ExitReasonTakeProfit, reason)
 }
 
 func TestStrategy_ShouldExit_StopLoss(t *testing.T) {
@@ -272,7 +272,7 @@ func TestStrategy_ShouldExit_StopLoss(t *testing.T) {
 
 	exit, reason := s.ShouldExit(types.SignalBuy, decimal.MustNew(36, 1))
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonStopLoss, reason)
+	assert.Equal(t, meanreversion.ExitReasonStopLoss, reason)
 
 	exit, reason = s.ShouldExit(types.SignalBuy, decimal.MustNew(34, 1))
 	assert.False(t, exit)
@@ -280,7 +280,7 @@ func TestStrategy_ShouldExit_StopLoss(t *testing.T) {
 
 	exit, reason = s.ShouldExit(types.SignalSell, decimal.MustNew(-36, 1))
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonStopLoss, reason)
+	assert.Equal(t, meanreversion.ExitReasonStopLoss, reason)
 
 	exit, reason = s.ShouldExit(types.SignalSell, decimal.MustNew(-34, 1))
 	assert.False(t, exit)

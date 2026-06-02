@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/govalues/decimal"
@@ -145,18 +146,18 @@ func NewBacktester(s *Strategy) *Backtester {
 // Run fetches historical trades for the followed trader across all order
 // books within [start, end] and simulates copy trading. Trades are collated
 // across order books and sorted by created_at ascending.
-func (b *Backtester) Run(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
+func (b *Backtester) Run(ctx context.Context, start, end time.Time) (meanreversion.BacktestResult, error) {
 	if b.trades == nil {
 		apiKey := os.Getenv("DORA_API_KEY")
 		if apiKey == "" {
-			return types.BacktestResult{}, errors.New("DORA_API_KEY not set")
+			return meanreversion.BacktestResult{}, errors.New("DORA_API_KEY not set")
 		}
 		b.trades = newDoraTradesClient(apiKey)
 	}
 
 	orderBooks, err := b.trades.ListOrderBooks(ctx)
 	if err != nil {
-		return types.BacktestResult{}, fmt.Errorf("list order books: %w", err)
+		return meanreversion.BacktestResult{}, fmt.Errorf("list order books: %w", err)
 	}
 
 	followedTrader := b.strategy.cfg.FollowedTrader.String()
@@ -164,12 +165,12 @@ func (b *Backtester) Run(ctx context.Context, start, end time.Time) (types.Backt
 	for _, obID := range orderBooks {
 		select {
 		case <-ctx.Done():
-			return types.BacktestResult{}, errors.New("backtest cancelled")
+			return meanreversion.BacktestResult{}, errors.New("backtest cancelled")
 		default:
 		}
 		trades, err := b.trades.GetTrades(ctx, followedTrader, []string{obID}, start, end)
 		if err != nil {
-			return types.BacktestResult{}, fmt.Errorf("get trades for order book %s: %w", obID, err)
+			return meanreversion.BacktestResult{}, fmt.Errorf("get trades for order book %s: %w", obID, err)
 		}
 		allTrades = append(allTrades, trades...)
 	}
@@ -191,10 +192,10 @@ func (b *Backtester) Run(ctx context.Context, start, end time.Time) (types.Backt
 	return b.simulate(ctx, allTrades)
 }
 
-func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (types.BacktestResult, error) {
+func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (meanreversion.BacktestResult, error) {
 	var (
-		closedTrades []types.ClosedTrade
-		tradeRecords []types.TradeRecord
+		closedTrades []meanreversion.ClosedTrade
+		tradeRecords []meanreversion.TradeRecord
 	)
 
 	// Use a default initial balance for backtest
@@ -203,7 +204,7 @@ func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (t
 	for _, trade := range trades {
 		select {
 		case <-ctx.Done():
-			return types.BacktestResult{}, errors.New("backtest cancelled")
+			return meanreversion.BacktestResult{}, errors.New("backtest cancelled")
 		default:
 		}
 
@@ -229,7 +230,7 @@ func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (t
 			signal = types.SignalSell
 		}
 
-		record := types.TradeRecord{
+		record := meanreversion.TradeRecord{
 			Time:         trade.CreatedAt,
 			BondID:       trade.Asset0,
 			Signal:       signal,
@@ -245,7 +246,7 @@ func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (t
 		remainingBalance, _ = remainingBalance.Sub(orderSize)
 	}
 
-	return types.BacktestResult{
+	return meanreversion.BacktestResult{
 		ClosedTrades: closedTrades,
 		TradeRecords: tradeRecords,
 	}, nil

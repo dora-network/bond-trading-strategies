@@ -928,11 +928,11 @@ func (s *Strategy) ShouldExit(openSignal types.Signal, currentZScore decimal.Dec
 	switch openSignal { //nolint:exhaustive // SignalHold → no exit needed, fall through to stop-loss check
 	case types.SignalBuy:
 		if currentZScore.Cmp(s.cfg.ExitZScore) <= 0 {
-			return true, types.ExitReasonTakeProfit
+			return true, ExitReasonTakeProfit
 		}
 	case types.SignalSell:
 		if currentZScore.Cmp(s.cfg.ExitZScore.Neg()) >= 0 {
-			return true, types.ExitReasonTakeProfit
+			return true, ExitReasonTakeProfit
 		}
 	}
 
@@ -943,13 +943,13 @@ func (s *Strategy) ShouldExit(openSignal types.Signal, currentZScore decimal.Dec
 			// We went long because spread was wide (z > +entry).
 			// Stop out if spread widens even further (z grows more positive).
 			if currentZScore.Cmp(s.cfg.StopLossZScore) >= 0 {
-				return true, types.ExitReasonStopLoss
+				return true, ExitReasonStopLoss
 			}
 		case types.SignalSell:
 			// We went short because spread was tight (z < -entry).
 			// Stop out if spread tightens even further (z grows more negative).
 			if currentZScore.Cmp(s.cfg.StopLossZScore.Neg()) <= 0 {
-				return true, types.ExitReasonStopLoss
+				return true, ExitReasonStopLoss
 			}
 		default:
 			return false, ""

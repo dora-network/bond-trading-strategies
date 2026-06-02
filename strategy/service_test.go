@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/google/uuid"
@@ -31,14 +32,13 @@ func TestService_RunBacktest(t *testing.T) {
 
 		myStrategy := &strategyfakes.FakeStrategy{
 			BacktestStub: func(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
-				return types.BacktestResult{
+				return meanreversion.BacktestResult{
 					ClosedTrades: nil,
 					TotalPnL:     decimal.Decimal{},
 					WinCount:     0,
 					LossCount:    0,
 					MaxDrawdown:  decimal.Decimal{},
 					SharpeRatio:  decimal.Decimal{},
-					Err:          nil,
 				}, nil
 			},
 		}
@@ -50,7 +50,7 @@ func TestService_RunBacktest(t *testing.T) {
 		for {
 			select {
 			case res := <-ch:
-				assert.Equal(t, types.BacktestResult{}, res)
+				assert.Equal(t, meanreversion.BacktestResult{}, res)
 				return
 			case <-ctx.Done():
 				assert.Fail(t, "timeout")
@@ -65,7 +65,7 @@ func TestService_RunBacktest(t *testing.T) {
 
 		myStrategy := &strategyfakes.FakeStrategy{
 			BacktestStub: func(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
-				return types.BacktestResult{}, fmt.Errorf("backtest failed")
+				return nil, fmt.Errorf("backtest failed")
 			},
 		}
 
@@ -76,7 +76,7 @@ func TestService_RunBacktest(t *testing.T) {
 		for {
 			select {
 			case res := <-ch:
-				assert.Equal(t, types.BacktestResult{Err: fmt.Errorf("backtest failed")}, res)
+				assert.Equal(t, types.ErrorResult{Err: fmt.Errorf("backtest failed")}, res)
 				return
 			case <-ctx.Done():
 				assert.Fail(t, "timeout")
@@ -98,7 +98,7 @@ func TestService_StopBacktest(t *testing.T) {
 			for {
 				select {
 				case <-ctx.Done():
-					return types.BacktestResult{}, errors.New("backtest cancelled by user")
+					return nil, errors.New("backtest cancelled by user")
 				default:
 					time.Sleep(10 * time.Millisecond)
 				}
@@ -136,7 +136,7 @@ func TestService_StopBacktest(t *testing.T) {
 			select {
 			case res := <-ch:
 				assert.True(t, isRunning)
-				assert.Equal(t, types.BacktestResult{Err: fmt.Errorf("backtest cancelled by user")}, res)
+				assert.Equal(t, types.ErrorResult{Err: fmt.Errorf("backtest cancelled by user")}, res)
 				return
 			case <-ctx.Done():
 				assert.True(t, isRunning)

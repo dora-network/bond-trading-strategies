@@ -84,7 +84,7 @@ func (s *service) RunBacktest(_ context.Context, strategy Strategy, start, end t
 		defer btCancel()
 		res, err := strategy.Backtest(btCtx, start, end)
 		if err != nil {
-			ch <- types.BacktestResult{Err: err}
+			ch <- types.ErrorResult{Err: err}
 			s.mu.Lock()
 			delete(s.backtests, backtestID)
 			s.mu.Unlock()
