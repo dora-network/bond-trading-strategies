@@ -11,10 +11,10 @@ import (
 
 type BacktestStore interface {
 	LoadBacktests(ctx context.Context) ([]*BacktestDetail, error)
-	LoadBacktestResult(ctx context.Context, id uuid.UUID) (*BacktestResult, error)
+	LoadBacktestResult(ctx context.Context, id uuid.UUID) (json.RawMessage, error)
 	SaveBacktest(ctx context.Context, detail *BacktestDetail) error
-	GetBacktestTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]TradeRecord, error)
-	GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]ClosedTrade, error)
+	GetBacktestTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error)
+	GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error)
 }
 
 type PGBacktestStore struct {
@@ -62,7 +62,7 @@ func (s *PGBacktestStore) LoadBacktests(ctx context.Context) ([]*BacktestDetail,
 	return backtests, nil
 }
 
-func (s *PGBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UUID) (*BacktestResult, error) {
+func (s *PGBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UUID) (json.RawMessage, error) {
 	const q = `
 		SELECT result
 		FROM strategy_backtests
@@ -78,22 +78,13 @@ func (s *PGBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UUID) 
 		return nil, nil
 	}
 
-	var result BacktestResult
-	if err := json.Unmarshal([]byte(*resultJSON), &result); err != nil {
-		return nil, fmt.Errorf("unmarshal backtest result: %w", err)
-	}
-
-	return &result, nil
+	return json.RawMessage(*resultJSON), nil
 }
 
 func (s *PGBacktestStore) SaveBacktest(ctx context.Context, detail *BacktestDetail) error {
 	var resultJSON *string
-	if detail.Result != nil {
-		b, err := json.Marshal(detail.Result)
-		if err != nil {
-			return fmt.Errorf("marshal backtest result: %w", err)
-		}
-		s := string(b)
+	if len(detail.Result) > 0 {
+		s := string(detail.Result)
 		resultJSON = &s
 	}
 
@@ -135,26 +126,90 @@ func (s *PGBacktestStore) SaveBacktest(ctx context.Context, detail *BacktestDeta
 	return nil
 }
 
-func (s *PGBacktestStore) GetBacktestTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]TradeRecord, error) {
+func (s *PGBacktestStore) GetBacktestTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error) {
 	result, err := s.LoadBacktestResult(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if result == nil {
-		return []TradeRecord{}, nil
+	if len(result) == 0 {
+		return json.RawMessage(`{"items":[]}`), nil
 	}
-	return paginate(result.TradeRecords, page, limit), nil
+	items, err := extractTradeRecords(result, strategyType)
+	if err != nil {
+		return nil, err
+	}
+	pageItems := paginate(items, page, limit)
+	b, err := json.Marshal(map[string]any{"items": pageItems})
+	if err != nil {
+		return nil, fmt.Errorf("marshal trades: %w", err)
+	}
+	return b, nil
 }
 
-func (s *PGBacktestStore) GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]ClosedTrade, error) {
+func (s *PGBacktestStore) GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error) {
 	result, err := s.LoadBacktestResult(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if result == nil {
-		return []ClosedTrade{}, nil
+	if len(result) == 0 {
+		return json.RawMessage(`{"items":[]}`), nil
 	}
-	return paginate(result.ClosedTrades, page, limit), nil
+	items, err := extractClosedTrades(result, strategyType)
+	if err != nil {
+		return nil, err
+	}
+	pageItems := paginate(items, page, limit)
+	b, err := json.Marshal(map[string]any{"items": pageItems})
+	if err != nil {
+		return nil, fmt.Errorf("marshal closed trades: %w", err)
+	}
+	return b, nil
+}
+
+func extractTradeRecords(result json.RawMessage, strategyType string) ([]json.RawMessage, error) {
+	switch strategyType {
+	case "copytrading":
+		var r CopyTradingBacktestResult
+		if err := json.Unmarshal(result, &r); err != nil {
+			return nil, fmt.Errorf("unmarshal copytrading result: %w", err)
+		}
+		return marshalSlice(r.TradeRecords)
+	default:
+		var r BacktestResult
+		if err := json.Unmarshal(result, &r); err != nil {
+			return nil, fmt.Errorf("unmarshal backtest result: %w", err)
+		}
+		return marshalSlice(r.TradeRecords)
+	}
+}
+
+func extractClosedTrades(result json.RawMessage, strategyType string) ([]json.RawMessage, error) {
+	switch strategyType {
+	case "copytrading":
+		var r CopyTradingBacktestResult
+		if err := json.Unmarshal(result, &r); err != nil {
+			return nil, fmt.Errorf("unmarshal copytrading result: %w", err)
+		}
+		return marshalSlice(r.ClosedTrades)
+	default:
+		var r BacktestResult
+		if err := json.Unmarshal(result, &r); err != nil {
+			return nil, fmt.Errorf("unmarshal backtest result: %w", err)
+		}
+		return marshalSlice(r.ClosedTrades)
+	}
+}
+
+func marshalSlice[T any](items []T) ([]json.RawMessage, error) {
+	out := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		b, err := json.Marshal(item)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }
 
 func paginate[T any](items []T, page, limit int) []T {

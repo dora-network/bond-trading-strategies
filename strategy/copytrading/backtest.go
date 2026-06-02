@@ -457,16 +457,17 @@ func closeLongPosition(
 	pnl, _ := price.Sub(pos.avgEntry)
 	pnl, _ = pnl.Mul(closeQty)
 	closedTrades = append(closedTrades, ClosedTrade{
-		OpenTime:    pos.openTime,
-		CloseTime:   trade.CreatedAt,
-		BondID:      trade.Asset0,
-		OpenSignal:  types.SignalBuy,
-		CloseSignal: types.SignalSell,
-		Quantity:    closeQty,
-		EntryPrice:  pos.avgEntry,
-		ExitPrice:   price,
-		PnL:         pnl,
-		OpenTradeID: pos.openTradeID,
+		OpenTime:     pos.openTime,
+		CloseTime:    trade.CreatedAt,
+		BondID:       trade.Asset0,
+		OpenSignal:   types.SignalBuy,
+		CloseSignal:  types.SignalSell,
+		Quantity:     closeQty,
+		EntryPrice:   pos.avgEntry,
+		ExitPrice:    price,
+		PnL:          pnl,
+		EntryBalance: cash,
+		OpenTradeID:  pos.openTradeID,
 		CloseTradeID: tradeID,
 	})
 	proceeds, _ := closeQty.Mul(price)
@@ -486,16 +487,17 @@ func closeShortPosition(
 	pnl, _ := pos.avgEntry.Sub(price)
 	pnl, _ = pnl.Mul(closeQty)
 	closedTrades = append(closedTrades, ClosedTrade{
-		OpenTime:    pos.openTime,
-		CloseTime:   trade.CreatedAt,
-		BondID:      trade.Asset0,
-		OpenSignal:  types.SignalSell,
-		CloseSignal: types.SignalBuy,
-		Quantity:    closeQty,
-		EntryPrice:  pos.avgEntry,
-		ExitPrice:   price,
-		PnL:         pnl,
-		OpenTradeID: pos.openTradeID,
+		OpenTime:     pos.openTime,
+		CloseTime:    trade.CreatedAt,
+		BondID:       trade.Asset0,
+		OpenSignal:   types.SignalSell,
+		CloseSignal:  types.SignalBuy,
+		Quantity:     closeQty,
+		EntryPrice:   pos.avgEntry,
+		ExitPrice:    price,
+		PnL:          pnl,
+		EntryBalance: cash,
+		OpenTradeID:  pos.openTradeID,
 		CloseTradeID: tradeID,
 	})
 	cash, _ = cash.Add(pnl)

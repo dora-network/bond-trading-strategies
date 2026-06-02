@@ -147,12 +147,20 @@ func (h *Handler) summaryResult(ctx context.Context, d *BacktestDetail) Backtest
 		Config:       d.Config,
 		Error:        d.Error,
 	}
-	if d.Result != nil {
-		s.TotalPnL = d.Result.TotalPnL
-		s.WinCount = d.Result.WinCount
-		s.LossCount = d.Result.LossCount
-		s.MaxDrawdown = d.Result.MaxDrawdown
-		s.SharpeRatio = d.Result.SharpeRatio
+	if len(d.Result) > 0 {
+		var summary struct {
+			TotalPnL    string `json:"total_pnl"`
+			WinCount    int    `json:"win_count"`
+			LossCount   int    `json:"loss_count"`
+			MaxDrawdown string `json:"max_drawdown"`
+			SharpeRatio string `json:"sharpe_ratio"`
+		}
+		_ = json.Unmarshal(d.Result, &summary)
+		s.TotalPnL = summary.TotalPnL
+		s.WinCount = summary.WinCount
+		s.LossCount = summary.LossCount
+		s.MaxDrawdown = summary.MaxDrawdown
+		s.SharpeRatio = summary.SharpeRatio
 	}
 
 	var cfg orderBookConfig
@@ -256,7 +264,7 @@ type BacktestDetail struct {
 	BacktestSummary
 	Start  time.Time       `json:"start"`
 	End    time.Time       `json:"end"`
-	Result *BacktestResult `json:"result,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 type RunSummary struct {
@@ -814,7 +822,22 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 		detail.Error = r.Err.Error()
 	case meanreversion.BacktestResult:
 		detail.Status = "completed"
-		detail.Result = newBacktestResult(r)
+		raw, err := newBacktestResult(r)
+		if err != nil {
+			detail.Status = "failed"
+			detail.Error = err.Error()
+			break
+		}
+		detail.Result = raw
+	case copytrading.BacktestResult:
+		detail.Status = "completed"
+		raw, err := newCopyTradingBacktestResult(r)
+		if err != nil {
+			detail.Status = "failed"
+			detail.Error = err.Error()
+			break
+		}
+		detail.Result = raw
 	default:
 		detail.Status = "failed"
 		detail.Error = fmt.Sprintf("unknown backtest result type %T", result)
@@ -932,9 +955,9 @@ func (h *Handler) getBacktestClosedTrades(w http.ResponseWriter, r *http.Request
 	getBacktestSubResource(h, w, r, id, "closed trades", h.backtestStore.GetBacktestClosedTrades)
 }
 
-func getBacktestSubResource[T any](
+func getBacktestSubResource(
 	h *Handler, w http.ResponseWriter, r *http.Request, id uuid.UUID, label string,
-	fetch func(context.Context, uuid.UUID, int, int) ([]T, error),
+	fetch func(context.Context, uuid.UUID, string, int, int) (json.RawMessage, error),
 ) {
 	doraUserID, err := h.resolveDORAUserID(r.Context())
 	if err != nil {
@@ -951,13 +974,15 @@ func getBacktestSubResource[T any](
 	}
 
 	page, limit := parsePagination(r)
-	items, err := fetch(r.Context(), id, page, limit)
+	raw, err := fetch(r.Context(), id, detail.StrategyType, page, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get backtest %s: %v", label, err))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 func parsePagination(r *http.Request) (page, limit int) {
@@ -1002,13 +1027,12 @@ func (h *Handler) getBacktest(w http.ResponseWriter, r *http.Request, id uuid.UU
 	// are safe from concurrent awaitBacktestResult writes.
 	detailCopy := *detail
 	detailCopy.Result = nil
-	if detail.Result != nil {
-		rCopy := *detail.Result
-		detailCopy.Result = &rCopy
+	if len(detail.Result) > 0 {
+		detailCopy.Result = append(json.RawMessage(nil), detail.Result...)
 	}
 	h.mu.RUnlock()
 
-	if detailCopy.Status == "completed" && detailCopy.Result == nil && h.backtestStore != nil {
+	if detailCopy.Status == "completed" && len(detailCopy.Result) == 0 && h.backtestStore != nil {
 		result, err := h.backtestStore.LoadBacktestResult(r.Context(), id)
 		if err != nil {
 			slog.Error("failed to load backtest result", "err", err, "backtest_id", id)
@@ -1873,7 +1897,7 @@ func decodeRawConfig(raw json.RawMessage, dst any) error {
 	return nil
 }
 
-func newBacktestResult(result meanreversion.BacktestResult) *BacktestResult {
+func newBacktestResult(result meanreversion.BacktestResult) (json.RawMessage, error) {
 	closedTrades := make([]ClosedTrade, 0, len(result.ClosedTrades))
 	for _, trade := range result.ClosedTrades {
 		closedTrades = append(closedTrades, ClosedTrade{
@@ -1909,7 +1933,7 @@ func newBacktestResult(result meanreversion.BacktestResult) *BacktestResult {
 			EntryBalance: tr.EntryBalance.String(),
 		})
 	}
-	return &BacktestResult{
+	out := BacktestResult{
 		ClosedTrades: closedTrades,
 		TradeRecords: tradeRecords,
 		TotalPnL:     result.TotalPnL.String(),
@@ -1918,6 +1942,59 @@ func newBacktestResult(result meanreversion.BacktestResult) *BacktestResult {
 		MaxDrawdown:  result.MaxDrawdown.String(),
 		SharpeRatio:  result.SharpeRatio.String(),
 	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal backtest result: %w", err)
+	}
+	return b, nil
+}
+
+func newCopyTradingBacktestResult(result copytrading.BacktestResult) (json.RawMessage, error) {
+	closedTrades := make([]CopyTradingClosedTrade, 0, len(result.ClosedTrades))
+	for _, trade := range result.ClosedTrades {
+		closedTrades = append(closedTrades, CopyTradingClosedTrade{
+			OpenTime:     trade.OpenTime,
+			CloseTime:    trade.CloseTime,
+			BondID:       trade.BondID,
+			OpenSignal:   trade.OpenSignal.String(),
+			CloseSignal:  trade.CloseSignal.String(),
+			Quantity:     trade.Quantity.String(),
+			EntryPrice:   trade.EntryPrice.String(),
+			ExitPrice:    trade.ExitPrice.String(),
+			PnL:          trade.PnL.String(),
+			EntryBalance: trade.EntryBalance.String(),
+			OpenTradeID:  trade.OpenTradeID.String(),
+			CloseTradeID: trade.CloseTradeID.String(),
+		})
+	}
+	tradeRecords := make([]CopyTradingTradeRecord, 0, len(result.TradeRecords))
+	for _, tr := range result.TradeRecords {
+		tradeRecords = append(tradeRecords, CopyTradingTradeRecord{
+			Time:         tr.Time,
+			BondID:       tr.BondID,
+			Signal:       tr.Signal.String(),
+			Price:        tr.Price.String(),
+			Quantity:     tr.Quantity.String(),
+			OrderSize:    tr.OrderSize.String(),
+			Cash:         tr.Cash.String(),
+			OpenPosition: tr.OpenPosition.String(),
+			TradeID:      tr.TradeID.String(),
+		})
+	}
+	out := CopyTradingBacktestResult{
+		ClosedTrades: closedTrades,
+		TradeRecords: tradeRecords,
+		TotalPnL:     result.TotalPnL.String(),
+		WinCount:     result.WinCount,
+		LossCount:    result.LossCount,
+		MaxDrawdown:  result.MaxDrawdown.String(),
+		SharpeRatio:  result.SharpeRatio.String(),
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal copytrading backtest result: %w", err)
+	}
+	return b, nil
 }
 
 func decodeJSON(r *http.Request, dst any) error {

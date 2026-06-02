@@ -13,6 +13,7 @@ import (
 
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
@@ -475,6 +476,138 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 	require.Len(t, listResp.Items, 1)
 	assert.Equal(t, "failed", listResp.Items[0].Status)
 	assert.Equal(t, "observation load failed", listResp.Items[0].Error)
+}
+
+func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	openTradeID := uuid.Must(uuid.NewV7())
+	closeTradeID := uuid.Must(uuid.NewV7())
+	resultCh := make(chan types.BacktestResult, 1)
+	backtestID := uuid.Must(uuid.NewV7())
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(ctx context.Context, strat strategycore.Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
+			return backtestID, resultCh, nil
+		},
+	}
+	store := &memoryBacktestStore{}
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time { return now }),
+		strategyhttp.WithBacktestStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-test-1", nil
+			},
+		}),
+	)
+
+	followed := uuid.Must(uuid.NewV7())
+	body := map[string]any{
+		"strategy_type": "copytrading",
+		"config": map[string]any{
+			"followed_trader":          followed.String(),
+			"percentage_of_available":  0.5,
+			"leverage":                 1.0,
+			"min_order_size":           0,
+			"max_order_size":           0,
+			"disallowed_bonds":         []string{},
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	}
+	rec := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	resultCh <- copytrading.BacktestResult{
+		ClosedTrades: []copytrading.ClosedTrade{{
+			OpenTime:     now.Add(-2 * time.Hour),
+			CloseTime:    now.Add(-time.Hour),
+			BondID:       "BOND-1",
+			OpenSignal:   types.SignalBuy,
+			CloseSignal:  types.SignalSell,
+			Quantity:     decimal.MustNew(10, 0),
+			EntryPrice:   decimal.MustNew(100, 0),
+			ExitPrice:    decimal.MustNew(120, 0),
+			PnL:          decimal.MustNew(200, 0),
+			EntryBalance: decimal.MustNew(9000, 0),
+			OpenTradeID:  openTradeID,
+			CloseTradeID: closeTradeID,
+		}},
+		TradeRecords: []copytrading.TradeRecord{{
+			Time:         now.Add(-2 * time.Hour),
+			BondID:       "BOND-1",
+			Signal:       types.SignalBuy,
+			Price:        decimal.MustNew(100, 0),
+			Quantity:     decimal.MustNew(10, 0),
+			OrderSize:    decimal.MustNew(1000, 0),
+			Cash:         decimal.MustNew(0, 0),
+			OpenPosition: decimal.MustNew(10, 0),
+			TradeID:      openTradeID,
+		}},
+		TotalPnL:    decimal.MustNew(200, 0),
+		WinCount:    1,
+		LossCount:   0,
+		MaxDrawdown: decimal.Zero,
+		SharpeRatio: decimal.MustNew(11, 1),
+	}
+
+	var bodyBytes []byte
+	require.Eventually(t, func() bool {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return false
+		}
+		bodyBytes = rec.Body.Bytes()
+		var summary strategyhttp.BacktestResultSummary
+		if err := json.Unmarshal(bodyBytes, &summary); err != nil {
+			return false
+		}
+		return summary.Status == "completed" && summary.SharpeRatio != ""
+	}, time.Second, 10*time.Millisecond)
+
+	var summary strategyhttp.BacktestResultSummary
+	require.NoError(t, json.Unmarshal(bodyBytes, &summary))
+	assert.Equal(t, "completed", summary.Status)
+	assert.Equal(t, "copytrading", summary.StrategyType)
+	assert.Equal(t, "200", summary.TotalPnL) //nolint:tagliatelle
+	assert.Equal(t, 1, summary.WinCount)
+	assert.Equal(t, 0, summary.LossCount)
+	assert.Equal(t, "1.1", summary.SharpeRatio)
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/trades?limit=10", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var tradesResp struct {
+		Items []strategyhttp.CopyTradingTradeRecord `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tradesResp))
+	require.Len(t, tradesResp.Items, 1)
+	assert.Equal(t, "BOND-1", tradesResp.Items[0].BondID)
+	assert.Equal(t, "10", tradesResp.Items[0].Quantity)
+	assert.Equal(t, "1000", tradesResp.Items[0].OrderSize)
+	assert.Equal(t, "10", tradesResp.Items[0].OpenPosition)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/closed-trades?limit=10", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var closedResp struct {
+		Items []strategyhttp.CopyTradingClosedTrade `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &closedResp))
+	require.Len(t, closedResp.Items, 1)
+	assert.Equal(t, "BOND-1", closedResp.Items[0].BondID)
+	assert.Equal(t, "10", closedResp.Items[0].Quantity)
+	assert.Equal(t, "200", closedResp.Items[0].PnL) //nolint:tagliatelle
+	assert.Equal(t, "BUY", closedResp.Items[0].OpenSignal)
+	assert.Equal(t, "SELL", closedResp.Items[0].CloseSignal)
 }
 
 func TestHandlerRejectsCopyTradingBacktestMissingRequiredFields(t *testing.T) {
@@ -987,13 +1120,13 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 				},
 				Start: now.Add(-time.Hour),
 				End:   now,
-				Result: &strategyhttp.BacktestResult{
+				Result: mustMarshalResult(t, strategyhttp.BacktestResult{
 					TotalPnL:    "0.05",
 					WinCount:    3,
 					LossCount:   1,
 					MaxDrawdown: "0.01",
 					SharpeRatio: "1.5",
-				},
+				}),
 			},
 			failedID: {
 				BacktestSummary: strategyhttp.BacktestSummary{
@@ -1534,7 +1667,7 @@ func (s *memoryBacktestStore) LoadBacktests(ctx context.Context) ([]*strategyhtt
 	return out, nil
 }
 
-func (s *memoryBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UUID) (*strategyhttp.BacktestResult, error) {
+func (s *memoryBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UUID) (json.RawMessage, error) {
 	bt, ok := s.backtests[id]
 	if !ok {
 		return nil, fmt.Errorf("backtest not found")
@@ -1552,29 +1685,45 @@ func (s *memoryBacktestStore) SaveBacktest(ctx context.Context, detail *strategy
 	return nil
 }
 
-func (s *memoryBacktestStore) GetBacktestTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]strategyhttp.TradeRecord, error) {
+func (s *memoryBacktestStore) GetBacktestTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error) {
 	result, err := s.LoadBacktestResult(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if result == nil {
-		return []strategyhttp.TradeRecord{}, nil
+	if len(result) == 0 {
+		return json.RawMessage(`{"items":[]}`), nil
 	}
-	return paginateHelper(result.TradeRecords, page, limit), nil
+	items, err := testExtractTradeRecords(result, strategyType)
+	if err != nil {
+		return nil, err
+	}
+	return marshalItems(paginateRaw(items, page, limit))
 }
 
-func (s *memoryBacktestStore) GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]strategyhttp.ClosedTrade, error) {
+func (s *memoryBacktestStore) GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error) {
 	result, err := s.LoadBacktestResult(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if result == nil {
-		return []strategyhttp.ClosedTrade{}, nil
+	if len(result) == 0 {
+		return json.RawMessage(`{"items":[]}`), nil
 	}
-	return paginateHelper(result.ClosedTrades, page, limit), nil
+	items, err := testExtractClosedTrades(result, strategyType)
+	if err != nil {
+		return nil, err
+	}
+	return marshalItems(paginateRaw(items, page, limit))
 }
 
-func paginateHelper[T any](items []T, page, limit int) []T {
+func marshalItems(items []json.RawMessage) (json.RawMessage, error) {
+	b, err := json.Marshal(map[string]any{"items": items})
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func paginateRaw(items []json.RawMessage, page, limit int) []json.RawMessage {
 	if page < 1 {
 		page = 1
 	}
@@ -1584,18 +1733,90 @@ func paginateHelper[T any](items []T, page, limit int) []T {
 	if limit > 50 {
 		limit = 50
 	}
-
 	start := (page - 1) * limit
 	if start >= len(items) {
-		return []T{}
+		return []json.RawMessage{}
 	}
-
 	end := start + limit
 	if end > len(items) {
 		end = len(items)
 	}
-
 	return items[start:end]
+}
+
+func mustMarshalResult(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	return b
+}
+
+func testExtractTradeRecords(result json.RawMessage, strategyType string) ([]json.RawMessage, error) {
+	switch strategyType {
+	case "copytrading":
+		var r strategyhttp.CopyTradingBacktestResult
+		if err := json.Unmarshal(result, &r); err != nil {
+			return nil, err
+		}
+		out := make([]json.RawMessage, 0, len(r.TradeRecords))
+		for _, item := range r.TradeRecords {
+			b, err := json.Marshal(item)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, b)
+		}
+		return out, nil
+	default:
+		var r strategyhttp.BacktestResult
+		if err := json.Unmarshal(result, &r); err != nil {
+			return nil, err
+		}
+		out := make([]json.RawMessage, 0, len(r.TradeRecords))
+		for _, item := range r.TradeRecords {
+			b, err := json.Marshal(item)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, b)
+		}
+		return out, nil
+	}
+}
+
+func testExtractClosedTrades(result json.RawMessage, strategyType string) ([]json.RawMessage, error) {
+	switch strategyType {
+	case "copytrading":
+		var r strategyhttp.CopyTradingBacktestResult
+		if err := json.Unmarshal(result, &r); err != nil {
+			return nil, err
+		}
+		out := make([]json.RawMessage, 0, len(r.ClosedTrades))
+		for _, item := range r.ClosedTrades {
+			b, err := json.Marshal(item)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, b)
+		}
+		return out, nil
+	default:
+		var r strategyhttp.BacktestResult
+		if err := json.Unmarshal(result, &r); err != nil {
+			return nil, err
+		}
+		out := make([]json.RawMessage, 0, len(r.ClosedTrades))
+		for _, item := range r.ClosedTrades {
+			b, err := json.Marshal(item)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, b)
+		}
+		return out, nil
+	}
 }
 
 func TestHandlerRunOwnership(t *testing.T) {
@@ -1695,13 +1916,13 @@ func TestHandlerBacktestSummary(t *testing.T) {
 				},
 				Start: now.Add(-time.Hour),
 				End:   now,
-				Result: &strategyhttp.BacktestResult{
+				Result: mustMarshalResult(t, strategyhttp.BacktestResult{
 					TotalPnL:    "100.0",
 					WinCount:    5,
 					LossCount:   2,
 					MaxDrawdown: "0.1",
 					SharpeRatio: "1.5",
-				},
+				}),
 			},
 		},
 	}
@@ -1867,11 +2088,11 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 					Status:       "completed",
 					CreatedAt:    now,
 				},
-				Result: &strategyhttp.BacktestResult{
+				Result: mustMarshalResult(t, strategyhttp.BacktestResult{
 					TradeRecords: tradeRecords,
 					ClosedTrades: closedTrades,
 					TotalPnL:     "100.0",
-				},
+				}),
 			},
 		},
 	}
