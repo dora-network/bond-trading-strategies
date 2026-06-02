@@ -14,42 +14,26 @@ import (
 )
 
 type fakeTradesClient struct {
-	orderBooks      []string
-	tradesByOrderBK map[string][]doraclient.Trade
-	listOBErr       error
-	getTradesErr    error
-
-	getTradesCalls []getTradesCall
+	trades     []doraclient.Trade
+	streamErr  error
+	streamCall getStreamCall
 }
 
-type getTradesCall struct {
-	userID       string
-	orderBookIDs []string
-	start, end   time.Time
+type getStreamCall struct {
+	userID     string
+	start, end time.Time
 }
 
-func (f *fakeTradesClient) ListOrderBooks(_ context.Context) ([]string, error) {
-	if f.listOBErr != nil {
-		return nil, f.listOBErr
+func (f *fakeTradesClient) GetTradeStream(_ context.Context, userID string, start, end time.Time) (<-chan doraclient.Trade, <-chan error) {
+	f.streamCall = getStreamCall{userID: userID, start: start, end: end}
+	ch := make(chan doraclient.Trade, len(f.trades))
+	done := make(chan error, 1)
+	for _, t := range f.trades {
+		ch <- t
 	}
-	return f.orderBooks, nil
-}
-
-func (f *fakeTradesClient) GetTrades(_ context.Context, userID string, orderBookIDs []string, start, end time.Time) ([]doraclient.Trade, error) {
-	f.getTradesCalls = append(f.getTradesCalls, getTradesCall{
-		userID:       userID,
-		orderBookIDs: append([]string(nil), orderBookIDs...),
-		start:        start,
-		end:          end,
-	})
-	if f.getTradesErr != nil {
-		return nil, f.getTradesErr
-	}
-	var out []doraclient.Trade
-	for _, obID := range orderBookIDs {
-		out = append(out, f.tradesByOrderBK[obID]...)
-	}
-	return out, nil
+	close(ch)
+	done <- f.streamErr
+	return ch, done
 }
 
 func newBacktesterWithFake(t *testing.T, fake *fakeTradesClient, followedTrader uuid.UUID, percentage, leverage string) *Backtester {

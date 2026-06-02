@@ -21,8 +21,7 @@ const (
 )
 
 type tradesClient interface {
-	ListOrderBooks(ctx context.Context) ([]string, error)
-	GetTrades(ctx context.Context, userID string, orderBookIDs []string, start, end time.Time) ([]doraclient.Trade, error)
+	GetTradeStream(ctx context.Context, userID string, start, end time.Time) (<-chan doraclient.Trade, <-chan error)
 }
 
 type doraTradesClient struct {
