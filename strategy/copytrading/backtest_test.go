@@ -433,3 +433,42 @@ func TestSimulate_NoTrades(t *testing.T) {
 	require.Equal(t, 0, res.GetWinCount())
 	require.Equal(t, 0, res.GetLossCount())
 }
+
+func TestSimulate_MultiPageStream(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	// 300 trades = 3 pages of 100. Even-indexed trades are BUYs that
+	// accumulate into a long position; odd-indexed are SELLs that
+	// close them. The simulation must process all 300 across the
+	// page boundary without dropping or reordering.
+	var trades []doraclient.Trade
+	for i := 0; i < 300; i++ {
+		side := "buy"
+		if i%2 == 1 {
+			side = "sell"
+		}
+		trades = append(trades, makeTrade(
+			uuid.New().String(),
+			asset.String(),
+			side,
+			"100",
+			"0.01",
+			t0.Add(time.Duration(i)*time.Second),
+		))
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	require.NoError(t, err)
+
+	records := res.GetTradeRecords().([]TradeRecord)
+	require.Len(t, records, 300, "every trade across all 3 pages must be processed")
+
+	// First and last trade IDs must match the input order.
+	require.Equal(t, trades[0].TransactionId, records[0].TradeID.String())
+	require.Equal(t, trades[299].TransactionId, records[299].TradeID.String())
+}
