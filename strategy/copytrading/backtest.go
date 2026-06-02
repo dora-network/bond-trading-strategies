@@ -71,63 +71,86 @@ func (c *doraTradesClient) ListOrderBooks(ctx context.Context) ([]string, error)
 	return ids, nil
 }
 
-func (c *doraTradesClient) GetTrades(
+func (c *doraTradesClient) GetTradeStream(
 	ctx context.Context,
 	userID string,
-	orderBookIDs []string,
 	start, end time.Time,
-) ([]doraclient.Trade, error) {
+) (<-chan doraclient.Trade, <-chan error) {
+	ch := make(chan doraclient.Trade, 100)
+	done := make(chan error, 1)
+
 	if c == nil || c.client == nil {
-		return nil, errors.New("DORA client is not configured")
+		close(ch)
+		done <- errors.New("DORA client is not configured")
+		return ch, done
 	}
 	if c.apiKey == "" {
-		return nil, errors.New("API_KEY is not configured")
-	}
-	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
-		"apiKeyAuthHeader": {
-			Key:    c.apiKey,
-			Prefix: apiKeyPrefix,
-		},
-	})
-
-	var allTrades []doraclient.Trade
-	limit := int32(1000) //nolint:mnd
-	page := int32(1)
-
-	for {
-		req := c.client.DefaultAPI.GetTrades(authCtx).Limit(limit).Page(page)
-		if userID != "" {
-			req = req.UserIds([]string{userID})
-		}
-		if len(orderBookIDs) > 0 {
-			req = req.OrderBookIds(orderBookIDs)
-		}
-		if !start.IsZero() {
-			req = req.Start(start)
-		}
-		if !end.IsZero() {
-			req = req.End(end)
-		}
-
-		resp, _, err := req.Execute()
-		if err != nil {
-			return nil, fmt.Errorf("get trades: %w", err)
-		}
-
-		if resp == nil || resp.Data == nil {
-			break
-		}
-
-		allTrades = append(allTrades, resp.Data...)
-
-		if len(resp.Data) < int(limit) {
-			break
-		}
-
-		page++
+		close(ch)
+		done <- errors.New("API_KEY is not configured")
+		return ch, done
 	}
 
-	return allTrades, nil
+	go func() {
+		defer close(ch)
+		authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
+			"apiKeyAuthHeader": {
+				Key:    c.apiKey,
+				Prefix: apiKeyPrefix,
+			},
+		})
+		const limit = int32(100) //nolint:mnd
+		page := int32(1)
+		for {
+			select {
+			case <-ctx.Done():
+				done <- ctx.Err()
+				return
+			default:
+			}
+
+			req := c.client.DefaultAPI.GetTrades(authCtx).Limit(limit).Page(page)
+			if userID != "" {
+				req = req.UserIds([]string{userID})
+			}
+			if !start.IsZero() {
+				req = req.Start(start)
+			}
+			if !end.IsZero() {
+				req = req.End(end)
+			}
+
+			resp, _, err := req.Execute()
+			if err != nil {
+				done <- fmt.Errorf("get trades page %d: %w", page, err)
+				return
+			}
+			if resp == nil || resp.Data == nil {
+				done <- nil
+				return
+			}
+
+			for _, trade := range resp.Data {
+				select {
+				case <-ctx.Done():
+					done <- ctx.Err()
+					return
+				case ch <- trade:
+				}
+			}
+
+			if len(resp.Data) < int(limit) {
+				done <- nil
+				return
+			}
+			page++
+			if page > 100000 { //nolint:mnd
+				done <- errors.New("trade pagination exceeded 100000 pages")
+				return
+			}
+		}
+	}()
+
+	return ch, done
 }
 
 type Backtester struct {
