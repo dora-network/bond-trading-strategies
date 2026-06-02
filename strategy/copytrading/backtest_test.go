@@ -2,9 +2,11 @@ package copytrading
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -50,15 +52,38 @@ func (f *fakeTradesClient) GetTrades(_ context.Context, userID string, orderBook
 	return out, nil
 }
 
-func newBacktesterWithFake(t *testing.T, fake *fakeTradesClient, followedTrader uuid.UUID) *Backtester {
+func newBacktesterWithFake(t *testing.T, fake *fakeTradesClient, followedTrader uuid.UUID, percentage, leverage string) *Backtester {
 	t.Helper()
 	cfg := Config{
 		FollowedTrader:        followedTrader,
-		PercentageOfAvailable: decimal.MustParse("0.5"),
-		Leverage:              decimal.MustParse("1.0"),
+		PercentageOfAvailable: decimal.MustParse(percentage),
+		Leverage:              decimal.MustParse(leverage),
 	}
 	s := New(cfg)
 	return &Backtester{strategy: s, trades: fake}
+}
+
+func newBacktesterForSimulation(followedTrader uuid.UUID, percentage, leverage string) *Backtester {
+	cfg := Config{
+		FollowedTrader:        followedTrader,
+		PercentageOfAvailable: decimal.MustParse(percentage),
+		Leverage:              decimal.MustParse(leverage),
+	}
+	s := New(cfg)
+	return &Backtester{strategy: s}
+}
+
+func makeTrade(id, asset, side, price, qty string, t time.Time) doraclient.Trade {
+	return doraclient.Trade{
+		TransactionId: id,
+		UserId:        "ignored-by-sim",
+		OrderBookId:   "ob",
+		Asset0:        asset,
+		Side:          doraclient.Side(strings.ToUpper(side)),
+		Price:         price,
+		Quantity0:     qty,
+		CreatedAt:     t,
+	}
 }
 
 func TestBacktesterRunWalksAllOrderBooks(t *testing.T) {
@@ -73,10 +98,10 @@ func TestBacktesterRunWalksAllOrderBooks(t *testing.T) {
 	t2 := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
 
 	tradesOB1 := []doraclient.Trade{
-		{TransactionId: "tx-1", UserId: followed.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: t1},
+		{TransactionId: "tx-1", UserId: followed.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: t1, Asset0: "bond-a"},
 	}
 	tradesOB2 := []doraclient.Trade{
-		{TransactionId: "tx-2", UserId: followed.String(), OrderBookId: ob2, Side: doraclient.SIDE_SELL, Price: "101", Quantity0: "1", CreatedAt: t2},
+		{TransactionId: "tx-2", UserId: followed.String(), OrderBookId: ob2, Side: doraclient.SIDE_SELL, Price: "101", Quantity0: "1", CreatedAt: t2, Asset0: "bond-b"},
 	}
 
 	fake := &fakeTradesClient{
@@ -87,7 +112,7 @@ func TestBacktesterRunWalksAllOrderBooks(t *testing.T) {
 		},
 	}
 
-	b := newBacktesterWithFake(t, fake, followed)
+	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
 	start := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
 	result, err := b.Run(t.Context(), start, end)
@@ -104,7 +129,9 @@ func TestBacktesterRunWalksAllOrderBooks(t *testing.T) {
 		fake.getTradesCalls[2].orderBookIDs[0],
 	})
 
-	require.Len(t, result.TradeRecords, 2)
+	records, ok := result.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
+	require.Len(t, records, 2)
 }
 
 func TestBacktesterRunSortsByCreatedAt(t *testing.T) {
@@ -118,10 +145,10 @@ func TestBacktesterRunSortsByCreatedAt(t *testing.T) {
 	earlier := time.Date(2026, 5, 26, 9, 0, 0, 0, time.UTC)
 
 	tradesOB1 := []doraclient.Trade{
-		{TransactionId: "tx-later", UserId: followed.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: later},
+		{TransactionId: "tx-later", UserId: followed.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: later, Asset0: "bond-a"},
 	}
 	tradesOB2 := []doraclient.Trade{
-		{TransactionId: "tx-earlier", UserId: followed.String(), OrderBookId: ob2, Side: doraclient.SIDE_SELL, Price: "101", Quantity0: "1", CreatedAt: earlier},
+		{TransactionId: "tx-earlier", UserId: followed.String(), OrderBookId: ob2, Side: doraclient.SIDE_SELL, Price: "101", Quantity0: "1", CreatedAt: earlier, Asset0: "bond-b"},
 	}
 
 	fake := &fakeTradesClient{
@@ -132,16 +159,18 @@ func TestBacktesterRunSortsByCreatedAt(t *testing.T) {
 		},
 	}
 
-	b := newBacktesterWithFake(t, fake, followed)
+	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
 	start := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
 	result, err := b.Run(t.Context(), start, end)
 	require.NoError(t, err)
 
-	require.Len(t, result.TradeRecords, 2)
-	require.True(t, result.TradeRecords[0].Time.Before(result.TradeRecords[1].Time),
+	records, ok := result.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok)
+	require.Len(t, records, 2)
+	require.True(t, records[0].Time.Before(records[1].Time),
 		"trades must be sorted by time ascending, got %v then %v",
-		result.TradeRecords[0].Time, result.TradeRecords[1].Time)
+		records[0].Time, records[1].Time)
 }
 
 func TestBacktesterRunFiltersNonFollowedTraders(t *testing.T) {
@@ -152,8 +181,8 @@ func TestBacktesterRunFiltersNonFollowedTraders(t *testing.T) {
 	ob1 := "ob-1"
 
 	tradesOB1 := []doraclient.Trade{
-		{TransactionId: "tx-followed", UserId: followed.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)},
-		{TransactionId: "tx-stranger", UserId: stranger.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC)},
+		{TransactionId: "tx-followed", UserId: followed.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC), Asset0: "bond-a"},
+		{TransactionId: "tx-stranger", UserId: stranger.String(), OrderBookId: ob1, Side: doraclient.SIDE_BUY, Price: "100", Quantity0: "1", CreatedAt: time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC), Asset0: "bond-a"},
 	}
 
 	fake := &fakeTradesClient{
@@ -163,11 +192,272 @@ func TestBacktesterRunFiltersNonFollowedTraders(t *testing.T) {
 		},
 	}
 
-	b := newBacktesterWithFake(t, fake, followed)
+	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
 	start := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
 	result, err := b.Run(t.Context(), start, end)
 	require.NoError(t, err)
 
-	require.Len(t, result.TradeRecords, 1, "only the followed trader's trades must be simulated")
+	records, ok := result.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok)
+	require.Len(t, records, 1, "only the followed trader's trades must be simulated")
+}
+
+func TestSimulate_BuyOpensLong(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	trades := []doraclient.Trade{
+		makeTrade(followed.String(), asset.String(), "buy", "100", "1", t0),
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), trades)
+	require.NoError(t, err)
+
+	records := res.GetTradeRecords().([]TradeRecord)
+	require.Len(t, records, 1)
+	rec := records[0]
+	require.Equal(t, types.SignalBuy, rec.Signal)
+	require.Equal(t, "10", rec.Quantity.String())
+	require.Equal(t, "1000", rec.OrderSize.String())
+	require.Equal(t, "0", rec.Cash.String())
+	require.Equal(t, "10", rec.OpenPosition.String())
+
+	closed := res.GetClosedTrades().([]ClosedTrade)
+	require.Len(t, closed, 0)
+
+	require.True(t, res.GetTotalPnL().IsZero())
+	require.Equal(t, 0, res.GetWinCount())
+	require.Equal(t, 0, res.GetLossCount())
+}
+
+func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	trades := []doraclient.Trade{
+		makeTrade("tx-open", asset.String(), "buy", "100", "1", t0),
+		makeTrade("tx-close", asset.String(), "sell", "120", "1", t1),
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), trades)
+	require.NoError(t, err)
+
+	closed := res.GetClosedTrades().([]ClosedTrade)
+	require.Len(t, closed, 1)
+	ct := closed[0]
+	require.Equal(t, "10", ct.Quantity.String())
+	require.Equal(t, "100", ct.EntryPrice.String())
+	require.Equal(t, "120", ct.ExitPrice.String())
+	require.Equal(t, "200", ct.PnL.String())
+
+	require.Equal(t, "200", res.GetTotalPnL().String())
+	require.Equal(t, 1, res.GetWinCount())
+	require.Equal(t, 0, res.GetLossCount())
+
+	records := res.GetTradeRecords().([]TradeRecord)
+	require.Len(t, records, 2)
+	require.Equal(t, "0", records[1].OpenPosition.String())
+}
+
+func TestSimulate_BuyThenPartialSell(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	trades := []doraclient.Trade{
+		makeTrade("tx-open", asset.String(), "buy", "100", "1", t0),
+		makeTrade("tx-partial", asset.String(), "sell", "150", "0.4", t1),
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), trades)
+	require.NoError(t, err)
+
+	closed := res.GetClosedTrades().([]ClosedTrade)
+	require.Len(t, closed, 1)
+	require.Equal(t, "4", closed[0].Quantity.String())
+	require.Equal(t, "100", closed[0].EntryPrice.String())
+	require.Equal(t, "150", closed[0].ExitPrice.String())
+	require.Equal(t, "200", closed[0].PnL.String())
+
+	records := res.GetTradeRecords().([]TradeRecord)
+	require.Len(t, records, 2)
+	require.Equal(t, "6", records[1].OpenPosition.String())
+}
+
+func TestSimulate_MultipleBuysWeightedAvg(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	trades := []doraclient.Trade{
+		makeTrade("tx-1", asset.String(), "buy", "100", "0.4", t0),
+		makeTrade("tx-2", asset.String(), "buy", "200", "0.6", t1),
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), trades)
+	require.NoError(t, err)
+
+	records := res.GetTradeRecords().([]TradeRecord)
+	require.Len(t, records, 2)
+	require.Equal(t, "10", records[1].OpenPosition.String())
+
+	closed := res.GetClosedTrades().([]ClosedTrade)
+	require.Len(t, closed, 0)
+}
+
+func TestSimulate_BuyClosesShort(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	trades := []doraclient.Trade{
+		makeTrade("tx-open-short", asset.String(), "sell", "100", "1", t0),
+		makeTrade("tx-close-partial", asset.String(), "buy", "80", "0.4", t1),
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), trades)
+	require.NoError(t, err)
+
+	closed := res.GetClosedTrades().([]ClosedTrade)
+	require.Len(t, closed, 1)
+	require.Equal(t, "4", closed[0].Quantity.String())
+	require.Equal(t, "100", closed[0].EntryPrice.String())
+	require.Equal(t, "80", closed[0].ExitPrice.String())
+	require.Equal(t, "80", closed[0].PnL.String())
+
+	records := res.GetTradeRecords().([]TradeRecord)
+	require.Len(t, records, 2)
+	require.Equal(t, "-6", records[1].OpenPosition.String())
+}
+
+func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	trades := []doraclient.Trade{
+		makeTrade("tx-open-short", asset.String(), "sell", "100", "1", t0),
+		makeTrade("tx-flip", asset.String(), "buy", "90", "1.5", t1),
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), trades)
+	require.NoError(t, err)
+
+	closed := res.GetClosedTrades().([]ClosedTrade)
+	require.Len(t, closed, 1)
+	require.Equal(t, "10", closed[0].Quantity.String())
+	require.Equal(t, "100", closed[0].EntryPrice.String())
+	require.Equal(t, "90", closed[0].ExitPrice.String())
+	require.Equal(t, "100", closed[0].PnL.String())
+
+	records := res.GetTradeRecords().([]TradeRecord)
+	require.GreaterOrEqual(t, len(records), 2)
+	last := records[len(records)-1]
+	require.Equal(t, "5", last.OpenPosition.String())
+}
+
+func TestSimulate_SellOpensShort(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	trades := []doraclient.Trade{
+		makeTrade("tx-open-short", asset.String(), "sell", "100", "1", t0),
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), trades)
+	require.NoError(t, err)
+
+	records := res.GetTradeRecords().([]TradeRecord)
+	require.Len(t, records, 1)
+	rec := records[0]
+	require.Equal(t, types.SignalSell, rec.Signal)
+	require.Equal(t, "10", rec.Quantity.String())
+	require.Equal(t, "0", rec.Cash.String())
+	require.Equal(t, "-10", rec.OpenPosition.String())
+
+	require.True(t, res.GetTotalPnL().IsZero())
+}
+
+func TestSimulate_WinLossCount(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+	trades := []doraclient.Trade{
+		makeTrade("tx-1", asset.String(), "buy", "100", "1", t0),
+		makeTrade("tx-2", asset.String(), "sell", "150", "1", t1),
+		makeTrade("tx-3", asset.String(), "buy", "100", "1", t2),
+		makeTrade("tx-4", asset.String(), "sell", "80", "1", t3),
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), trades)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, res.GetWinCount())
+	require.Equal(t, 1, res.GetLossCount())
+	require.Equal(t, "300", res.GetTotalPnL().String())
+}
+
+func TestSimulate_MaxDrawdownNonNegative(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 6, 4, 10, 0, 0, 0, time.UTC)
+	trades := []doraclient.Trade{
+		makeTrade("tx-1", asset.String(), "buy", "100", "1", t0),
+		makeTrade("tx-2", asset.String(), "sell", "150", "1", t1),
+		makeTrade("tx-3", asset.String(), "buy", "100", "1", t2),
+		makeTrade("tx-4", asset.String(), "sell", "120", "1", t3),
+	}
+
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), trades)
+	require.NoError(t, err)
+
+	require.False(t, res.GetMaxDrawdown().IsNeg(), "MaxDrawdown must be >= 0, got %s", res.GetMaxDrawdown().String())
+}
+
+func TestSimulate_NoTrades(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	res, err := b.simulate(t.Context(), nil)
+	require.NoError(t, err)
+
+	require.True(t, res.GetTotalPnL().IsZero())
+	require.Equal(t, 0, res.GetWinCount())
+	require.Equal(t, 0, res.GetLossCount())
 }
