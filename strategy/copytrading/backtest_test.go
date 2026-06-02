@@ -70,6 +70,16 @@ func makeTrade(id, asset, side, price, qty string, t time.Time) doraclient.Trade
 	}
 }
 
+func feedChannel(t *testing.T, trades []doraclient.Trade) <-chan doraclient.Trade {
+	t.Helper()
+	ch := make(chan doraclient.Trade, len(trades))
+	for _, trade := range trades {
+		ch <- trade
+	}
+	close(ch)
+	return ch
+}
+
 func TestBacktesterRunWalksAllOrderBooks(t *testing.T) {
 	t.Parallel()
 
@@ -198,7 +208,7 @@ func TestSimulate_BuyOpensLong(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), trades)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	records := res.GetTradeRecords().([]TradeRecord)
@@ -231,7 +241,7 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), trades)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	closed := res.GetClosedTrades().([]ClosedTrade)
@@ -264,7 +274,7 @@ func TestSimulate_BuyThenPartialSell(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), trades)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	closed := res.GetClosedTrades().([]ClosedTrade)
@@ -292,7 +302,7 @@ func TestSimulate_MultipleBuysWeightedAvg(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), trades)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	records := res.GetTradeRecords().([]TradeRecord)
@@ -316,7 +326,7 @@ func TestSimulate_BuyClosesShort(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), trades)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	closed := res.GetClosedTrades().([]ClosedTrade)
@@ -344,7 +354,7 @@ func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), trades)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	closed := res.GetClosedTrades().([]ClosedTrade)
@@ -371,7 +381,7 @@ func TestSimulate_SellOpensShort(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), trades)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	records := res.GetTradeRecords().([]TradeRecord)
@@ -402,7 +412,7 @@ func TestSimulate_WinLossCount(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), trades)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	require.Equal(t, 1, res.GetWinCount())
@@ -427,7 +437,7 @@ func TestSimulate_MaxDrawdownNonNegative(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), trades)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	require.False(t, res.GetMaxDrawdown().IsNeg(), "MaxDrawdown must be >= 0, got %s", res.GetMaxDrawdown().String())
@@ -437,8 +447,9 @@ func TestSimulate_NoTrades(t *testing.T) {
 	t.Parallel()
 
 	followed := uuid.New()
+	trades := []doraclient.Trade{}
 	b := newBacktesterForSimulation(followed, "1.0", "1.0")
-	res, err := b.simulate(t.Context(), nil)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
 	require.True(t, res.GetTotalPnL().IsZero())
