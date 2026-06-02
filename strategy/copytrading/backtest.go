@@ -42,34 +42,6 @@ func newDoraTradesClient(apiKey string) *doraTradesClient {
 	}
 }
 
-func (c *doraTradesClient) ListOrderBooks(ctx context.Context) ([]string, error) {
-	if c == nil || c.client == nil {
-		return nil, errors.New("DORA client is not configured")
-	}
-	if c.apiKey == "" {
-		return nil, errors.New("API_KEY is not configured")
-	}
-	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
-		"apiKeyAuthHeader": {
-			Key:    c.apiKey,
-			Prefix: apiKeyPrefix,
-		},
-	})
-
-	resp, _, err := c.client.DefaultAPI.ListOrderBooks(authCtx).Execute()
-	if err != nil {
-		return nil, fmt.Errorf("list order books: %w", err)
-	}
-	if resp == nil {
-		return nil, nil
-	}
-	ids := make([]string, 0, len(resp.Data))
-	for _, ob := range resp.Data {
-		ids = append(ids, ob.OrderBookId)
-	}
-	return ids, nil
-}
-
 func (c *doraTradesClient) GetTradeStream(
 	ctx context.Context,
 	userID string,
