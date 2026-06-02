@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
@@ -14,7 +15,8 @@ import (
 
 // tradesClient fetches historical trades from Dora.
 type tradesClient interface {
-	GetTrades(ctx context.Context, userID string, start, end time.Time) ([]doraclient.Trade, error)
+	ListOrderBooks(ctx context.Context) ([]string, error)
+	GetTrades(ctx context.Context, userID string, orderBookIDs []string, start, end time.Time) ([]doraclient.Trade, error)
 }
 
 // doraTradesClient implements tradesClient using the Dora SDK.
@@ -38,8 +40,43 @@ func newDoraTradesClient(apiKey string) *doraTradesClient {
 	}
 }
 
-// GetTrades fetches trades for the given userID within [start, end].
-func (c *doraTradesClient) GetTrades(ctx context.Context, userID string, start, end time.Time) ([]doraclient.Trade, error) {
+// ListOrderBooks returns the IDs of all order books.
+func (c *doraTradesClient) ListOrderBooks(ctx context.Context) ([]string, error) {
+	if c == nil || c.client == nil {
+		return nil, errors.New("DORA client is not configured")
+	}
+	if c.apiKey == "" {
+		return nil, errors.New("API_KEY is not configured")
+	}
+	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
+		"apiKeyAuthHeader": {
+			Key:    c.apiKey,
+			Prefix: apiKeyPrefix,
+		},
+	})
+
+	resp, _, err := c.client.DefaultAPI.ListOrderBooks(authCtx).Execute()
+	if err != nil {
+		return nil, fmt.Errorf("list order books: %w", err)
+	}
+	if resp == nil {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(resp.Data))
+	for _, ob := range resp.Data {
+		ids = append(ids, ob.OrderBookId)
+	}
+	return ids, nil
+}
+
+// GetTrades fetches trades for the given userID within [start, end]. If
+// orderBookIDs is non-empty, results are scoped to those order books.
+func (c *doraTradesClient) GetTrades(
+	ctx context.Context,
+	userID string,
+	orderBookIDs []string,
+	start, end time.Time,
+) ([]doraclient.Trade, error) {
 	if c == nil || c.client == nil {
 		return nil, errors.New("DORA client is not configured")
 	}
@@ -61,6 +98,9 @@ func (c *doraTradesClient) GetTrades(ctx context.Context, userID string, start, 
 		req := c.client.DefaultAPI.GetTrades(authCtx).Limit(limit).Page(page)
 		if userID != "" {
 			req = req.UserIds([]string{userID})
+		}
+		if len(orderBookIDs) > 0 {
+			req = req.OrderBookIds(orderBookIDs)
 		}
 		if !start.IsZero() {
 			req = req.Start(start)
@@ -102,8 +142,9 @@ func NewBacktester(s *Strategy) *Backtester {
 	return &Backtester{strategy: s}
 }
 
-// Run fetches historical trades for the followed trader within [start, end]
-// and simulates copy trading.
+// Run fetches historical trades for the followed trader across all order
+// books within [start, end] and simulates copy trading. Trades are collated
+// across order books and sorted by created_at ascending.
 func (b *Backtester) Run(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
 	if b.trades == nil {
 		apiKey := os.Getenv("DORA_API_KEY")
@@ -113,12 +154,41 @@ func (b *Backtester) Run(ctx context.Context, start, end time.Time) (types.Backt
 		b.trades = newDoraTradesClient(apiKey)
 	}
 
-	trades, err := b.trades.GetTrades(ctx, b.strategy.cfg.FollowedTrader.String(), start, end)
+	orderBooks, err := b.trades.ListOrderBooks(ctx)
 	if err != nil {
-		return types.BacktestResult{}, fmt.Errorf("fetch historical trades: %w", err)
+		return types.BacktestResult{}, fmt.Errorf("list order books: %w", err)
 	}
 
-	return b.simulate(ctx, trades)
+	followedTrader := b.strategy.cfg.FollowedTrader.String()
+	var allTrades []doraclient.Trade
+	for _, obID := range orderBooks {
+		select {
+		case <-ctx.Done():
+			return types.BacktestResult{}, errors.New("backtest cancelled")
+		default:
+		}
+		trades, err := b.trades.GetTrades(ctx, followedTrader, []string{obID}, start, end)
+		if err != nil {
+			return types.BacktestResult{}, fmt.Errorf("get trades for order book %s: %w", obID, err)
+		}
+		allTrades = append(allTrades, trades...)
+	}
+
+	// Defensive filter: DORA should already filter by userID, but ensure only
+	// the followed trader's trades are simulated.
+	filtered := allTrades[:0]
+	for _, tr := range allTrades {
+		if tr.UserId == followedTrader {
+			filtered = append(filtered, tr)
+		}
+	}
+	allTrades = filtered
+
+	sort.Slice(allTrades, func(i, j int) bool {
+		return allTrades[i].CreatedAt.Before(allTrades[j].CreatedAt)
+	})
+
+	return b.simulate(ctx, allTrades)
 }
 
 func (b *Backtester) simulate(ctx context.Context, trades []doraclient.Trade) (types.BacktestResult, error) {
