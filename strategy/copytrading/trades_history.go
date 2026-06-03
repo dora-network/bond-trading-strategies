@@ -26,8 +26,6 @@ type Trade struct {
 
 // tradesHistoryStore is the backtest's read-only data source for a
 // followed trader's persisted trade history.
-//
-//nolint:unused // the Backtester field is added in a follow-up commit
 type tradesHistoryStore interface {
 	StreamTrades(ctx context.Context, userID string, start, end time.Time) (<-chan Trade, <-chan error)
 	TradeBounds(ctx context.Context, userID string) (min, max time.Time, count int, err error)

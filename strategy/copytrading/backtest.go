@@ -128,11 +128,11 @@ func (c *doraTradesClient) GetTradeStream(
 
 type Backtester struct {
 	strategy *Strategy
-	trades   tradesClient
+	history  tradesHistoryStore
 }
 
-func NewBacktester(s *Strategy) *Backtester {
-	return &Backtester{strategy: s}
+func NewBacktester(s *Strategy, store tradesHistoryStore) *Backtester {
+	return &Backtester{strategy: s, history: store}
 }
 
 func (b *Backtester) Run(ctx context.Context, start, end time.Time) (BacktestResult, error) {
