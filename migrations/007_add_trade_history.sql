@@ -1,19 +1,22 @@
 -- Write your migrate up statements here
 
 CREATE TABLE IF NOT EXISTS trades_history (
-  transaction_id UUID,
-  order_id UUID,
-  order_seq BIGINT,
-  orderbook_id UUID,
-  user_id UUID,
-  asset0 UUID,
-  quantity0 DECIMAL(42,18),
-  price DECIMAL(42,18),
-  side VARCHAR(10),
-  aggressor_indicator BOOLEAN,
-  created_at TIMESTAMP
+  transaction_id UUID NOT NULL PRIMARY KEY,
+  order_id UUID NOT NULL,
+  order_seq BIGINT NOT NULL,
+  orderbook_id UUID NOT NULL,
+  user_id UUID NOT NULL,
+  asset0 UUID NOT NULL,
+  quantity0 DECIMAL(42,18) NOT NULL,
+  price DECIMAL(42,18) NOT NULL,
+  side VARCHAR(10) NOT NULL,
+  aggressor_indicator BOOLEAN NOT NULL,
+  created_at TIMESTAMP NOT NULL
 );
+
+CREATE INDEX idx_trades_history_user_id_created_at on trades_history(user_id, created_at);
 
 ---- create above / drop below ----
 
-DROP TABLE IF EXISTS trades_history
+DROP INDEX IF EXISTS idx_trades_history_user_id_created_at;
+DROP TABLE IF EXISTS trades_history;
