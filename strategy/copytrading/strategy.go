@@ -30,7 +30,7 @@ type Config struct {
 type Strategy struct {
 	cfg           Config
 	marketAPI     marketAPIClient
-	tradesClient  tradesClient
+	backtestStore tradesHistoryStore
 	log           *slog.Logger
 	tradeStream   *streams.TradeStream
 	runID         uuid.UUID
@@ -60,10 +60,10 @@ func WithMarketAPIClient(client marketAPIClient) func(*Strategy) {
 	}
 }
 
-// WithTradesClient sets the trades client for backtesting.
-func WithTradesClient(client tradesClient) func(*Strategy) {
+// WithBacktestStore sets the trades history store used by the backtester.
+func WithBacktestStore(store tradesHistoryStore) func(*Strategy) {
 	return func(s *Strategy) {
-		s.tradesClient = client
+		s.backtestStore = store
 	}
 }
 
@@ -76,7 +76,7 @@ func WithLogger(log *slog.Logger) func(*Strategy) {
 
 // Backtest runs a backtest simulation for the given time range.
 func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtestResult types.BacktestResult, err error) {
-	backtester := NewBacktester(s)
+	backtester := NewBacktester(s, s.backtestStore)
 	return backtester.Run(ctx, start, end)
 }
 

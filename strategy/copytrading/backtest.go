@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
-	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 )
@@ -17,114 +15,8 @@ const (
 	initialBacktestBalance = 10000
 	annualTradingDays      = 252
 	bondQuantityScale      = 1000
-	tradeStreamBufferSize  = 100
 	hoursPerDay            = 24
 )
-
-type tradesClient interface {
-	GetTradeStream(ctx context.Context, userID string, start, end time.Time) (<-chan doraclient.Trade, <-chan error)
-}
-
-type doraTradesClient struct {
-	client *doraclient.APIClient
-	apiKey string
-}
-
-func newDoraTradesClient(apiKey string) *doraTradesClient {
-	cfg := doraclient.NewConfiguration()
-	if baseURL := os.Getenv("DORA_BASE_URL"); baseURL != "" {
-		cfg.Servers = doraclient.ServerConfigurations{{
-			URL:         baseURL,
-			Description: "Configured DORA API server",
-		}}
-	}
-	return &doraTradesClient{
-		client: doraclient.NewAPIClient(cfg),
-		apiKey: apiKey,
-	}
-}
-
-func (c *doraTradesClient) GetTradeStream(
-	ctx context.Context,
-	userID string,
-	start, end time.Time,
-) (<-chan doraclient.Trade, <-chan error) {
-	ch := make(chan doraclient.Trade, tradeStreamBufferSize)
-	done := make(chan error, 1)
-
-	if c == nil || c.client == nil {
-		close(ch)
-		done <- errors.New("DORA client is not configured")
-		return ch, done
-	}
-	if c.apiKey == "" {
-		close(ch)
-		done <- errors.New("API_KEY is not configured")
-		return ch, done
-	}
-
-	go func() {
-		defer close(ch)
-		authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
-			"apiKeyAuthHeader": {
-				Key:    c.apiKey,
-				Prefix: apiKeyPrefix,
-			},
-		})
-		const limit = int32(100)
-		page := int32(1)
-		for {
-			select {
-			case <-ctx.Done():
-				done <- ctx.Err()
-				return
-			default:
-			}
-
-			req := c.client.DefaultAPI.GetTrades(authCtx).Limit(limit).Page(page)
-			if userID != "" {
-				req = req.UserIds([]string{userID})
-			}
-			if !start.IsZero() {
-				req = req.Start(start)
-			}
-			if !end.IsZero() {
-				req = req.End(end)
-			}
-
-			resp, _, err := req.Execute()
-			if err != nil {
-				done <- fmt.Errorf("get trades page %d: %w", page, err)
-				return
-			}
-			if resp == nil || resp.Data == nil {
-				done <- nil
-				return
-			}
-
-			for _, trade := range resp.Data {
-				select {
-				case <-ctx.Done():
-					done <- ctx.Err()
-					return
-				case ch <- trade:
-				}
-			}
-
-			if len(resp.Data) < int(limit) {
-				done <- nil
-				return
-			}
-			page++
-			if page > 100000 { //nolint:mnd
-				done <- errors.New("trade pagination exceeded 100000 pages")
-				return
-			}
-		}
-	}()
-
-	return ch, done
-}
 
 type Backtester struct {
 	strategy *Strategy
@@ -136,22 +28,14 @@ func NewBacktester(s *Strategy, store tradesHistoryStore) *Backtester {
 }
 
 func (b *Backtester) Run(ctx context.Context, start, end time.Time) (BacktestResult, error) {
-	if b.trades == nil {
-		apiKey := os.Getenv("DORA_API_KEY")
-		if apiKey == "" {
-			return BacktestResult{}, errors.New("DORA_API_KEY not set")
-		}
-		b.trades = newDoraTradesClient(apiKey)
-	}
-
 	followedTrader := b.strategy.cfg.FollowedTrader.String()
-	ch, done := b.trades.GetTradeStream(ctx, followedTrader, start, end)
+	ch, done := b.history.StreamTrades(ctx, followedTrader, start, end)
 
 	result, simErr := b.simulate(ctx, ch)
 	prodErr := <-done
 
 	if prodErr != nil {
-		return BacktestResult{}, fmt.Errorf("get trade stream: %w", prodErr)
+		return BacktestResult{}, fmt.Errorf("stream trades: %w", prodErr)
 	}
 	if simErr != nil {
 		return BacktestResult{}, simErr
@@ -166,7 +50,7 @@ type position struct {
 	openTradeID uuid.UUID
 }
 
-func (b *Backtester) simulate(ctx context.Context, ch <-chan doraclient.Trade) (BacktestResult, error) {
+func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade) (BacktestResult, error) {
 	var (
 		tradeRecords []TradeRecord
 		closedTrades []ClosedTrade
@@ -204,32 +88,23 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan doraclient.Trade) (
 			continue
 		}
 
-		price, err := decimal.Parse(trade.Price)
-		if err != nil {
-			return BacktestResult{}, fmt.Errorf("parse price %q: %w", trade.Price, err)
-		}
-		if price.IsZero() {
+		if trade.Price.IsZero() {
 			continue
 		}
 
-		traderQty, err := decimal.Parse(trade.Quantity0)
-		if err != nil {
-			return BacktestResult{}, fmt.Errorf("parse quantity %q: %w", trade.Quantity0, err)
-		}
-
-		ourQty, _ := traderQty.Mul(scale)
+		ourQty, _ := trade.Quantity0.Mul(scale)
 		ourQty = ourQty.Round(0)
-		tradeID, _ := uuid.Parse(trade.TransactionId)
+		tradeID, _ := uuid.Parse(trade.TransactionID)
 
 		var ourSignal types.Signal
-		if trade.Side == doraclient.SIDE_BUY {
+		if trade.Side == "BUY" {
 			ourSignal = types.SignalBuy
 		} else {
 			ourSignal = types.SignalSell
 		}
 
 		cash, tradeRecords, closedTrades = applyTrade(
-			trade, tradeID, ourSignal, ourQty, price, margin, cash, positions,
+			trade, tradeID, ourSignal, ourQty, trade.Price, margin, cash, positions,
 			tradeRecords, closedTrades,
 		)
 	}
@@ -238,7 +113,7 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan doraclient.Trade) (
 }
 
 func applyTrade(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	ourSignal types.Signal,
 	ourQty, price, margin decimal.Decimal,
@@ -256,7 +131,7 @@ func applyTrade(
 }
 
 func applyBuy(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	ourQty, price, margin decimal.Decimal,
 	cash decimal.Decimal,
@@ -272,7 +147,7 @@ func applyBuy(
 }
 
 func buyClosesShort(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	ourQty, price, margin decimal.Decimal,
 	cash decimal.Decimal,
@@ -306,7 +181,7 @@ func buyClosesShort(
 }
 
 func buyOpensOrAddsLong(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	ourQty, price, margin decimal.Decimal,
 	cash decimal.Decimal,
@@ -339,7 +214,7 @@ func buyOpensOrAddsLong(
 }
 
 func applySell(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	ourQty, price, margin decimal.Decimal,
 	cash decimal.Decimal,
@@ -355,7 +230,7 @@ func applySell(
 }
 
 func sellClosesLong(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	ourQty, price, margin decimal.Decimal,
 	cash decimal.Decimal,
@@ -388,7 +263,7 @@ func sellClosesLong(
 }
 
 func sellOpensOrAddsShort(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	ourQty, price, margin decimal.Decimal,
 	cash decimal.Decimal,
@@ -422,7 +297,7 @@ func sellOpensOrAddsShort(
 }
 
 func closeLongPosition(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	pos *position,
 	closeQty, price decimal.Decimal,
@@ -452,7 +327,7 @@ func closeLongPosition(
 }
 
 func closeShortPosition(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	pos *position,
 	closeQty, price decimal.Decimal,
@@ -481,7 +356,7 @@ func closeShortPosition(
 }
 
 func emitTradeRecord(
-	trade doraclient.Trade,
+	trade Trade,
 	tradeID uuid.UUID,
 	signal types.Signal,
 	qty, price decimal.Decimal,
