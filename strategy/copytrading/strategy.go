@@ -2,6 +2,7 @@ package copytrading
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -76,6 +77,9 @@ func WithLogger(log *slog.Logger) func(*Strategy) {
 
 // Backtest runs a backtest simulation for the given time range.
 func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtestResult types.BacktestResult, err error) {
+	if s.backtestStore == nil {
+		return backtestResult, errors.New("backtest store not configured: use WithBacktestStore")
+	}
 	backtester := NewBacktester(s, s.backtestStore)
 	return backtester.Run(ctx, start, end)
 }
