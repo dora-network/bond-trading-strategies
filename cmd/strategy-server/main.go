@@ -17,6 +17,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/ratelimit"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -118,6 +119,7 @@ func main() {
 		service,
 		strategyhttp.WithRunStore(strategyhttp.NewPGRunStore(pool)),
 		strategyhttp.WithBacktestStore(strategyhttp.NewPGBacktestStore(pool)),
+		strategyhttp.WithTradesHistoryStore(copytrading.NewPGTradesHistoryStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithLogger(log),
 		strategyhttp.WithEncryptionKey(encryptionKey),

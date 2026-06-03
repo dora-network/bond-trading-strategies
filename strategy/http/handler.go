@@ -30,23 +30,24 @@ const (
 )
 
 type Handler struct {
-	service        strategycore.Service
-	now            func() time.Time
-	log            *slog.Logger
-	strategies     map[string]StrategyDefinition
-	prices         *prices.Handler
-	doraClient     doraClient
-	runStore       RunStore
-	backtestStore  BacktestStore
-	encryptionKey  []byte // 32-byte AES-256 key for encrypting API keys at rest
-	mux            *http.ServeMux
-	authedMux      http.Handler
-	mu             sync.RWMutex
-	backtests      map[uuid.UUID]*BacktestDetail
-	runs           map[uuid.UUID]*RunDetail
-	orderbookCache map[string]DORAOrderBookSummary
-	assetCache     map[string]AssetInfo
-	cacheMu        sync.RWMutex
+	service            strategycore.Service
+	now                func() time.Time
+	log                *slog.Logger
+	strategies         map[string]StrategyDefinition
+	prices             *prices.Handler
+	doraClient         doraClient
+	runStore           RunStore
+	backtestStore      BacktestStore
+	tradesHistoryStore *copytrading.PGTradesHistoryStore
+	encryptionKey      []byte // 32-byte AES-256 key for encrypting API keys at rest
+	mux                *http.ServeMux
+	authedMux          http.Handler
+	mu                 sync.RWMutex
+	backtests          map[uuid.UUID]*BacktestDetail
+	runs               map[uuid.UUID]*RunDetail
+	orderbookCache     map[string]DORAOrderBookSummary
+	assetCache         map[string]AssetInfo
+	cacheMu            sync.RWMutex
 }
 
 type runStarter interface {
@@ -421,7 +422,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		h.log = slog.Default()
 	}
 	if h.strategies == nil {
-		h.strategies = defaultStrategies(h.prices, h.log)
+		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.log)
 	}
 
 	h.mux = http.NewServeMux()
@@ -474,6 +475,15 @@ func WithRunStore(store RunStore) func(*Handler) {
 func WithBacktestStore(store BacktestStore) func(*Handler) {
 	return func(h *Handler) {
 		h.backtestStore = store
+	}
+}
+
+// WithTradesHistoryStore sets the store used by the copy-trading
+// backtest to read the followed trader's trade history from the
+// trades_history Postgres table.
+func WithTradesHistoryStore(store *copytrading.PGTradesHistoryStore) func(*Handler) {
+	return func(h *Handler) {
+		h.tradesHistoryStore = store
 	}
 }
 
@@ -1528,10 +1538,14 @@ func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, c
 	return def, normalised, strat, http.StatusOK, nil
 }
 
-func defaultStrategies(pricesHandler *prices.Handler, log *slog.Logger) map[string]StrategyDefinition {
+func defaultStrategies(
+	pricesHandler *prices.Handler,
+	tradesHistoryStore *copytrading.PGTradesHistoryStore,
+	log *slog.Logger,
+) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
-		newCopyTradingDefinition(),
+		newCopyTradingDefinition(tradesHistoryStore),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -1629,7 +1643,7 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 	}
 }
 
-func newCopyTradingDefinition() StrategyDefinition {
+func newCopyTradingDefinition(tradesHistoryStore *copytrading.PGTradesHistoryStore) StrategyDefinition {
 	return StrategyDefinition{
 		Type:        "copytrading",
 		Status:      strategyStatusAvailable,
@@ -1679,7 +1693,11 @@ func newCopyTradingDefinition() StrategyDefinition {
 			if err != nil {
 				return nil, nil, err
 			}
-			return normalised, copytrading.New(cfg, copytrading.WithLogger(slog.Default())), nil
+			strat := copytrading.New(cfg,
+				copytrading.WithLogger(slog.Default()),
+				copytrading.WithBacktestStore(tradesHistoryStore),
+			)
+			return normalised, strat, nil
 		},
 	}
 }

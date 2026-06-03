@@ -42,6 +42,7 @@ func TestHandlerListsCopyTraders(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(fake),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
@@ -67,6 +68,7 @@ func TestHandlerListsCopyTradersRequiresAuth(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
@@ -86,6 +88,7 @@ func TestHandlerListsCopyTradersEmpty(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(fake),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
@@ -114,6 +117,7 @@ func TestHandlerListsCopyTradersDORAError(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(fake),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
@@ -129,6 +133,7 @@ func TestHandlerListsStrategies(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
@@ -175,6 +180,7 @@ func TestHandlerListsTenors(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/tenors", nil)
@@ -217,6 +223,7 @@ func TestHandlerListsDORAOrderBooks(t *testing.T) {
 				}}, nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := httptest.NewRecorder()
@@ -253,6 +260,7 @@ func TestHandlerReturnsDORAOrderBookError(t *testing.T) {
 				return nil, fmt.Errorf("boom")
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := httptest.NewRecorder()
@@ -274,6 +282,7 @@ func TestHandlerGetsDORAUser(t *testing.T) {
 				return "user-123", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := httptest.NewRecorder()
@@ -303,6 +312,7 @@ func TestHandlerReturnsDORAUserError(t *testing.T) {
 				return "", fmt.Errorf("boom")
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := httptest.NewRecorder()
@@ -332,6 +342,7 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -415,6 +426,7 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -500,6 +512,7 @@ func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	followed := uuid.Must(uuid.NewV7())
@@ -616,6 +629,7 @@ func TestHandlerRejectsCopyTradingBacktestMissingRequiredFields(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := performJSONRequest(t, handler, "/v1/backtests", map[string]any{
 		"strategy_type": "copytrading",
@@ -645,6 +659,7 @@ func TestHandlerCancelBacktest(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -702,6 +717,7 @@ func TestHandlerListBacktests(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -752,6 +768,7 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -812,6 +829,7 @@ func TestHandlerRejectsCopyTradingRunMissingRequiredFields(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
 		"strategy_type": "copytrading",
@@ -845,6 +863,7 @@ func TestHandlerListRuns(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -891,6 +910,7 @@ func TestHandlerRejectsDuplicateOrderBookRun(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	// First run should succeed.
@@ -941,6 +961,7 @@ func TestHandlerAllowsDifferentOrderBookRun(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	// First run with order book A.
@@ -994,6 +1015,7 @@ func TestHandlerAllowsRunAfterPreviousStopped(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -1064,6 +1086,7 @@ func TestHandlerRestoreRuns(t *testing.T) {
 		strategyhttp.WithRunStore(store),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handlerAny.(interface{ RestoreRuns(context.Context) error })
 	require.True(t, ok)
@@ -1169,6 +1192,7 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handlerAny.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
@@ -1256,6 +1280,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 				return "user-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handler.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
@@ -1493,6 +1518,7 @@ func TestHandlerBacktestOwnership(t *testing.T) {
 				return "user-bob", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handlerAny.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
@@ -1524,6 +1550,7 @@ func TestHandlerValidationErrors(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
@@ -1851,6 +1878,7 @@ func TestHandlerRunOwnership(t *testing.T) {
 				return "user-bob", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handlerAny.(interface{ RestoreRuns(context.Context) error })
 	require.True(t, ok)
@@ -1935,6 +1963,7 @@ func TestHandlerBacktestSummary(t *testing.T) {
 				return "user-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handler.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
@@ -1986,6 +2015,7 @@ func TestHandlerRequiresAuth(t *testing.T) {
 				return "user-x", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	v1Endpoints := []struct {
@@ -2105,6 +2135,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 				return "user-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handler.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
