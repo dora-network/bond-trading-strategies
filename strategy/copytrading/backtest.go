@@ -17,6 +17,8 @@ const (
 	initialBacktestBalance = 10000
 	annualTradingDays      = 252
 	bondQuantityScale      = 1000
+	tradeStreamBufferSize  = 100
+	hoursPerDay            = 24
 )
 
 type tradesClient interface {
@@ -47,7 +49,7 @@ func (c *doraTradesClient) GetTradeStream(
 	userID string,
 	start, end time.Time,
 ) (<-chan doraclient.Trade, <-chan error) {
-	ch := make(chan doraclient.Trade, 100)
+	ch := make(chan doraclient.Trade, tradeStreamBufferSize)
 	done := make(chan error, 1)
 
 	if c == nil || c.client == nil {
@@ -69,7 +71,7 @@ func (c *doraTradesClient) GetTradeStream(
 				Prefix: apiKeyPrefix,
 			},
 		})
-		const limit = int32(100) //nolint:mnd
+		const limit = int32(100)
 		page := int32(1)
 		for {
 			select {
@@ -280,7 +282,7 @@ func buyClosesShort(
 	closedTrades []ClosedTrade,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	absQty := pos.qty.Abs()
-	closeQty, _ := minDecimal(absQty, ourQty)
+	closeQty := minDecimal(absQty, ourQty)
 
 	cash, pos.qty, closedTrades = closeShortPosition(trade, tradeID, pos, closeQty, price, cash, closedTrades)
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, closeQty, price, cash, pos.qty, tradeRecords)
@@ -362,7 +364,7 @@ func sellClosesLong(
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
-	closeQty, _ := minDecimal(pos.qty, ourQty)
+	closeQty := minDecimal(pos.qty, ourQty)
 
 	cash, pos.qty, closedTrades = closeLongPosition(trade, tradeID, pos, closeQty, price, cash, closedTrades)
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, closeQty, price, cash, pos.qty, tradeRecords)
@@ -501,11 +503,11 @@ func emitTradeRecord(
 	})
 }
 
-func minDecimal(a, b decimal.Decimal) (decimal.Decimal, error) {
+func minDecimal(a, b decimal.Decimal) decimal.Decimal {
 	if a.Cmp(b) < 0 {
-		return a, nil
+		return a
 	}
-	return b, nil
+	return b
 }
 
 func summarise(tradeRecords []TradeRecord, closedTrades []ClosedTrade) BacktestResult {
@@ -564,9 +566,9 @@ func summarise(tradeRecords []TradeRecord, closedTrades []ClosedTrade) BacktestR
 
 	if !start.IsZero() && !end.IsZero() {
 		var dailyPnLs []decimal.Decimal
-		startDay := start.Truncate(24 * time.Hour) //nolint:mnd
-		endDay := end.Truncate(24 * time.Hour)
-		for d := startDay; !d.After(endDay); d = d.Add(24 * time.Hour) {
+		startDay := start.Truncate(hoursPerDay * time.Hour)
+		endDay := end.Truncate(hoursPerDay * time.Hour)
+		for d := startDay; !d.After(endDay); d = d.Add(hoursPerDay * time.Hour) {
 			dateStr := d.Format("2006-01-02")
 			pnl, ok := dailyPnLMap[dateStr]
 			if !ok {

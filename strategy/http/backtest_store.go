@@ -126,7 +126,12 @@ func (s *PGBacktestStore) SaveBacktest(ctx context.Context, detail *BacktestDeta
 	return nil
 }
 
-func (s *PGBacktestStore) GetBacktestTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error) {
+func (s *PGBacktestStore) GetBacktestTrades(
+	ctx context.Context,
+	id uuid.UUID,
+	strategyType string,
+	page, limit int,
+) (json.RawMessage, error) {
 	result, err := s.LoadBacktestResult(ctx, id)
 	if err != nil {
 		return nil, err
@@ -146,7 +151,12 @@ func (s *PGBacktestStore) GetBacktestTrades(ctx context.Context, id uuid.UUID, s
 	return b, nil
 }
 
-func (s *PGBacktestStore) GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error) {
+func (s *PGBacktestStore) GetBacktestClosedTrades(
+	ctx context.Context,
+	id uuid.UUID,
+	strategyType string,
+	page, limit int,
+) (json.RawMessage, error) {
 	result, err := s.LoadBacktestResult(ctx, id)
 	if err != nil {
 		return nil, err

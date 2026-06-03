@@ -149,7 +149,7 @@ func (h *Handler) summaryResult(ctx context.Context, d *BacktestDetail) Backtest
 	}
 	if len(d.Result) > 0 {
 		var summary struct {
-			TotalPnL    string `json:"total_pnl"`
+			TotalPnL    string `json:"total_pnl"` //nolint:tagliatelle
 			WinCount    int    `json:"win_count"`
 			LossCount   int    `json:"loss_count"`
 			MaxDrawdown string `json:"max_drawdown"`

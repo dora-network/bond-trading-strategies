@@ -506,12 +506,12 @@ func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
 	body := map[string]any{
 		"strategy_type": "copytrading",
 		"config": map[string]any{
-			"followed_trader":          followed.String(),
-			"percentage_of_available":  0.5,
-			"leverage":                 1.0,
-			"min_order_size":           0,
-			"max_order_size":           0,
-			"disallowed_bonds":         []string{},
+			"followed_trader":         followed.String(),
+			"percentage_of_available": 0.5,
+			"leverage":                1.0,
+			"min_order_size":          0,
+			"max_order_size":          0,
+			"disallowed_bonds":        []string{},
 		},
 		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
 		"end":   now.Format(time.RFC3339),
@@ -573,7 +573,7 @@ func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bodyBytes, &summary))
 	assert.Equal(t, "completed", summary.Status)
 	assert.Equal(t, "copytrading", summary.StrategyType)
-	assert.Equal(t, "200", summary.TotalPnL) //nolint:tagliatelle
+	assert.Equal(t, "200", summary.TotalPnL)
 	assert.Equal(t, 1, summary.WinCount)
 	assert.Equal(t, 0, summary.LossCount)
 	assert.Equal(t, "1.1", summary.SharpeRatio)
@@ -605,7 +605,7 @@ func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
 	require.Len(t, closedResp.Items, 1)
 	assert.Equal(t, "BOND-1", closedResp.Items[0].BondID)
 	assert.Equal(t, "10", closedResp.Items[0].Quantity)
-	assert.Equal(t, "200", closedResp.Items[0].PnL) //nolint:tagliatelle
+	assert.Equal(t, "200", closedResp.Items[0].PnL)
 	assert.Equal(t, "BUY", closedResp.Items[0].OpenSignal)
 	assert.Equal(t, "SELL", closedResp.Items[0].CloseSignal)
 }

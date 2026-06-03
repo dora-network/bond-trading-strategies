@@ -47,11 +47,11 @@ func newBacktesterWithFake(t *testing.T, fake *fakeTradesClient, followedTrader 
 	return &Backtester{strategy: s, trades: fake}
 }
 
-func newBacktesterForSimulation(followedTrader uuid.UUID, percentage, leverage string) *Backtester {
+func newBacktesterForSimulation(followedTrader uuid.UUID) *Backtester {
 	cfg := Config{
 		FollowedTrader:        followedTrader,
-		PercentageOfAvailable: decimal.MustParse(percentage),
-		Leverage:              decimal.MustParse(leverage),
+		PercentageOfAvailable: decimal.MustNew(1, 0),
+		Leverage:              decimal.MustNew(1, 0),
 	}
 	s := New(cfg)
 	return &Backtester{strategy: s}
@@ -184,11 +184,12 @@ func TestSimulate_BuyOpensLong(t *testing.T) {
 		makeTrade(followed.String(), asset.String(), "buy", "100", "1", t0),
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
-	records := res.GetTradeRecords().([]TradeRecord)
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 1)
 	rec := records[0]
 	require.Equal(t, types.SignalBuy, rec.Signal)
@@ -197,7 +198,8 @@ func TestSimulate_BuyOpensLong(t *testing.T) {
 	require.Equal(t, "0", rec.Cash.String())
 	require.Equal(t, "10", rec.OpenPosition.String())
 
-	closed := res.GetClosedTrades().([]ClosedTrade)
+	closed, ok := res.GetClosedTrades().([]ClosedTrade)
+	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 0)
 
 	require.True(t, res.GetTotalPnL().IsZero())
@@ -217,11 +219,12 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 		makeTrade("tx-close", asset.String(), "sell", "120", "1", t1),
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
-	closed := res.GetClosedTrades().([]ClosedTrade)
+	closed, ok := res.GetClosedTrades().([]ClosedTrade)
+	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
 	ct := closed[0]
 	require.Equal(t, "10", ct.Quantity.String())
@@ -233,7 +236,8 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 	require.Equal(t, 1, res.GetWinCount())
 	require.Equal(t, 0, res.GetLossCount())
 
-	records := res.GetTradeRecords().([]TradeRecord)
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 2)
 	require.Equal(t, "0", records[1].OpenPosition.String())
 }
@@ -250,18 +254,20 @@ func TestSimulate_BuyThenPartialSell(t *testing.T) {
 		makeTrade("tx-partial", asset.String(), "sell", "150", "0.4", t1),
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
-	closed := res.GetClosedTrades().([]ClosedTrade)
+	closed, ok := res.GetClosedTrades().([]ClosedTrade)
+	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
 	require.Equal(t, "4", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "150", closed[0].ExitPrice.String())
 	require.Equal(t, "200", closed[0].PnL.String())
 
-	records := res.GetTradeRecords().([]TradeRecord)
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 2)
 	require.Equal(t, "6", records[1].OpenPosition.String())
 }
@@ -278,15 +284,17 @@ func TestSimulate_MultipleBuysWeightedAvg(t *testing.T) {
 		makeTrade("tx-2", asset.String(), "buy", "200", "0.6", t1),
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
-	records := res.GetTradeRecords().([]TradeRecord)
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 2)
 	require.Equal(t, "10", records[1].OpenPosition.String())
 
-	closed := res.GetClosedTrades().([]ClosedTrade)
+	closed, ok := res.GetClosedTrades().([]ClosedTrade)
+	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 0)
 }
 
@@ -302,18 +310,20 @@ func TestSimulate_BuyClosesShort(t *testing.T) {
 		makeTrade("tx-close-partial", asset.String(), "buy", "80", "0.4", t1),
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
-	closed := res.GetClosedTrades().([]ClosedTrade)
+	closed, ok := res.GetClosedTrades().([]ClosedTrade)
+	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
 	require.Equal(t, "4", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "80", closed[0].ExitPrice.String())
 	require.Equal(t, "80", closed[0].PnL.String())
 
-	records := res.GetTradeRecords().([]TradeRecord)
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 2)
 	require.Equal(t, "-6", records[1].OpenPosition.String())
 }
@@ -330,18 +340,20 @@ func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
 		makeTrade("tx-flip", asset.String(), "buy", "90", "1.5", t1),
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
-	closed := res.GetClosedTrades().([]ClosedTrade)
+	closed, ok := res.GetClosedTrades().([]ClosedTrade)
+	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
 	require.Equal(t, "10", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "90", closed[0].ExitPrice.String())
 	require.Equal(t, "100", closed[0].PnL.String())
 
-	records := res.GetTradeRecords().([]TradeRecord)
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.GreaterOrEqual(t, len(records), 2)
 	last := records[len(records)-1]
 	require.Equal(t, "5", last.OpenPosition.String())
@@ -357,11 +369,12 @@ func TestSimulate_SellOpensShort(t *testing.T) {
 		makeTrade("tx-open-short", asset.String(), "sell", "100", "1", t0),
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
-	records := res.GetTradeRecords().([]TradeRecord)
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 1)
 	rec := records[0]
 	require.Equal(t, types.SignalSell, rec.Signal)
@@ -388,7 +401,7 @@ func TestSimulate_WinLossCount(t *testing.T) {
 		makeTrade("tx-4", asset.String(), "sell", "80", "1", t3),
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
@@ -413,7 +426,7 @@ func TestSimulate_MaxDrawdownNonNegative(t *testing.T) {
 		makeTrade("tx-4", asset.String(), "sell", "120", "1", t3),
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
@@ -425,7 +438,7 @@ func TestSimulate_NoTrades(t *testing.T) {
 
 	followed := uuid.New()
 	trades := []doraclient.Trade{}
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
@@ -461,11 +474,12 @@ func TestSimulate_MultiPageStream(t *testing.T) {
 		))
 	}
 
-	b := newBacktesterForSimulation(followed, "1.0", "1.0")
+	b := newBacktesterForSimulation(followed)
 	res, err := b.simulate(t.Context(), feedChannel(t, trades))
 	require.NoError(t, err)
 
-	records := res.GetTradeRecords().([]TradeRecord)
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 300, "every trade across all 3 pages must be processed")
 
 	// First and last trade IDs must match the input order.
