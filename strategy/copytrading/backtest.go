@@ -29,8 +29,26 @@ func NewBacktester(s *Strategy, store tradesHistoryStore) *Backtester {
 
 func (b *Backtester) Run(ctx context.Context, start, end time.Time) (BacktestResult, error) {
 	followedTrader := b.strategy.cfg.FollowedTrader.String()
-	ch, done := b.history.StreamTrades(ctx, followedTrader, start, end)
 
+	min, max, count, err := b.history.TradeBounds(ctx, followedTrader)
+	if err != nil {
+		return BacktestResult{}, fmt.Errorf("trades history bounds: %w", err)
+	}
+	if count == 0 {
+		return BacktestResult{}, fmt.Errorf(
+			"no trades in trades_history for user %s; sync required", followedTrader,
+		)
+	}
+	if start.Before(min) || end.After(max) {
+		return BacktestResult{}, fmt.Errorf(
+			"window [%s,%s] outside available data [%s,%s] for user %s",
+			start.Format(time.RFC3339), end.Format(time.RFC3339),
+			min.Format(time.RFC3339), max.Format(time.RFC3339),
+			followedTrader,
+		)
+	}
+
+	ch, done := b.history.StreamTrades(ctx, followedTrader, start, end)
 	result, simErr := b.simulate(ctx, ch)
 	prodErr := <-done
 

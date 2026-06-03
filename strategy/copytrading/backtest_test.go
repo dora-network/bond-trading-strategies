@@ -2,6 +2,7 @@ package copytrading
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type fakeTradesHistoryStore struct { //nolint:unused // re-added with run-level tests in a follow-up task
+type fakeTradesHistoryStore struct {
 	trades      []Trade
 	streamErr   error
 	boundsMin   time.Time
@@ -23,12 +24,12 @@ type fakeTradesHistoryStore struct { //nolint:unused // re-added with run-level 
 	streamCall streamTradesCall
 }
 
-type streamTradesCall struct { //nolint:unused // re-added with run-level tests in a follow-up task
+type streamTradesCall struct {
 	userID     string
 	start, end time.Time
 }
 
-func (f *fakeTradesHistoryStore) StreamTrades(_ context.Context, userID string, start, end time.Time) (<-chan Trade, <-chan error) { //nolint:unused // re-added with run-level tests in a follow-up task
+func (f *fakeTradesHistoryStore) StreamTrades(_ context.Context, userID string, start, end time.Time) (<-chan Trade, <-chan error) {
 	f.streamCall = streamTradesCall{userID: userID, start: start, end: end}
 	ch := make(chan Trade, len(f.trades))
 	done := make(chan error, 1)
@@ -40,11 +41,14 @@ func (f *fakeTradesHistoryStore) StreamTrades(_ context.Context, userID string, 
 	return ch, done
 }
 
-func (f *fakeTradesHistoryStore) TradeBounds(_ context.Context, _ string) (time.Time, time.Time, int, error) { //nolint:unused // re-added with run-level tests in a follow-up task
+func (f *fakeTradesHistoryStore) TradeBounds(ctx context.Context, _ string) (time.Time, time.Time, int, error) {
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, time.Time{}, 0, err
+	}
 	return f.boundsMin, f.boundsMax, f.boundsCount, f.boundsErr
 }
 
-func newBacktesterWithFake(t *testing.T, fake *fakeTradesHistoryStore, followedTrader uuid.UUID, percentage, leverage string) *Backtester { //nolint:unused // re-added with run-level tests in a follow-up task
+func newBacktesterWithFake(t *testing.T, fake *fakeTradesHistoryStore, followedTrader uuid.UUID, percentage, leverage string) *Backtester { //nolint:unparam
 	t.Helper()
 	cfg := Config{
 		FollowedTrader:        followedTrader,
@@ -401,4 +405,107 @@ func TestSimulate_MultiPageStream(t *testing.T) {
 	// First and last trade IDs must match the input order.
 	require.Equal(t, trades[0].TransactionID, records[0].TradeID.String())
 	require.Equal(t, trades[299].TransactionID, records[299].TradeID.String())
+}
+
+func TestBacktesterRun_NoDataForUser(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	fake := &fakeTradesHistoryStore{
+		boundsCount: 0,
+	}
+	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
+	start := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
+
+	_, err := b.Run(t.Context(), start, end)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no trades in trades_history")
+	require.Contains(t, err.Error(), followed.String())
+}
+
+func TestBacktesterRun_WindowOutsideData(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	fake := &fakeTradesHistoryStore{
+		boundsMin:   time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC),
+		boundsMax:   time.Date(2026, 5, 28, 0, 0, 0, 0, time.UTC),
+		boundsCount: 100,
+	}
+	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
+	// Window is entirely after the available data.
+	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
+
+	_, err := b.Run(t.Context(), start, end)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "outside available data")
+}
+
+func TestBacktesterRun_EmptyResultInBounds(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	t0 := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 5, 28, 10, 0, 0, 0, time.UTC)
+
+	fake := &fakeTradesHistoryStore{
+		boundsMin:   t0,
+		boundsMax:   t1,
+		boundsCount: 50,
+		trades:      []Trade{}, // no trades fall in the window
+	}
+	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
+	start := t0
+	end := t1
+
+	result, err := b.Run(t.Context(), start, end)
+	require.NoError(t, err)
+	require.True(t, result.GetTotalPnL().IsZero())
+}
+
+func TestBacktesterRun_StreamError(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	t0 := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
+	fake := &fakeTradesHistoryStore{
+		boundsMin:   t0.Add(-time.Hour),
+		boundsMax:   t0.Add(time.Hour),
+		boundsCount: 5,
+		trades: []Trade{
+			makeTrade(uuid.New().String(), "bond-a", "buy", "100", "1", t0),
+		},
+		streamErr: errors.New("connection reset"),
+	}
+	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
+	start := t0.Add(-30 * time.Minute)
+	end := t0.Add(30 * time.Minute)
+
+	_, err := b.Run(t.Context(), start, end)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stream trades")
+	require.Contains(t, err.Error(), "connection reset")
+}
+
+func TestBacktesterRun_ContextCancelled(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	t0 := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
+	fake := &fakeTradesHistoryStore{
+		boundsMin:   t0.Add(-time.Hour),
+		boundsMax:   t0.Add(time.Hour),
+		boundsCount: 5,
+		trades:      []Trade{},
+	}
+	b := newBacktesterWithFake(t, fake, followed, "0.5", "1.0")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // cancel before Run
+
+	start := t0.Add(-30 * time.Minute)
+	end := t0.Add(30 * time.Minute)
+	_, err := b.Run(ctx, start, end)
+	require.Error(t, err)
 }
