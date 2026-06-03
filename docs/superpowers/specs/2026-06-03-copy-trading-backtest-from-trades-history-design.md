@@ -232,14 +232,16 @@ The `applyBuy` / `applySell` branching becomes:
 
 ```go
 var ourSignal types.Signal
-if trade.Side == "buy" {
+if trade.Side == "BUY" {
     ourSignal = types.SignalBuy
 } else {
     ourSignal = types.SignalSell
 }
 ```
 
-The `doraclient.SIDE_BUY` constant reference is dropped.
+The `doraclient.SIDE_BUY` constant reference is dropped. `Side` values
+in `trades_history` are uppercase (`"BUY"`, `"SELL"`), matching the DORA
+`Side` enum that the sync job will write.
 
 ## Error handling
 
