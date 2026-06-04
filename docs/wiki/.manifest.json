@@ -1,0 +1,88 @@
+{
+  "research": [
+    {
+      "type": "research",
+      "topic": "Bond Trading Strategies",
+      "researched_at": "2026-06-04T00:00:00Z",
+      "rounds_completed": 3,
+      "sources_fetched": 25,
+      "pages_created": [
+        "references/common-factors-corporate-bond-returns.md",
+        "references/bis-hedge-fund-treasury-rv-2025.md",
+        "references/fixed-income-relative-value-analysis.md",
+        "references/corporate-bond-factor-replication-crisis.md",
+        "references/risk-return-fixed-income-arbitrage.md",
+        "references/vanguard-tech-pillars-fixed-income.md",
+        "references/state-street-safi-q1-2026.md",
+        "references/numerix-backtesting-systematic-fi.md",
+        "concepts/carry-and-rolldown.md",
+        "concepts/yield-curve-strategies.md",
+        "concepts/factor-investing-corporate-bonds.md",
+        "concepts/relative-value-trading.md",
+        "concepts/mean-reversion-fixed-income.md",
+        "concepts/backtesting-considerations.md",
+        "concepts/principal-component-analysis-fi.md",
+        "concepts/pairs-trading-statistical-arbitrage.md",
+        "entities/trace.md",
+        "entities/pca.md",
+        "entities/marketaxess.md",
+        "entities/dv01.md",
+        "entities/ornstein-uhlenbeck.md",
+        "entities/fred.md",
+        "synthesis/Research: Bond Trading Strategies.md"
+      ],
+      "pages_updated": [
+        "index.md",
+        "log.md",
+        "hot.md"
+      ]
+    },
+    {
+      "type": "research",
+      "topic": "Bond Strategies in Continuous Fractionalized Marketplace",
+      "researched_at": "2026-06-04T00:00:00Z",
+      "rounds_completed": 2,
+      "sources_fetched": 15,
+      "pages_created": [
+        "references/bis-tokenisation-government-bonds.md",
+        "references/ecb-tokenised-bonds-efficiency-liquidity.md",
+        "references/kondor-risk-dynamic-arbitrage.md",
+        "references/kambhu-convergence-trading-irs.md",
+        "references/bis-bond-etf-arbitrage.md",
+        "references/schroers-nonparametric-bond-factors.md",
+        "references/chen-garriott-hft-bond-futures.md",
+        "references/carry-trade-momentum-currency.md",
+        "concepts/fx-strategies-continuous-bond-markets.md",
+        "concepts/convergence-trading-continuous-markets.md",
+        "concepts/tokenized-bond-market-structure.md",
+        "synthesis/Research: Bond Strategies in Continuous Fractionalized Marketplace.md"
+      ],
+      "pages_updated": [
+        "index.md",
+        "log.md",
+        "hot.md"
+      ]
+    },
+    {
+      "type": "research",
+      "topic": "Technical Indicators in Continuous Fractionalized Bond Marketplace",
+      "researched_at": "2026-06-04T00:00:00Z",
+      "rounds_completed": 2,
+      "sources_fetched": 12,
+      "pages_created": [
+        "references/fong-wu-technical-trading-sovereign-bonds.md",
+        "references/mendez-technical-analysis-treasury-bonds.md",
+        "references/regime-aware-technical-indicator-frameworks.md",
+        "references/drift-model-treasury-futures.md",
+        "concepts/technical-indicators-continuous-bond-markets.md",
+        "concepts/technical-indicator-enhancement-bonds.md",
+        "synthesis/Research: Technical Indicators in Continuous Fractionalized Bond Marketplace.md"
+      ],
+      "pages_updated": [
+        "index.md",
+        "log.md",
+        "hot.md"
+      ]
+    }
+  ]
+}
