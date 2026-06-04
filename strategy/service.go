@@ -20,16 +20,18 @@ import (
 //counterfeiter:generate . Service
 type Service interface {
 	// RunBacktest runs a backtest of the given strategy against the given historical data.
-	RunBacktest(ctx context.Context, strategy Strategy, start, end time.Time) (id uuid.UUID, result <-chan types.BacktestResult, err error)
+	// The caller supplies the backtest id so it can be embedded in any
+	// per-trade rows the strategy writes while running.
+	RunBacktest(ctx context.Context, id uuid.UUID, strategy Strategy, start, end time.Time) (result <-chan types.BacktestResult, err error)
 	// StopBacktest stops a backtest with the given ID, before it completes.
 	StopBacktest(id uuid.UUID) error
 	// RunStrategy starts a trading strategy in the background.
 	RunStrategy(ctx context.Context, strategy Strategy) (id uuid.UUID, err error)
-	// StopStrategy stops a running strategy with the given ID.
+	// StopStrategy stops a running strategy.
 	StopStrategy(ctx context.Context, id uuid.UUID) error
-	// PauseStrategy pauses a running strategy with the given ID.
+	// PauseStrategy pauses a running strategy.
 	PauseStrategy(ctx context.Context, id uuid.UUID) error
-	// ResumeStrategy resumes a paused strategy with the given ID.
+	// ResumeStrategy resumes a paused strategy.
 	ResumeStrategy(ctx context.Context, id uuid.UUID) error
 }
 
@@ -71,8 +73,12 @@ func WithBaseContext(ctx context.Context) func(*service) {
 	}
 }
 
-func (s *service) RunBacktest(_ context.Context, strategy Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
-	backtestID := uuid.Must(uuid.NewV7())
+func (s *service) RunBacktest(
+	_ context.Context,
+	backtestID uuid.UUID,
+	strategy Strategy,
+	start, end time.Time,
+) (<-chan types.BacktestResult, error) {
 	ch := make(chan types.BacktestResult)
 	// we have to use the service base context here as the endpoint is async and the request context will end
 	// before the backtest is complete
@@ -95,7 +101,7 @@ func (s *service) RunBacktest(_ context.Context, strategy Strategy, start, end t
 		delete(s.backtests, backtestID)
 		s.mu.Unlock()
 	}()
-	return backtestID, ch, nil
+	return ch, nil
 }
 
 func (s *service) StopBacktest(id uuid.UUID) error {

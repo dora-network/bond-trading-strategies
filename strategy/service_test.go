@@ -43,9 +43,8 @@ func TestService_RunBacktest(t *testing.T) {
 			},
 		}
 
-		id, ch, err := svc.RunBacktest(ctx, myStrategy, start, end)
+		ch, err := svc.RunBacktest(ctx, uuid.Nil, myStrategy, start, end)
 		require.NoError(t, err)
-		assert.NotEmpty(t, id)
 		assert.NotNil(t, ch)
 		for {
 			select {
@@ -69,9 +68,8 @@ func TestService_RunBacktest(t *testing.T) {
 			},
 		}
 
-		id, ch, err := svc.RunBacktest(ctx, myStrategy, start, end)
+		ch, err := svc.RunBacktest(ctx, uuid.Nil, myStrategy, start, end)
 		require.NoError(t, err)
-		assert.NotEmpty(t, id)
 		assert.NotNil(t, ch)
 		for {
 			select {
@@ -110,10 +108,9 @@ func TestService_StopBacktest(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		id, ch, err := svc.RunBacktest(ctx, myStrategy, start, end)
+		ch, err := svc.RunBacktest(ctx, uuid.Nil, myStrategy, start, end)
 
 		require.NoError(t, err)
-		assert.NotEmpty(t, id)
 		assert.NotNil(t, ch)
 
 		err = svc.StopBacktest(uuid.Must(uuid.NewV7()))
@@ -124,14 +121,13 @@ func TestService_StopBacktest(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		id, ch, err := svc.RunBacktest(ctx, myStrategy, start, end)
+		backtestID := uuid.Must(uuid.NewV7())
+		ch, err := svc.RunBacktest(ctx, backtestID, myStrategy, start, end)
 
 		require.NoError(t, err)
-		assert.NotEmpty(t, id)
 		assert.NotNil(t, ch)
 
-		err = svc.StopBacktest(id)
-		require.NoError(t, err)
+		require.NoError(t, svc.StopBacktest(backtestID))
 		for {
 			select {
 			case res := <-ch:
@@ -177,7 +173,6 @@ func TestService_RunStrategy(t *testing.T) {
 		id, err := svc.RunStrategy(ctx, myStrategy)
 
 		require.NoError(t, err)
-		assert.NotEmpty(t, id)
 		assert.True(t, strategy.RunExists(svc, id))
 		require.Eventually(t, func() bool {
 			mu.Lock()
@@ -279,7 +274,6 @@ func TestService_StopStrategy(t *testing.T) {
 		defer cancel()
 		id, err := svc.RunStrategy(startCtx, myStrategy)
 		require.NoError(t, err)
-		assert.NotEmpty(t, id)
 		assert.True(t, strategy.RunExists(svc, id))
 		wg.Wait()
 		assert.True(t, isRunning)
@@ -343,7 +337,6 @@ func TestService_PauseStrategy(t *testing.T) {
 		defer cancel()
 		id, err := svc.RunStrategy(startCtx, myStrategy)
 		require.NoError(t, err)
-		assert.NotEmpty(t, id)
 		assert.True(t, strategy.RunExists(svc, id))
 		wg.Wait()
 		assert.True(t, isRunning)
@@ -411,7 +404,6 @@ func TestService_ResumeStrategy(t *testing.T) {
 		defer cancel()
 		id, err := svc.RunStrategy(startCtx, myStrategy)
 		require.NoError(t, err)
-		assert.NotEmpty(t, id)
 		assert.True(t, strategy.RunExists(svc, id))
 		wg.Wait()
 		assert.True(t, isRunning)

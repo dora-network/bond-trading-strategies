@@ -36,23 +36,22 @@ type FakeService struct {
 	resumeStrategyReturnsOnCall map[int]struct {
 		result1 error
 	}
-	RunBacktestStub        func(context.Context, strategy.Strategy, time.Time, time.Time) (uuid.UUID, <-chan types.BacktestResult, error)
+	RunBacktestStub        func(context.Context, uuid.UUID, strategy.Strategy, time.Time, time.Time) (<-chan types.BacktestResult, error)
 	runBacktestMutex       sync.RWMutex
 	runBacktestArgsForCall []struct {
 		arg1 context.Context
-		arg2 strategy.Strategy
-		arg3 time.Time
+		arg2 uuid.UUID
+		arg3 strategy.Strategy
 		arg4 time.Time
+		arg5 time.Time
 	}
 	runBacktestReturns struct {
-		result1 uuid.UUID
-		result2 <-chan types.BacktestResult
-		result3 error
+		result1 <-chan types.BacktestResult
+		result2 error
 	}
 	runBacktestReturnsOnCall map[int]struct {
-		result1 uuid.UUID
-		result2 <-chan types.BacktestResult
-		result3 error
+		result1 <-chan types.BacktestResult
+		result2 error
 	}
 	RunStrategyStub        func(context.Context, strategy.Strategy) (uuid.UUID, error)
 	runStrategyMutex       sync.RWMutex
@@ -219,26 +218,27 @@ func (fake *FakeService) ResumeStrategyReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeService) RunBacktest(arg1 context.Context, arg2 strategy.Strategy, arg3 time.Time, arg4 time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
+func (fake *FakeService) RunBacktest(arg1 context.Context, arg2 uuid.UUID, arg3 strategy.Strategy, arg4 time.Time, arg5 time.Time) (<-chan types.BacktestResult, error) {
 	fake.runBacktestMutex.Lock()
 	ret, specificReturn := fake.runBacktestReturnsOnCall[len(fake.runBacktestArgsForCall)]
 	fake.runBacktestArgsForCall = append(fake.runBacktestArgsForCall, struct {
 		arg1 context.Context
-		arg2 strategy.Strategy
-		arg3 time.Time
+		arg2 uuid.UUID
+		arg3 strategy.Strategy
 		arg4 time.Time
-	}{arg1, arg2, arg3, arg4})
+		arg5 time.Time
+	}{arg1, arg2, arg3, arg4, arg5})
 	stub := fake.RunBacktestStub
 	fakeReturns := fake.runBacktestReturns
-	fake.recordInvocation("RunBacktest", []interface{}{arg1, arg2, arg3, arg4})
+	fake.recordInvocation("RunBacktest", []interface{}{arg1, arg2, arg3, arg4, arg5})
 	fake.runBacktestMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2, arg3, arg4)
+		return stub(arg1, arg2, arg3, arg4, arg5)
 	}
 	if specificReturn {
-		return ret.result1, ret.result2, ret.result3
+		return ret.result1, ret.result2
 	}
-	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+	return fakeReturns.result1, fakeReturns.result2
 }
 
 func (fake *FakeService) RunBacktestCallCount() int {
@@ -247,46 +247,43 @@ func (fake *FakeService) RunBacktestCallCount() int {
 	return len(fake.runBacktestArgsForCall)
 }
 
-func (fake *FakeService) RunBacktestCalls(stub func(context.Context, strategy.Strategy, time.Time, time.Time) (uuid.UUID, <-chan types.BacktestResult, error)) {
+func (fake *FakeService) RunBacktestCalls(stub func(context.Context, uuid.UUID, strategy.Strategy, time.Time, time.Time) (<-chan types.BacktestResult, error)) {
 	fake.runBacktestMutex.Lock()
 	defer fake.runBacktestMutex.Unlock()
 	fake.RunBacktestStub = stub
 }
 
-func (fake *FakeService) RunBacktestArgsForCall(i int) (context.Context, strategy.Strategy, time.Time, time.Time) {
+func (fake *FakeService) RunBacktestArgsForCall(i int) (context.Context, uuid.UUID, strategy.Strategy, time.Time, time.Time) {
 	fake.runBacktestMutex.RLock()
 	defer fake.runBacktestMutex.RUnlock()
 	argsForCall := fake.runBacktestArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5
 }
 
-func (fake *FakeService) RunBacktestReturns(result1 uuid.UUID, result2 <-chan types.BacktestResult, result3 error) {
+func (fake *FakeService) RunBacktestReturns(result1 <-chan types.BacktestResult, result2 error) {
 	fake.runBacktestMutex.Lock()
 	defer fake.runBacktestMutex.Unlock()
 	fake.RunBacktestStub = nil
 	fake.runBacktestReturns = struct {
-		result1 uuid.UUID
-		result2 <-chan types.BacktestResult
-		result3 error
-	}{result1, result2, result3}
+		result1 <-chan types.BacktestResult
+		result2 error
+	}{result1, result2}
 }
 
-func (fake *FakeService) RunBacktestReturnsOnCall(i int, result1 uuid.UUID, result2 <-chan types.BacktestResult, result3 error) {
+func (fake *FakeService) RunBacktestReturnsOnCall(i int, result1 <-chan types.BacktestResult, result2 error) {
 	fake.runBacktestMutex.Lock()
 	defer fake.runBacktestMutex.Unlock()
 	fake.RunBacktestStub = nil
 	if fake.runBacktestReturnsOnCall == nil {
 		fake.runBacktestReturnsOnCall = make(map[int]struct {
-			result1 uuid.UUID
-			result2 <-chan types.BacktestResult
-			result3 error
+			result1 <-chan types.BacktestResult
+			result2 error
 		})
 	}
 	fake.runBacktestReturnsOnCall[i] = struct {
-		result1 uuid.UUID
-		result2 <-chan types.BacktestResult
-		result3 error
-	}{result1, result2, result3}
+		result1 <-chan types.BacktestResult
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeService) RunStrategy(arg1 context.Context, arg2 strategy.Strategy) (uuid.UUID, error) {

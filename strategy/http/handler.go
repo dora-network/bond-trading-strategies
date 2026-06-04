@@ -17,6 +17,7 @@ import (
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -61,7 +62,7 @@ type StrategyDefinition struct {
 	ConfigFields     []StrategyConfigField
 	SupportsRun      bool
 	SupportsBacktest bool
-	DecodeConfig     func(json.RawMessage, string) (json.RawMessage, strategycore.Strategy, error)
+	DecodeConfig     func(json.RawMessage, string, stats.BacktestTradeWriter) (json.RawMessage, strategycore.Strategy, error)
 }
 
 type StrategyConfigField struct {
@@ -752,7 +753,12 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	def, cfg, strat, statusCode, err := h.resolveStrategy(req.StrategyType, req.Config, capabilityBacktest)
+	id := uuid.Must(uuid.NewV7())
+	var tradeWriter stats.BacktestTradeWriter
+	if h.backtestStore != nil {
+		tradeWriter = newScopedBacktestWriter(id, h.backtestStore)
+	}
+	def, cfg, strat, statusCode, err := h.resolveStrategy(req.StrategyType, req.Config, capabilityBacktest, tradeWriter)
 	if err != nil {
 		writeError(w, statusCode, err.Error())
 		return
@@ -778,7 +784,7 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, resultCh, err := h.service.RunBacktest(r.Context(), strat, req.Start, req.End)
+	resultCh, err := h.service.RunBacktest(r.Context(), id, strat, req.Start, req.End)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("run backtest: %v", err))
 		return
@@ -1131,7 +1137,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	def, cfg, strat, statusCode, err := h.resolveStrategy(req.StrategyType, req.Config, capabilityRun)
+	def, cfg, strat, statusCode, err := h.resolveStrategy(req.StrategyType, req.Config, capabilityRun, nil)
 	if err != nil {
 		writeError(w, statusCode, err.Error())
 		return
@@ -1428,7 +1434,7 @@ func (h *Handler) RestoreBacktests(ctx context.Context) error {
 }
 
 func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) error {
-	_, normalised, strat, _, err := h.resolveStrategy(detail.StrategyType, detail.Config, capabilityRun)
+	_, normalised, strat, _, err := h.resolveStrategy(detail.StrategyType, detail.Config, capabilityRun, nil)
 	if err != nil {
 		return err
 	}
@@ -1510,7 +1516,7 @@ const (
 	capabilityBacktest strategyCapability = "backtest"
 )
 
-func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, capability strategyCapability) (StrategyDefinition, json.RawMessage, strategycore.Strategy, int, error) { //nolint:lll
+func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, capability strategyCapability, tradeWriter stats.BacktestTradeWriter) (StrategyDefinition, json.RawMessage, strategycore.Strategy, int, error) { //nolint:lll
 	if strategyType == "" {
 		return StrategyDefinition{}, nil, nil, http.StatusBadRequest, fmt.Errorf("strategy_type is required")
 	}
@@ -1531,7 +1537,7 @@ func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, c
 		return StrategyDefinition{}, nil, nil, http.StatusNotImplemented, fmt.Errorf("strategy_type %q has no config decoder", strategyType)
 	}
 
-	normalised, strat, err := def.DecodeConfig(config, string(capability))
+	normalised, strat, err := def.DecodeConfig(config, string(capability), tradeWriter)
 	if err != nil {
 		return StrategyDefinition{}, nil, nil, http.StatusBadRequest, err
 	}
@@ -1632,13 +1638,23 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 		},
 		SupportsRun:      true,
 		SupportsBacktest: true,
-		DecodeConfig: func(raw json.RawMessage, capability string) (json.RawMessage, strategycore.Strategy, error) {
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
 			forRun := capability == string(capabilityRun)
 			cfg, normalised, err := decodeMeanReversionConfig(raw, forRun)
 			if err != nil {
 				return nil, nil, err
 			}
-			return normalised, meanreversion.New(cfg, pricesHandler, meanreversion.WithLogger(log)), nil
+			opts := []func(*meanreversion.Strategy){
+				meanreversion.WithLogger(log),
+			}
+			if tradeWriter != nil {
+				opts = append(opts, meanreversion.WithBacktestWriter(tradeWriter))
+			}
+			return normalised, meanreversion.New(cfg, pricesHandler, opts...), nil
 		},
 	}
 }
@@ -1688,16 +1704,23 @@ func newCopyTradingDefinition(tradesHistoryStore *copytrading.PGTradesHistorySto
 		},
 		SupportsRun:      true,
 		SupportsBacktest: true,
-		DecodeConfig: func(raw json.RawMessage, capability string) (json.RawMessage, strategycore.Strategy, error) {
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
 			cfg, normalised, err := decodeCopyTradingConfig(raw)
 			if err != nil {
 				return nil, nil, err
 			}
-			strat := copytrading.New(cfg,
+			opts := []func(*copytrading.Strategy){
 				copytrading.WithLogger(slog.Default()),
 				copytrading.WithBacktestStore(tradesHistoryStore),
-			)
-			return normalised, strat, nil
+			}
+			if tradeWriter != nil {
+				opts = append(opts, copytrading.WithBacktestWriter(tradeWriter))
+			}
+			return normalised, copytrading.New(cfg, opts...), nil
 		},
 	}
 }
@@ -1916,49 +1939,16 @@ func decodeRawConfig(raw json.RawMessage, dst any) error {
 }
 
 func newBacktestResult(result meanreversion.BacktestResult) (json.RawMessage, error) {
-	closedTrades := make([]MeanReversionClosedTrade, 0, len(result.ClosedTrades))
-	for _, trade := range result.ClosedTrades {
-		closedTrades = append(closedTrades, MeanReversionClosedTrade{
-			BondID:       trade.BondID,
-			OpenTime:     trade.OpenTime,
-			CloseTime:    trade.CloseTime,
-			Signal:       trade.Signal.String(),
-			ExitSignal:   trade.ExitSignal.String(),
-			EntrySpread:  trade.EntrySpread.String(),
-			ExitSpread:   trade.ExitSpread.String(),
-			EntryZScore:  trade.EntryZScore.String(),
-			ExitZScore:   trade.ExitZScore.String(),
-			PositionSize: trade.PositionSize.String(),
-			PnL:          trade.PnL.String(),
-			ExitReason:   trade.ExitReason,
-			EntryPrice:   trade.EntryPrice.String(),
-			ExitPrice:    trade.ExitPrice.String(),
-			Quantity:     trade.Quantity.String(),
-			EntryBalance: trade.EntryBalance.String(),
-		})
-	}
-	tradeRecords := make([]MeanReversionTradeRecord, 0, len(result.TradeRecords))
-	for _, tr := range result.TradeRecords {
-		tradeRecords = append(tradeRecords, MeanReversionTradeRecord{
-			Time:         tr.Time,
-			BondID:       tr.BondID,
-			Signal:       tr.Signal.String(),
-			Spread:       tr.Spread.String(),
-			PositionSize: tr.PositionSize.String(),
-			ZScore:       tr.ZScore.String(),
-			Price:        tr.Price.String(),
-			Quantity:     tr.Quantity.String(),
-			EntryBalance: tr.EntryBalance.String(),
-		})
-	}
+	// Per-trade and per-closed-trade rows are persisted to
+	// strategy_backtest_trades and strategy_backtest_closed_trades by the
+	// backtest engine via stats.BacktestTradeWriter. The summary-result
+	// JSON only carries aggregate metrics.
 	out := MeanReversionBacktestResult{
-		ClosedTrades: closedTrades,
-		TradeRecords: tradeRecords,
-		TotalPnL:     result.TotalPnL.String(),
-		WinCount:     result.WinCount,
-		LossCount:    result.LossCount,
-		MaxDrawdown:  result.MaxDrawdown.String(),
-		SharpeRatio:  result.SharpeRatio.String(),
+		TotalPnL:    result.TotalPnL.String(),
+		WinCount:    result.WinCount,
+		LossCount:   result.LossCount,
+		MaxDrawdown: result.MaxDrawdown.String(),
+		SharpeRatio: result.SharpeRatio.String(),
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
@@ -1968,45 +1958,16 @@ func newBacktestResult(result meanreversion.BacktestResult) (json.RawMessage, er
 }
 
 func newCopyTradingBacktestResult(result copytrading.BacktestResult) (json.RawMessage, error) {
-	closedTrades := make([]CopyTradingClosedTrade, 0, len(result.ClosedTrades))
-	for _, trade := range result.ClosedTrades {
-		closedTrades = append(closedTrades, CopyTradingClosedTrade{
-			OpenTime:     trade.OpenTime,
-			CloseTime:    trade.CloseTime,
-			BondID:       trade.BondID,
-			OpenSignal:   trade.OpenSignal.String(),
-			CloseSignal:  trade.CloseSignal.String(),
-			Quantity:     trade.Quantity.String(),
-			EntryPrice:   trade.EntryPrice.String(),
-			ExitPrice:    trade.ExitPrice.String(),
-			PnL:          trade.PnL.String(),
-			EntryBalance: trade.EntryBalance.String(),
-			OpenTradeID:  trade.OpenTradeID.String(),
-			CloseTradeID: trade.CloseTradeID.String(),
-		})
-	}
-	tradeRecords := make([]CopyTradingTradeRecord, 0, len(result.TradeRecords))
-	for _, tr := range result.TradeRecords {
-		tradeRecords = append(tradeRecords, CopyTradingTradeRecord{
-			Time:         tr.Time,
-			BondID:       tr.BondID,
-			Signal:       tr.Signal.String(),
-			Price:        tr.Price.String(),
-			Quantity:     tr.Quantity.String(),
-			OrderSize:    tr.OrderSize.String(),
-			Cash:         tr.Cash.String(),
-			OpenPosition: tr.OpenPosition.String(),
-			TradeID:      tr.TradeID.String(),
-		})
-	}
+	// Per-trade and per-closed-trade rows are persisted to
+	// strategy_backtest_trades and strategy_backtest_closed_trades by the
+	// backtest engine via stats.BacktestTradeWriter. The summary-result
+	// JSON only carries aggregate metrics.
 	out := CopyTradingBacktestResult{
-		ClosedTrades: closedTrades,
-		TradeRecords: tradeRecords,
-		TotalPnL:     result.TotalPnL.String(),
-		WinCount:     result.WinCount,
-		LossCount:    result.LossCount,
-		MaxDrawdown:  result.MaxDrawdown.String(),
-		SharpeRatio:  result.SharpeRatio.String(),
+		TotalPnL:    result.TotalPnL.String(),
+		WinCount:    result.WinCount,
+		LossCount:   result.LossCount,
+		MaxDrawdown: result.MaxDrawdown.String(),
+		SharpeRatio: result.SharpeRatio.String(),
 	}
 	b, err := json.Marshal(out)
 	if err != nil {

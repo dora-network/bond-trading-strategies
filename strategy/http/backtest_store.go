@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/google/uuid"
+	"github.com/govalues/decimal"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -15,6 +18,8 @@ type BacktestStore interface {
 	SaveBacktest(ctx context.Context, detail *BacktestDetail) error
 	GetBacktestTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error)
 	GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error)
+	WriteTradeRecord(ctx context.Context, rec stats.TradeRecordInsert) error
+	WriteClosedTrade(ctx context.Context, trade stats.ClosedTradeInsert) error
 }
 
 type PGBacktestStore struct {
@@ -132,23 +137,19 @@ func (s *PGBacktestStore) GetBacktestTrades(
 	strategyType string,
 	page, limit int,
 ) (json.RawMessage, error) {
-	result, err := s.LoadBacktestResult(ctx, id)
+	rows, err := s.listTradeRecords(ctx, id, page, limit)
 	if err != nil {
 		return nil, err
 	}
-	if len(result) == 0 {
-		return json.RawMessage(`{"items":[]}`), nil
+	items := make([]json.RawMessage, 0, len(rows))
+	for i := range rows {
+		b, err := tradeRecordToResponse(strategyType, &rows[i])
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, b)
 	}
-	items, err := extractTradeRecords(result, strategyType)
-	if err != nil {
-		return nil, err
-	}
-	pageItems := paginate(items, page, limit)
-	b, err := json.Marshal(map[string]any{"items": pageItems})
-	if err != nil {
-		return nil, fmt.Errorf("marshal trades: %w", err)
-	}
-	return b, nil
+	return marshalItems(items)
 }
 
 func (s *PGBacktestStore) GetBacktestClosedTrades(
@@ -157,72 +158,332 @@ func (s *PGBacktestStore) GetBacktestClosedTrades(
 	strategyType string,
 	page, limit int,
 ) (json.RawMessage, error) {
-	result, err := s.LoadBacktestResult(ctx, id)
+	rows, err := s.listClosedTrades(ctx, id, page, limit)
 	if err != nil {
 		return nil, err
 	}
-	if len(result) == 0 {
-		return json.RawMessage(`{"items":[]}`), nil
-	}
-	items, err := extractClosedTrades(result, strategyType)
-	if err != nil {
-		return nil, err
-	}
-	pageItems := paginate(items, page, limit)
-	b, err := json.Marshal(map[string]any{"items": pageItems})
-	if err != nil {
-		return nil, fmt.Errorf("marshal closed trades: %w", err)
-	}
-	return b, nil
-}
-
-func extractTradeRecords(result json.RawMessage, strategyType string) ([]json.RawMessage, error) {
-	switch strategyType {
-	case "copytrading":
-		var r CopyTradingBacktestResult
-		if err := json.Unmarshal(result, &r); err != nil {
-			return nil, fmt.Errorf("unmarshal copytrading result: %w", err)
-		}
-		return marshalSlice(r.TradeRecords)
-	default:
-		var r MeanReversionBacktestResult
-		if err := json.Unmarshal(result, &r); err != nil {
-			return nil, fmt.Errorf("unmarshal backtest result: %w", err)
-		}
-		return marshalSlice(r.TradeRecords)
-	}
-}
-
-func extractClosedTrades(result json.RawMessage, strategyType string) ([]json.RawMessage, error) {
-	switch strategyType {
-	case "copytrading":
-		var r CopyTradingBacktestResult
-		if err := json.Unmarshal(result, &r); err != nil {
-			return nil, fmt.Errorf("unmarshal copytrading result: %w", err)
-		}
-		return marshalSlice(r.ClosedTrades)
-	default:
-		var r MeanReversionBacktestResult
-		if err := json.Unmarshal(result, &r); err != nil {
-			return nil, fmt.Errorf("unmarshal backtest result: %w", err)
-		}
-		return marshalSlice(r.ClosedTrades)
-	}
-}
-
-func marshalSlice[T any](items []T) ([]json.RawMessage, error) {
-	out := make([]json.RawMessage, 0, len(items))
-	for _, item := range items {
-		b, err := json.Marshal(item)
+	items := make([]json.RawMessage, 0, len(rows))
+	for i := range rows {
+		b, err := closedTradeToResponse(strategyType, &rows[i])
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, b)
+		items = append(items, b)
 	}
-	return out, nil
+	return marshalItems(items)
 }
 
-func paginate[T any](items []T, page, limit int) []T {
+// WriteTradeRecord appends a single trade record to strategy_backtest_trades.
+func (s *PGBacktestStore) WriteTradeRecord(ctx context.Context, rec stats.TradeRecordInsert) error {
+	const q = `
+		INSERT INTO strategy_backtest_trades (
+			backtest_id, time, bond_id, signal, price, quantity, entry_balance,
+			order_size, cash, open_position, trade_id,
+			spread, position_size, zscore
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, $11,
+			$12, $13, $14
+		)
+	`
+	var bondID, tradeID any
+	if rec.BondID != "" {
+		bondID, _ = uuid.Parse(rec.BondID)
+	}
+	if rec.TradeID != uuid.Nil {
+		tradeID = rec.TradeID
+	}
+	_, err := s.pool.Exec(ctx, q,
+		rec.BacktestID, rec.Time, bondID, rec.Signal,
+		nullableDecimal(rec.Price), nullableDecimal(rec.Quantity), nullableDecimal(rec.EntryBalance),
+		nullableDecimal(rec.OrderSize), nullableDecimal(rec.Cash), nullableDecimal(rec.OpenPosition), tradeID,
+		nullableDecimal(rec.Spread), nullableDecimal(rec.PositionSize), nullableDecimal(rec.ZScore),
+	)
+	if err != nil {
+		return fmt.Errorf("write trade record for backtest %s: %w", rec.BacktestID, err)
+	}
+	return nil
+}
+
+// WriteClosedTrade appends a single closed trade to strategy_backtest_closed_trades.
+func (s *PGBacktestStore) WriteClosedTrade(ctx context.Context, trade stats.ClosedTradeInsert) error {
+	const q = `
+		INSERT INTO strategy_backtest_closed_trades (
+			backtest_id, open_time, close_time, bond_id, open_signal, close_signal,
+			quantity, entry_price, exit_price, pnl, entry_balance,
+			open_trade_id, close_trade_id,
+			entry_spread, exit_spread, entry_zscore, exit_zscore, position_size, exit_reason
+		) VALUES (
+			$1, $2, $3, $4, $5, $6,
+			$7, $8, $9, $10, $11,
+			$12, $13,
+			$14, $15, $16, $17, $18, $19
+		)
+	`
+	var bondID, openID, closeID any
+	if trade.BondID != "" {
+		bondID, _ = uuid.Parse(trade.BondID)
+	}
+	if trade.OpenTradeID != uuid.Nil {
+		openID = trade.OpenTradeID
+	}
+	if trade.CloseTradeID != uuid.Nil {
+		closeID = trade.CloseTradeID
+	}
+	_, err := s.pool.Exec(ctx, q,
+		trade.BacktestID, trade.OpenTime, trade.CloseTime, bondID, trade.OpenSignal, trade.CloseSignal,
+		trade.Quantity.String(), nullableDecimal(trade.EntryPrice), nullableDecimal(trade.ExitPrice),
+		trade.PnL.String(), nullableDecimal(trade.EntryBalance),
+		openID, closeID,
+		nullableDecimal(trade.EntrySpread), nullableDecimal(trade.ExitSpread),
+		nullableDecimal(trade.EntryZScore), nullableDecimal(trade.ExitZScore),
+		nullableDecimal(trade.PositionSize), nullableString(trade.ExitReason),
+	)
+	if err != nil {
+		return fmt.Errorf("write closed trade for backtest %s: %w", trade.BacktestID, err)
+	}
+	return nil
+}
+
+// tradeRecordRow is the column shape of strategy_backtest_trades.
+type tradeRecordRow struct {
+	ID           int64
+	BacktestID   uuid.UUID
+	Time         time.Time
+	BondID       *uuid.UUID
+	Signal       string
+	Price        *string
+	Quantity     *string
+	EntryBalance *string
+	OrderSize    *string
+	Cash         *string
+	OpenPosition *string
+	TradeID      *uuid.UUID
+	Spread       *string
+	PositionSize *string
+	ZScore       *string
+}
+
+func (s *PGBacktestStore) listTradeRecords(
+	ctx context.Context,
+	id uuid.UUID,
+	page, limit int,
+) ([]tradeRecordRow, error) {
+	if page, limit = clampPagination(page, limit); page == 0 {
+		return nil, nil
+	}
+	const q = `
+		SELECT id, backtest_id, time, bond_id, signal, price, quantity, entry_balance,
+			order_size, cash, open_position, trade_id,
+			spread, position_size, zscore
+		FROM strategy_backtest_trades
+		WHERE backtest_id = $1
+		ORDER BY time, id
+		LIMIT $2 OFFSET $3
+	`
+	rows, err := s.pool.Query(ctx, q, id, limit, (page-1)*limit)
+	if err != nil {
+		return nil, fmt.Errorf("query trade records: %w", err)
+	}
+	defer rows.Close()
+	var out []tradeRecordRow
+	for rows.Next() {
+		var r tradeRecordRow
+		if err := rows.Scan(
+			&r.ID, &r.BacktestID, &r.Time, &r.BondID, &r.Signal, &r.Price, &r.Quantity, &r.EntryBalance,
+			&r.OrderSize, &r.Cash, &r.OpenPosition, &r.TradeID,
+			&r.Spread, &r.PositionSize, &r.ZScore,
+		); err != nil {
+			return nil, fmt.Errorf("scan trade record: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// closedTradeRow is the column shape of strategy_backtest_closed_trades.
+type closedTradeRow struct {
+	ID           int64
+	BacktestID   uuid.UUID
+	OpenTime     time.Time
+	CloseTime    time.Time
+	BondID       *uuid.UUID
+	OpenSignal   string
+	CloseSignal  string
+	Quantity     string
+	EntryPrice   *string
+	ExitPrice    *string
+	PnL          string
+	EntryBalance *string
+	OpenTradeID  *uuid.UUID
+	CloseTradeID *uuid.UUID
+	EntrySpread  *string
+	ExitSpread   *string
+	EntryZScore  *string
+	ExitZScore   *string
+	PositionSize *string
+	ExitReason   *string
+}
+
+func (s *PGBacktestStore) listClosedTrades(
+	ctx context.Context,
+	id uuid.UUID,
+	page, limit int,
+) ([]closedTradeRow, error) {
+	if page, limit = clampPagination(page, limit); page == 0 {
+		return nil, nil
+	}
+	const q = `
+		SELECT id, backtest_id, open_time, close_time, bond_id, open_signal, close_signal,
+			quantity, entry_price, exit_price, pnl, entry_balance,
+			open_trade_id, close_trade_id,
+			entry_spread, exit_spread, entry_zscore, exit_zscore, position_size, exit_reason
+		FROM strategy_backtest_closed_trades
+		WHERE backtest_id = $1
+		ORDER BY close_time, id
+		LIMIT $2 OFFSET $3
+	`
+	rows, err := s.pool.Query(ctx, q, id, limit, (page-1)*limit)
+	if err != nil {
+		return nil, fmt.Errorf("query closed trades: %w", err)
+	}
+	defer rows.Close()
+	var out []closedTradeRow
+	for rows.Next() {
+		var r closedTradeRow
+		if err := rows.Scan(
+			&r.ID, &r.BacktestID, &r.OpenTime, &r.CloseTime, &r.BondID, &r.OpenSignal, &r.CloseSignal,
+			&r.Quantity, &r.EntryPrice, &r.ExitPrice, &r.PnL, &r.EntryBalance,
+			&r.OpenTradeID, &r.CloseTradeID,
+			&r.EntrySpread, &r.ExitSpread, &r.EntryZScore, &r.ExitZScore, &r.PositionSize, &r.ExitReason,
+		); err != nil {
+			return nil, fmt.Errorf("scan closed trade: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func tradeRecordToResponse(strategyType string, r *tradeRecordRow) (json.RawMessage, error) {
+	bondID := ""
+	if r.BondID != nil {
+		bondID = r.BondID.String()
+	}
+	price := derefString(r.Price)
+	quantity := derefString(r.Quantity)
+	entryBalance := derefString(r.EntryBalance)
+	switch strategyType {
+	case "copytrading":
+		rec := CopyTradingTradeRecord{
+			Time:         r.Time,
+			BondID:       bondID,
+			Signal:       r.Signal,
+			Price:        price,
+			Quantity:     quantity,
+			OrderSize:    derefString(r.OrderSize),
+			Cash:         derefString(r.Cash),
+			OpenPosition: derefString(r.OpenPosition),
+		}
+		if r.TradeID != nil {
+			rec.TradeID = r.TradeID.String()
+		}
+		return json.Marshal(rec)
+	default:
+		rec := MeanReversionTradeRecord{
+			Time:         r.Time,
+			BondID:       bondID,
+			Signal:       r.Signal,
+			Spread:       derefString(r.Spread),
+			PositionSize: derefString(r.PositionSize),
+			ZScore:       derefString(r.ZScore),
+			Price:        price,
+			Quantity:     quantity,
+			EntryBalance: entryBalance,
+		}
+		return json.Marshal(rec)
+	}
+}
+
+func closedTradeToResponse(strategyType string, r *closedTradeRow) (json.RawMessage, error) {
+	bondID := ""
+	if r.BondID != nil {
+		bondID = r.BondID.String()
+	}
+	switch strategyType {
+	case "copytrading":
+		ct := CopyTradingClosedTrade{
+			OpenTime:   r.OpenTime,
+			CloseTime:  r.CloseTime,
+			BondID:     bondID,
+			OpenSignal: r.OpenSignal,
+			// CloseSignal: not in ClosedTradeInsert struct as separate field; reuse OpenSignal aliasing in meanreversion
+			Quantity:     r.Quantity,
+			EntryPrice:   derefString(r.EntryPrice),
+			ExitPrice:    derefString(r.ExitPrice),
+			PnL:          r.PnL,
+			EntryBalance: derefString(r.EntryBalance),
+		}
+		// copytrading ClosedTrade uses OpenSignal and CloseSignal same way; we used OpenSignal above, need CloseSignal:
+		ct.CloseSignal = r.CloseSignal
+		if r.OpenTradeID != nil {
+			ct.OpenTradeID = r.OpenTradeID.String()
+		}
+		if r.CloseTradeID != nil {
+			ct.CloseTradeID = r.CloseTradeID.String()
+		}
+		return json.Marshal(ct)
+	default:
+		ct := MeanReversionClosedTrade{
+			BondID:       bondID,
+			OpenTime:     r.OpenTime,
+			CloseTime:    r.CloseTime,
+			Signal:       r.OpenSignal,
+			ExitSignal:   r.CloseSignal,
+			EntrySpread:  derefString(r.EntrySpread),
+			ExitSpread:   derefString(r.ExitSpread),
+			EntryZScore:  derefString(r.EntryZScore),
+			ExitZScore:   derefString(r.ExitZScore),
+			PositionSize: derefString(r.PositionSize),
+			PnL:          r.PnL,
+			ExitReason:   derefString(r.ExitReason),
+			EntryPrice:   derefString(r.EntryPrice),
+			ExitPrice:    derefString(r.ExitPrice),
+			Quantity:     r.Quantity,
+			EntryBalance: derefString(r.EntryBalance),
+		}
+		return json.Marshal(ct)
+	}
+}
+
+// derefString returns the empty string if p is nil, otherwise *p.
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// nullableString returns nil for "" so the column is stored as NULL.
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// nullableDecimal returns nil for the zero decimal so the column is stored
+// as NULL. Used for strategy-specific fields that don't apply to every
+// strategy (e.g. OrderSize for meanreversion trades).
+func nullableDecimal(d decimal.Decimal) any {
+	if d.IsZero() {
+		return nil
+	}
+	return d.String()
+}
+
+// clampPagination normalises page/limit to positive values and applies the
+// per-page maximum. Returns 0 for page when the result is out of range.
+func clampPagination(page, limit int) (int, int) {
 	if page < 1 {
 		page = 1
 	}
@@ -232,16 +493,13 @@ func paginate[T any](items []T, page, limit int) []T {
 	if limit > maxPaginationLimit {
 		limit = maxPaginationLimit
 	}
+	return page, limit
+}
 
-	start := (page - 1) * limit
-	if start >= len(items) {
-		return []T{}
+func marshalItems(items []json.RawMessage) (json.RawMessage, error) {
+	b, err := json.Marshal(map[string]any{"items": items})
+	if err != nil {
+		return nil, fmt.Errorf("marshal items: %w", err)
 	}
-
-	end := start + limit
-	if end > len(items) {
-		end = len(items)
-	}
-
-	return items[start:end]
+	return b, nil
 }

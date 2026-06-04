@@ -9,6 +9,7 @@ import (
 
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/config"
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/dora-network/dora-client-go/doraclient"
@@ -32,6 +33,7 @@ type Strategy struct {
 	cfg           Config
 	marketAPI     marketAPIClient
 	backtestStore tradesHistoryStore
+	tradeWriter   stats.BacktestTradeWriter
 	log           *slog.Logger
 	tradeStream   *streams.TradeStream
 	runID         uuid.UUID
@@ -68,6 +70,15 @@ func WithBacktestStore(store tradesHistoryStore) func(*Strategy) {
 	}
 }
 
+// WithBacktestWriter sets the destination for per-trade rows the
+// backtester emits as the simulation runs. If unset, trade rows are not
+// persisted and the /trades and /closed-trades endpoints return empty.
+func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
+	return func(s *Strategy) {
+		s.tradeWriter = w
+	}
+}
+
 // WithLogger sets the logger for the strategy.
 func WithLogger(log *slog.Logger) func(*Strategy) {
 	return func(s *Strategy) {
@@ -80,7 +91,7 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtest
 	if s.backtestStore == nil {
 		return backtestResult, errors.New("backtest store not configured: use WithBacktestStore")
 	}
-	backtester := NewBacktester(s, s.backtestStore)
+	backtester := NewBacktester(s, s.backtestStore, s.tradeWriter)
 	return backtester.Run(ctx, start, end)
 }
 

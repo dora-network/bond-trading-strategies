@@ -303,7 +303,7 @@ func TestStrategy_ShouldExit_StopLossDisabled(t *testing.T) {
 
 func TestBacktester_NoTradesBeforeWindowFull(t *testing.T) {
 	s := meanreversion.New(defaultConfig(), nil)
-	bt := meanreversion.NewBacktester(s)
+	bt := meanreversion.NewBacktester(s, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -320,7 +320,7 @@ func TestBacktester_ProfitableReversion(t *testing.T) {
 	cfg.MinStdDev = decimal.MustNew(1, 4)
 	cfg.InitialBalance = decimal.MustNew(10000, 0)
 	s := meanreversion.New(cfg, nil)
-	bt := meanreversion.NewBacktester(s)
+	bt := meanreversion.NewBacktester(s, nil)
 
 	var observations []types.YieldObservation
 	t0 := epoch
@@ -378,7 +378,7 @@ func TestBacktester_LossingTradeForceClosedAtEnd(t *testing.T) {
 	cfg.MinStdDev = decimal.MustNew(1, 4)
 	cfg.InitialBalance = decimal.MustNew(10000, 0)
 	s := meanreversion.New(cfg, nil)
-	bt := meanreversion.NewBacktester(s)
+	bt := meanreversion.NewBacktester(s, nil)
 
 	var observations []types.YieldObservation
 	t0 := epoch
@@ -425,7 +425,7 @@ func TestBacktestResult_MaxDrawdown(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.InitialBalance = decimal.MustNew(10000, 0)
 	s := meanreversion.New(cfg, nil)
-	bt := meanreversion.NewBacktester(s)
+	bt := meanreversion.NewBacktester(s, nil)
 
 	observations := makeObs(50, decimal.MustNew(1, 2))
 

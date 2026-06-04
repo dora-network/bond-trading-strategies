@@ -3,10 +3,12 @@ package meanreversion
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 )
 
@@ -19,11 +21,14 @@ import (
 // characteristics before live deployment.
 type Backtester struct {
 	strategy *Strategy
+	writer   stats.BacktestTradeWriter
 }
 
-// NewBacktester creates a Backtester wrapping the given Strategy.
-func NewBacktester(s *Strategy) *Backtester {
-	return &Backtester{strategy: s}
+// NewBacktester creates a Backtester wrapping the given Strategy. The
+// writer receives one WriteTradeRecord / WriteClosedTrade call per row
+// produced by the simulation; pass nil to skip persistence.
+func NewBacktester(s *Strategy, writer stats.BacktestTradeWriter) *Backtester {
+	return &Backtester{strategy: s, writer: writer}
 }
 
 // Run replays obs in chronological order and returns a BacktestResult.
@@ -282,7 +287,61 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		start = obs[0].Time
 		end = obs[len(obs)-1].Time
 	}
+
+	if b.writer != nil {
+		streamTrades(ctx, b.writer, tradeRecords, closedTrades)
+	}
+
 	return summarise(closedTrades, tradeRecords, start, end)
+}
+
+func streamTrades(
+	ctx context.Context,
+	w stats.BacktestTradeWriter,
+	records []TradeRecord,
+	closed []ClosedTrade,
+) {
+	for _, r := range records {
+		rec := stats.TradeRecordInsert{
+			BacktestID:   uuid.Nil,
+			Time:         r.Time,
+			BondID:       r.BondID,
+			Signal:       r.Signal.String(),
+			Price:        r.Price,
+			Quantity:     r.Quantity,
+			EntryBalance: r.EntryBalance,
+			Spread:       r.Spread,
+			PositionSize: r.PositionSize,
+			ZScore:       r.ZScore,
+		}
+		if err := w.WriteTradeRecord(ctx, rec); err != nil {
+			slog.Error("write trade record", "err", err)
+		}
+	}
+	for _, c := range closed {
+		rec := stats.ClosedTradeInsert{
+			BacktestID:   uuid.Nil,
+			OpenTime:     c.OpenTime,
+			CloseTime:    c.CloseTime,
+			BondID:       c.BondID,
+			OpenSignal:   c.Signal.String(),
+			CloseSignal:  c.ExitSignal.String(),
+			Quantity:     c.Quantity,
+			EntryPrice:   c.EntryPrice,
+			ExitPrice:    c.ExitPrice,
+			PnL:          c.PnL,
+			EntryBalance: c.EntryBalance,
+			EntrySpread:  c.EntrySpread,
+			ExitSpread:   c.ExitSpread,
+			EntryZScore:  c.EntryZScore,
+			ExitZScore:   c.ExitZScore,
+			PositionSize: c.PositionSize,
+			ExitReason:   c.ExitReason,
+		}
+		if err := w.WriteClosedTrade(ctx, rec); err != nil {
+			slog.Error("write closed trade", "err", err)
+		}
+	}
 }
 
 // computePnL calculates the profit/loss of a closed trade from the actual

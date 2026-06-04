@@ -13,6 +13,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/config"
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
 	"github.com/dora-network/dora-client-go/doraclient"
@@ -100,6 +101,7 @@ type Strategy struct {
 	pricesReqID           uuid.UUID
 	benchmarkObservations []fred.Observation
 	errs                  []error
+	backtestWriter        stats.BacktestTradeWriter
 
 	// Tracked balances, initialised from DORA on Run and updated on trade
 	// execution.  Protected by mu.
@@ -160,6 +162,15 @@ func WithMarketAPIClient(client marketAPIClient) func(*Strategy) {
 	}
 }
 
+// WithBacktestWriter sets the destination for per-trade rows the
+// backtester emits during a backtest. If unset, trade rows are not
+// persisted and the /trades endpoints return empty.
+func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
+	return func(s *Strategy) {
+		s.backtestWriter = w
+	}
+}
+
 func (s *Strategy) logger() *slog.Logger {
 	if s.log == nil {
 		return slog.Default()
@@ -176,7 +187,7 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtest
 		return backtestResult, fmt.Errorf("start and end date must be in the past")
 	}
 
-	bt := NewBacktester(New(s.cfg, s.pricesHandler))
+	bt := NewBacktester(s, s.backtestWriter)
 	obs, err := s.getObservations(ctx, start, end)
 	if err != nil {
 		return backtestResult, err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
@@ -20,10 +21,11 @@ const (
 type Backtester struct {
 	strategy *Strategy
 	history  tradesHistoryStore
+	writer   stats.BacktestTradeWriter
 }
 
-func NewBacktester(s *Strategy, store tradesHistoryStore) *Backtester {
-	return &Backtester{strategy: s, history: store}
+func NewBacktester(s *Strategy, store tradesHistoryStore, writer stats.BacktestTradeWriter) *Backtester {
+	return &Backtester{strategy: s, history: store, writer: writer}
 }
 
 func (b *Backtester) Run(ctx context.Context, start, end time.Time) (BacktestResult, error) {
@@ -126,7 +128,62 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 		)
 	}
 
+	// Stream accumulated trade rows to the writer. Failure here is
+	// non-fatal: the summary still returns, just without persisted trade
+	// records. The summary endpoint reads summary metrics which are
+	// already computed; the /trades endpoint is the only consumer of
+	// these rows.
+	if b.writer != nil {
+		streamTrades(ctx, b.writer, tradeRecords, closedTrades)
+	}
+
 	return summarise(tradeRecords, closedTrades, start, end)
+}
+
+func streamTrades(
+	ctx context.Context,
+	w stats.BacktestTradeWriter,
+	records []TradeRecord,
+	closed []ClosedTrade,
+) {
+	for _, r := range records {
+		rec := stats.TradeRecordInsert{
+			BacktestID:   uuid.Nil, // backtest_id is set per-write by the writer in production; tests inject one
+			Time:         r.Time,
+			BondID:       r.BondID,
+			Signal:       r.Signal.String(),
+			Price:        r.Price,
+			Quantity:     r.Quantity,
+			EntryBalance: decimal.Zero,
+			OrderSize:    r.OrderSize,
+			Cash:         r.Cash,
+			OpenPosition: r.OpenPosition,
+			TradeID:      r.TradeID,
+		}
+		if err := w.WriteTradeRecord(ctx, rec); err != nil {
+			slog.Error("write trade record", "err", err)
+		}
+	}
+	for _, c := range closed {
+		rec := stats.ClosedTradeInsert{
+			BacktestID:   uuid.Nil,
+			OpenTime:     c.OpenTime,
+			CloseTime:    c.CloseTime,
+			BondID:       c.BondID,
+			OpenSignal:   c.OpenSignal.String(),
+			CloseSignal:  c.CloseSignal.String(),
+			Quantity:     c.Quantity,
+			EntryPrice:   c.EntryPrice,
+			ExitPrice:    c.ExitPrice,
+			PnL:          c.PnL,
+			EntryBalance: c.EntryBalance,
+			OpenTradeID:  c.OpenTradeID,
+			CloseTradeID: c.CloseTradeID,
+		}
+		if err := w.WriteClosedTrade(ctx, rec); err != nil {
+			slog.Error("write closed trade", "err", err)
+		}
+	}
 }
 
 func applyTrade(
