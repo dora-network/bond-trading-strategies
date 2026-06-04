@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -13,7 +15,6 @@ import (
 
 const (
 	initialBacktestBalance = 10000
-	annualTradingDays      = 252
 	bondQuantityScale      = 1000
 	hoursPerDay            = 24
 )
@@ -469,59 +470,13 @@ func summarise(tradeRecords []TradeRecord, closedTrades []ClosedTrade) BacktestR
 			}
 			dailyPnLs = append(dailyPnLs, pnl)
 		}
-		res.SharpeRatio = sharpe(dailyPnLs)
+		ratio, err := stats.Sharpe(dailyPnLs)
+		if err != nil {
+			slog.Error("compute sharpe ratio", "err", err)
+		} else {
+			res.SharpeRatio = ratio
+		}
 	}
 
 	return res
-}
-
-func sharpe(pnls []decimal.Decimal) decimal.Decimal {
-	if len(pnls) < 2 { //nolint:mnd
-		return decimal.Zero
-	}
-
-	sum := decimal.Zero
-	for _, p := range pnls {
-		sum, _ = sum.Add(p)
-	}
-	n := decimal.MustNew(int64(len(pnls)), 0)
-	mean, err := sum.Quo(n)
-	if err != nil {
-		return decimal.Zero
-	}
-
-	variance := decimal.Zero
-	for _, p := range pnls {
-		d, err := p.Sub(mean)
-		if err != nil {
-			return decimal.Zero
-		}
-		sq, _ := d.Mul(d)
-		variance, _ = variance.Add(sq)
-	}
-	nMinus1 := decimal.MustNew(int64(len(pnls)-1), 0)
-	variance, err = variance.Quo(nMinus1)
-	if err != nil {
-		return decimal.Zero
-	}
-
-	sd, err := variance.Sqrt()
-	if err != nil {
-		return decimal.Zero
-	}
-	if sd.IsZero() {
-		return decimal.Zero
-	}
-
-	tradingDays := decimal.MustNew(annualTradingDays, 0)
-	sqrtDays, err := tradingDays.Sqrt()
-	if err != nil {
-		return decimal.Zero
-	}
-	ratio, err := mean.Quo(sd)
-	if err != nil {
-		return decimal.Zero
-	}
-	result, _ := ratio.Mul(sqrtDays)
-	return result
 }

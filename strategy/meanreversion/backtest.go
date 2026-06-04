@@ -5,12 +5,9 @@ import (
 	"errors"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/govalues/decimal"
-)
-
-const (
-	annualTradingDays = 252
 )
 
 // Backtester replays a slice of historical YieldObservations through a
@@ -400,67 +397,8 @@ func summarise(trades []ClosedTrade, tradeRecords []TradeRecord, start, end time
 	return res, nil
 }
 
-// sharpe computes an annualised Sharpe ratio assuming daily PnL observations
-// and 252 trading days per year. Returns 0 if standard deviation is zero.
+// sharpe computes an annualised Sharpe ratio assuming daily PnL observations.
+// Delegates to strategy/stats.Sharpe.
 func sharpe(pnls []decimal.Decimal) (decimal.Decimal, error) {
-	if len(pnls) < 2 { //nolint:mnd
-		return decimal.Zero, nil
-	}
-
-	// Mean
-	sum := decimal.Zero
-	for _, p := range pnls {
-		var err error
-		sum, err = sum.Add(p)
-		if err != nil {
-			return decimal.Zero, err
-		}
-	}
-	n := decimal.MustNew(int64(len(pnls)), 0)
-	mean, err := sum.Quo(n)
-	if err != nil {
-		return decimal.Zero, err
-	}
-
-	// Sample variance
-	variance := decimal.Zero
-	for _, p := range pnls {
-		d, err := p.Sub(mean)
-		if err != nil {
-			return decimal.Zero, err
-		}
-		sq, err := d.Mul(d)
-		if err != nil {
-			return decimal.Zero, err
-		}
-		variance, err = variance.Add(sq)
-		if err != nil {
-			return decimal.Zero, err
-		}
-	}
-	nMinus1 := decimal.MustNew(int64(len(pnls)-1), 0)
-	variance, err = variance.Quo(nMinus1)
-	if err != nil {
-		return decimal.Zero, err
-	}
-
-	sd, err := variance.Sqrt()
-	if err != nil {
-		return decimal.Zero, err
-	}
-	if sd.IsZero() {
-		return decimal.Zero, nil
-	}
-
-	// Annualise: multiply by sqrt(252)
-	tradingDays := decimal.MustNew(annualTradingDays, 0)
-	sqrtDays, err := tradingDays.Sqrt()
-	if err != nil {
-		return decimal.Zero, err
-	}
-	ratio, err := mean.Quo(sd)
-	if err != nil {
-		return decimal.Zero, err
-	}
-	return ratio.Mul(sqrtDays)
+	return stats.Sharpe(pnls)
 }
