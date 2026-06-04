@@ -290,6 +290,10 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 
 	if b.writer != nil {
 		streamTrades(ctx, b.writer, tradeRecords, closedTrades)
+		// Flush drains any rows still buffered by a batching writer.
+		if err := b.writer.Flush(ctx); err != nil {
+			slog.Error("flush backtest writer", "err", err)
+		}
 	}
 
 	return summarise(closedTrades, tradeRecords, start, end)

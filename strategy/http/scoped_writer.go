@@ -29,3 +29,10 @@ func (w *scopedBacktestWriter) WriteClosedTrade(ctx context.Context, trade stats
 	trade.BacktestID = w.backtestID
 	return w.inner.WriteClosedTrade(ctx, trade)
 }
+
+// Flush delegates to the inner writer. The handler wraps the
+// scopedBacktestWriter around a BatchingBacktestWriter, so Flush
+// triggers the batcher's drain of any buffered rows.
+func (w *scopedBacktestWriter) Flush(ctx context.Context) error {
+	return w.inner.Flush(ctx)
+}

@@ -1775,6 +1775,38 @@ func (s *memoryBacktestStore) WriteClosedTrade(_ context.Context, trade stats.Cl
 	return nil
 }
 
+func (s *memoryBacktestStore) WriteTradeRecordsBatch(_ context.Context, recs []stats.TradeRecordInsert) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trades == nil {
+		s.trades = make(map[uuid.UUID][]stats.TradeRecordInsert)
+	}
+	for _, r := range recs {
+		s.trades[r.BacktestID] = append(s.trades[r.BacktestID], r)
+	}
+	return nil
+}
+
+func (s *memoryBacktestStore) WriteClosedTradesBatch(_ context.Context, trades []stats.ClosedTradeInsert) error {
+	if len(trades) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closedTrades == nil {
+		s.closedTrades = make(map[uuid.UUID][]stats.ClosedTradeInsert)
+	}
+	for _, t := range trades {
+		s.closedTrades[t.BacktestID] = append(s.closedTrades[t.BacktestID], t)
+	}
+	return nil
+}
+
+func (s *memoryBacktestStore) Flush(_ context.Context) error { return nil }
+
 func paginateInserts[T any](items []T, page, limit int) []T {
 	if page < 1 {
 		page = 1

@@ -28,6 +28,14 @@ const (
 	strategyStatusNotImplemented = "not_implemented"
 	defaultPaginationLimit       = 10
 	maxPaginationLimit           = 50
+	// batchSize is the row count that triggers a flush in the batching
+	// backtest trade writer. Tuned with flushAfter so a backtest emitting
+	// rows faster than the flush interval still drains in bounded chunks.
+	batchSize = 1000
+	// flushAfter bounds how long buffered rows can sit before being
+	// written, so a slow trickle of trades doesn't leave a tail of
+	// un-flushed rows in memory.
+	flushAfter = time.Second
 )
 
 type Handler struct {
@@ -755,8 +763,10 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	}
 	id := uuid.Must(uuid.NewV7())
 	var tradeWriter stats.BacktestTradeWriter
+	var batcher *BatchingBacktestWriter
 	if h.backtestStore != nil {
-		tradeWriter = newScopedBacktestWriter(id, h.backtestStore)
+		batcher = NewBatchingBacktestWriter(h.backtestStore, batchSize, flushAfter)
+		tradeWriter = newScopedBacktestWriter(id, batcher)
 	}
 	def, cfg, strat, statusCode, err := h.resolveStrategy(req.StrategyType, req.Config, capabilityBacktest, tradeWriter)
 	if err != nil {
@@ -813,11 +823,11 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go h.awaitBacktestResult(id, resultCh) //nolint:contextcheck,gosec // backtest outlives the HTTP request context
+	go h.awaitBacktestResult(id, resultCh, batcher) //nolint:contextcheck,gosec // backtest outlives the HTTP request context
 	writeJSON(w, http.StatusAccepted, detail)
 }
 
-func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.BacktestResult) {
+func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.BacktestResult, batcher *BatchingBacktestWriter) {
 	result, ok := <-resultCh
 	if !ok {
 		result = types.ErrorResult{Err: errors.New("backtest result channel closed")}
@@ -862,6 +872,16 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 
 	if err := h.saveBacktest(context.Background(), detail); err != nil {
 		slog.Error("failed to save backtest result", "err", err, "backtest_id", id)
+	}
+
+	// Stop the batching writer's background ticker. The strategy engine
+	// already called writer.Flush() at the end of its simulation, so
+	// any remaining rows are persisted; Close drains anything that
+	// arrived in the final tick window and stops the goroutine.
+	if batcher != nil {
+		if err := batcher.Close(); err != nil {
+			slog.Error("close batching writer", "err", err, "backtest_id", id)
+		}
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -20,6 +21,8 @@ type BacktestStore interface {
 	GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error)
 	WriteTradeRecord(ctx context.Context, rec stats.TradeRecordInsert) error
 	WriteClosedTrade(ctx context.Context, trade stats.ClosedTradeInsert) error
+	WriteTradeRecordsBatch(ctx context.Context, recs []stats.TradeRecordInsert) error
+	WriteClosedTradesBatch(ctx context.Context, trades []stats.ClosedTradeInsert) error
 }
 
 type PGBacktestStore struct {
@@ -244,6 +247,116 @@ func (s *PGBacktestStore) WriteClosedTrade(ctx context.Context, trade stats.Clos
 	}
 	return nil
 }
+
+// WriteTradeRecordsBatch uses pgx.CopyFrom to bulk-insert trade rows in a
+// single COPY command. For a 20-day backtest emitting ~170k trade rows,
+// this turns a multi-minute per-row-INSERT loop into sub-second
+// batches.
+func (s *PGBacktestStore) WriteTradeRecordsBatch(ctx context.Context, recs []stats.TradeRecordInsert) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	rows := make([][]any, len(recs))
+	for i, r := range recs {
+		rows[i] = tradeRecordInsertRow(r)
+	}
+	src := pgx.CopyFromSlice(len(recs), func(i int) ([]any, error) { return rows[i], nil })
+	_, err := s.pool.CopyFrom(
+		ctx,
+		pgx.Identifier{"strategy_backtest_trades"},
+		tradeRecordCopyColumns,
+		src,
+	)
+	if err != nil {
+		return fmt.Errorf("write trade records batch (%d rows) for backtest %s: %w", len(recs), recs[0].BacktestID, err)
+	}
+	return nil
+}
+
+// WriteClosedTradesBatch is the bulk-insert counterpart to
+// WriteClosedTrade. See WriteTradeRecordsBatch for rationale.
+func (s *PGBacktestStore) WriteClosedTradesBatch(ctx context.Context, trades []stats.ClosedTradeInsert) error {
+	if len(trades) == 0 {
+		return nil
+	}
+	rows := make([][]any, len(trades))
+	for i, t := range trades {
+		rows[i] = closedTradeInsertRow(t)
+	}
+	src := pgx.CopyFromSlice(len(trades), func(i int) ([]any, error) { return rows[i], nil })
+	_, err := s.pool.CopyFrom(
+		ctx,
+		pgx.Identifier{"strategy_backtest_closed_trades"},
+		closedTradeCopyColumns,
+		src,
+	)
+	if err != nil {
+		return fmt.Errorf("write closed trades batch (%d rows) for backtest %s: %w", len(trades), trades[0].BacktestID, err)
+	}
+	return nil
+}
+
+// Flush is a no-op for the raw PGBacktestStore: every WriteXxx call
+// is already committed synchronously. The batching layer wraps this
+// store; its own Flush drains accumulated rows via WriteXxxBatch.
+func (s *PGBacktestStore) Flush(_ context.Context) error { return nil }
+
+// tradeRecordInsertRow maps a TradeRecordInsert to the column order
+// declared in tradeRecordCopyColumns.
+func tradeRecordInsertRow(r stats.TradeRecordInsert) []any {
+	var bondID, tradeID any
+	if r.BondID != "" {
+		bondID, _ = uuid.Parse(r.BondID)
+	}
+	if r.TradeID != uuid.Nil {
+		tradeID = r.TradeID
+	}
+	return []any{
+		r.BacktestID, r.Time, bondID, r.Signal,
+		nullableDecimal(r.Price), nullableDecimal(r.Quantity), nullableDecimal(r.EntryBalance),
+		nullableDecimal(r.OrderSize), nullableDecimal(r.Cash), nullableDecimal(r.OpenPosition), tradeID,
+		nullableDecimal(r.Spread), nullableDecimal(r.PositionSize), nullableDecimal(r.ZScore),
+	}
+}
+
+// closedTradeInsertRow maps a ClosedTradeInsert to the column order
+// declared in closedTradeCopyColumns.
+func closedTradeInsertRow(t stats.ClosedTradeInsert) []any {
+	var bondID, openID, closeID any
+	if t.BondID != "" {
+		bondID, _ = uuid.Parse(t.BondID)
+	}
+	if t.OpenTradeID != uuid.Nil {
+		openID = t.OpenTradeID
+	}
+	if t.CloseTradeID != uuid.Nil {
+		closeID = t.CloseTradeID
+	}
+	return []any{
+		t.BacktestID, t.OpenTime, t.CloseTime, bondID, t.OpenSignal, t.CloseSignal,
+		t.Quantity.String(), nullableDecimal(t.EntryPrice), nullableDecimal(t.ExitPrice),
+		t.PnL.String(), nullableDecimal(t.EntryBalance),
+		openID, closeID,
+		nullableDecimal(t.EntrySpread), nullableDecimal(t.ExitSpread),
+		nullableDecimal(t.EntryZScore), nullableDecimal(t.ExitZScore),
+		nullableDecimal(t.PositionSize), nullableString(t.ExitReason),
+	}
+}
+
+var (
+	tradeRecordCopyColumns = []string{ //nolint:gochecknoglobals
+		"backtest_id", "time", "bond_id", "signal",
+		"price", "quantity", "entry_balance",
+		"order_size", "cash", "open_position", "trade_id",
+		"spread", "position_size", "zscore",
+	}
+	closedTradeCopyColumns = []string{ //nolint:gochecknoglobals
+		"backtest_id", "open_time", "close_time", "bond_id", "open_signal", "close_signal",
+		"quantity", "entry_price", "exit_price", "pnl", "entry_balance",
+		"open_trade_id", "close_trade_id",
+		"entry_spread", "exit_spread", "entry_zscore", "exit_zscore", "position_size", "exit_reason",
+	}
+)
 
 // tradeRecordRow is the column shape of strategy_backtest_trades.
 type tradeRecordRow struct {

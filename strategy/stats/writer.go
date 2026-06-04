@@ -13,9 +13,17 @@ import (
 // simulation. The strategy-server streams each row to the store instead of
 // accumulating them in one large JSONB column on strategy_backtests (which
 // crashed the DB for backtests exceeding ~50MB of combined trade data).
+//
+// Flush drains any buffered rows. Synchronous writers (in-memory fixtures,
+// the bare PGBacktestStore) can treat it as a no-op; the batching
+// implementation in strategy/http flushes its accumulated batch to the
+// underlying store. The backtest engine must call Flush after its
+// simulation loop to ensure trailing rows are persisted before the
+// backtest status flips to completed.
 type BacktestTradeWriter interface {
 	WriteTradeRecord(ctx context.Context, rec TradeRecordInsert) error
 	WriteClosedTrade(ctx context.Context, trade ClosedTradeInsert) error
+	Flush(ctx context.Context) error
 }
 
 // TradeRecordInsert is the row shape for strategy_backtest_trades. Strategy

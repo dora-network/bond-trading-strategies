@@ -135,6 +135,12 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 	// these rows.
 	if b.writer != nil {
 		streamTrades(ctx, b.writer, tradeRecords, closedTrades)
+		// Flush drains any rows still buffered by a batching writer.
+		// The summarise below returns the summary synchronously; without
+		// Flush the /trades endpoint could read an empty buffer.
+		if err := b.writer.Flush(ctx); err != nil {
+			slog.Error("flush backtest writer", "err", err)
+		}
 	}
 
 	return summarise(tradeRecords, closedTrades, start, end)
