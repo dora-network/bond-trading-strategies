@@ -110,7 +110,7 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade) (BacktestRes
 			continue
 		}
 
-		ourQty, _ := trade.Quantity0.Mul(scale)
+		ourQty, _ := trade.Quantity.Mul(scale)
 		ourQty = ourQty.Round(0)
 		tradeID, _ := uuid.Parse(trade.TransactionID)
 
@@ -140,7 +140,7 @@ func applyTrade(
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
-	pos := positions[trade.Asset0]
+	pos := positions[trade.Asset]
 
 	if ourSignal == types.SignalBuy {
 		return applyBuy(trade, tradeID, ourQty, price, margin, cash, pos, positions, tradeRecords, closedTrades)
@@ -182,7 +182,7 @@ func buyClosesShort(
 
 	remaining, _ := ourQty.Sub(closeQty)
 	if remaining.IsZero() || remaining.IsNeg() {
-		positions[trade.Asset0] = pos
+		positions[trade.Asset] = pos
 		return cash, tradeRecords, closedTrades
 	}
 
@@ -193,7 +193,7 @@ func buyClosesShort(
 		openTime:    trade.CreatedAt,
 		openTradeID: tradeID,
 	}
-	positions[trade.Asset0] = pos
+	positions[trade.Asset] = pos
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, remaining, price, cash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
@@ -226,7 +226,7 @@ func buyOpensOrAddsLong(
 		pos.qty = totalQty
 		pos.avgEntry = avg
 	}
-	positions[trade.Asset0] = pos
+	positions[trade.Asset] = pos
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, ourQty, price, cash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
@@ -264,7 +264,7 @@ func sellClosesLong(
 
 	remaining, _ := ourQty.Sub(closeQty)
 	if remaining.IsZero() || remaining.IsNeg() {
-		positions[trade.Asset0] = pos
+		positions[trade.Asset] = pos
 		return cash, tradeRecords, closedTrades
 	}
 
@@ -275,7 +275,7 @@ func sellClosesLong(
 		openTime:    trade.CreatedAt,
 		openTradeID: tradeID,
 	}
-	positions[trade.Asset0] = pos
+	positions[trade.Asset] = pos
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, remaining, price, cash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
@@ -309,7 +309,7 @@ func sellOpensOrAddsShort(
 		pos.qty = totalAbsQty.Neg()
 		pos.avgEntry = avg
 	}
-	positions[trade.Asset0] = pos
+	positions[trade.Asset] = pos
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, ourQty, price, cash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
@@ -327,7 +327,7 @@ func closeLongPosition(
 	closedTrades = append(closedTrades, ClosedTrade{
 		OpenTime:     pos.openTime,
 		CloseTime:    trade.CreatedAt,
-		BondID:       trade.Asset0,
+		BondID:       trade.Asset,
 		OpenSignal:   types.SignalBuy,
 		CloseSignal:  types.SignalSell,
 		Quantity:     closeQty,
@@ -357,7 +357,7 @@ func closeShortPosition(
 	closedTrades = append(closedTrades, ClosedTrade{
 		OpenTime:     pos.openTime,
 		CloseTime:    trade.CreatedAt,
-		BondID:       trade.Asset0,
+		BondID:       trade.Asset,
 		OpenSignal:   types.SignalSell,
 		CloseSignal:  types.SignalBuy,
 		Quantity:     closeQty,
@@ -385,7 +385,7 @@ func emitTradeRecord(
 	orderSize, _ := qty.Mul(price)
 	return append(tradeRecords, TradeRecord{
 		Time:         trade.CreatedAt,
-		BondID:       trade.Asset0,
+		BondID:       trade.Asset,
 		Signal:       signal,
 		Price:        price,
 		Quantity:     qty,

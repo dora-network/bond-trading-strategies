@@ -72,7 +72,7 @@ func TestPGTradesHistoryStore_StreamTrades_Empty(t *testing.T) {
 		WithArgs(followed, start, end, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"transaction_id", "order_id", "order_seq", "orderbook_id",
-			"user_id", "asset0", "quantity0", "price", "side",
+			"user_id", "asset", "quantity", "price", "side",
 			"aggressor_indicator", "created_at",
 		}))
 
@@ -105,7 +105,7 @@ func TestPGTradesHistoryStore_StreamTrades_RangeFilter(t *testing.T) {
 		WithArgs(followed, start, end, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"transaction_id", "order_id", "order_seq", "orderbook_id",
-			"user_id", "asset0", "quantity0", "price", "side",
+			"user_id", "asset", "quantity", "price", "side",
 			"aggressor_indicator", "created_at",
 		}).
 			AddRow("tx-1", "ord-1", int64(1), "ob-1", followed, "bond-a", "1.0", "100", "BUY", true, lo))
@@ -138,7 +138,7 @@ func TestPGTradesHistoryStore_StreamTrades_Ordered(t *testing.T) {
 
 	rows := pgxmock.NewRows([]string{
 		"transaction_id", "order_id", "order_seq", "orderbook_id",
-		"user_id", "asset0", "quantity0", "price", "side",
+		"user_id", "asset", "quantity", "price", "side",
 		"aggressor_indicator", "created_at",
 	})
 	// 999 rows fits a single batch (batchSize=1000) so the loop

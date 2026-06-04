@@ -22,8 +22,8 @@ type Trade struct {
 	OrderSeq           int64
 	OrderBookID        string
 	UserID             string
-	Asset0             string
-	Quantity0          decimal.Decimal
+	Asset              string
+	Quantity           decimal.Decimal
 	Price              decimal.Decimal
 	Side               string // "BUY" or "SELL", matching the DORA Side enum
 	AggressorIndicator bool
@@ -188,7 +188,7 @@ func (s *PGTradesHistoryStore) queryTradesBatch(
 	if first {
 		return s.pool.Query(ctx, `
 			SELECT transaction_id, order_id, order_seq, orderbook_id,
-				user_id, asset0, quantity0, price, side,
+				user_id, asset, quantity, price, side,
 				aggressor_indicator, created_at
 			FROM trades_history
 			WHERE user_id = $1
@@ -200,7 +200,7 @@ func (s *PGTradesHistoryStore) queryTradesBatch(
 	}
 	return s.pool.Query(ctx, `
 		SELECT transaction_id, order_id, order_seq, orderbook_id,
-			user_id, asset0, quantity0, price, side,
+			user_id, asset, quantity, price, side,
 			aggressor_indicator, created_at
 		FROM trades_history
 		WHERE user_id = $1
@@ -250,7 +250,7 @@ func scanTradeRow(rows pgx.Rows) (Trade, error) {
 	var qty, priceStr string
 	if err := rows.Scan(
 		&t.TransactionID, &t.OrderID, &t.OrderSeq, &t.OrderBookID,
-		&t.UserID, &t.Asset0, &qty, &priceStr, &t.Side,
+		&t.UserID, &t.Asset, &qty, &priceStr, &t.Side,
 		&t.AggressorIndicator, &t.CreatedAt,
 	); err != nil {
 		return t, fmt.Errorf("scan trade: %w", err)
@@ -259,7 +259,7 @@ func scanTradeRow(rows pgx.Rows) (Trade, error) {
 	if err != nil {
 		return t, fmt.Errorf("parse quantity %q: %w", qty, err)
 	}
-	t.Quantity0 = q
+	t.Quantity = q
 	p, err := decimal.Parse(priceStr)
 	if err != nil {
 		return t, fmt.Errorf("parse price %q: %w", priceStr, err)

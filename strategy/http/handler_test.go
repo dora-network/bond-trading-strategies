@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -1680,10 +1681,13 @@ func (s *memoryRunStore) String() string {
 }
 
 type memoryBacktestStore struct {
+	mu        sync.Mutex
 	backtests map[uuid.UUID]*strategyhttp.BacktestDetail
 }
 
 func (s *memoryBacktestStore) LoadBacktests(ctx context.Context) ([]*strategyhttp.BacktestDetail, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]*strategyhttp.BacktestDetail, 0, len(s.backtests))
 	for _, bt := range s.backtests {
 		copyBT := *bt
@@ -1695,6 +1699,8 @@ func (s *memoryBacktestStore) LoadBacktests(ctx context.Context) ([]*strategyhtt
 }
 
 func (s *memoryBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UUID) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	bt, ok := s.backtests[id]
 	if !ok {
 		return nil, fmt.Errorf("backtest not found")
@@ -1703,6 +1709,8 @@ func (s *memoryBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UU
 }
 
 func (s *memoryBacktestStore) SaveBacktest(ctx context.Context, detail *strategyhttp.BacktestDetail) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.backtests == nil {
 		s.backtests = make(map[uuid.UUID]*strategyhttp.BacktestDetail)
 	}

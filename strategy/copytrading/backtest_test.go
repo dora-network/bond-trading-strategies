@@ -76,10 +76,10 @@ func makeTrade(id, asset, side, price, qty string, t time.Time) Trade {
 		TransactionID: id,
 		UserID:        "ignored-by-sim",
 		OrderBookID:   "ob",
-		Asset0:        asset,
+		Asset:         asset,
 		Side:          strings.ToUpper(side),
 		Price:         priceDec,
-		Quantity0:     qtyDec,
+		Quantity:      qtyDec,
 		CreatedAt:     t,
 	}
 }
