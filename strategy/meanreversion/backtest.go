@@ -319,86 +319,21 @@ func computePnL(ct ClosedTrade) (decimal.Decimal, error) {
 
 // summarise aggregates closed trades into a BacktestResult.
 func summarise(trades []ClosedTrade, tradeRecords []TradeRecord, start, end time.Time) (BacktestResult, error) {
-	res := BacktestResult{ClosedTrades: trades, TradeRecords: tradeRecords}
-
-	if len(trades) == 0 {
-		return res, nil
+	points := make([]stats.PnLPoint, len(trades))
+	for i, t := range trades {
+		points[i] = stats.PnLPoint{PnL: t.PnL, CloseTime: t.CloseTime}
 	}
-
-	// Total PnL, win/loss count, and running equity for drawdown.
-	equity := decimal.Zero
-	peak := decimal.Zero
-	maxDD := decimal.Zero
-
-	// Aggregate PnL by day for Sharpe Ratio
-	dailyPnLMap := make(map[string]decimal.Decimal)
-
-	for _, t := range trades {
-		var err error
-		res.TotalPnL, err = res.TotalPnL.Add(t.PnL)
-		if err != nil {
-			return BacktestResult{}, err
-		}
-
-		// Accumulate daily PnL based on trade close time
-		dateStr := t.CloseTime.Format("2006-01-02")
-		current, ok := dailyPnLMap[dateStr]
-		if !ok {
-			current = decimal.Zero
-		}
-		dailyPnLMap[dateStr], err = current.Add(t.PnL)
-		if err != nil {
-			return BacktestResult{}, err
-		}
-
-		if t.PnL.IsPos() {
-			res.WinCount++
-		} else {
-			res.LossCount++
-		}
-
-		equity, err = equity.Add(t.PnL)
-		if err != nil {
-			return BacktestResult{}, err
-		}
-		if equity.Cmp(peak) > 0 {
-			peak = equity
-		}
-		dd, err := peak.Sub(equity)
-		if err != nil {
-			return BacktestResult{}, err
-		}
-		if dd.Cmp(maxDD) > 0 {
-			maxDD = dd
-		}
-	}
-
-	res.MaxDrawdown = maxDD
-
-	// Build daily PnL array spanning the whole backtest duration
-	var dailyPnLs []decimal.Decimal
-	startDay := start.Truncate(24 * time.Hour)                       //nolint:mnd
-	endDay := end.Truncate(24 * time.Hour)                           //nolint:mnd
-	for d := startDay; !d.After(endDay); d = d.Add(24 * time.Hour) { //nolint:mnd
-		dateStr := d.Format("2006-01-02")
-		pnl, ok := dailyPnLMap[dateStr]
-		if !ok {
-			pnl = decimal.Zero
-		}
-		dailyPnLs = append(dailyPnLs, pnl)
-	}
-
-	var err error
-	res.SharpeRatio, err = sharpe(dailyPnLs)
+	summary, err := stats.Summarise(points, start, end)
 	if err != nil {
 		return BacktestResult{}, err
 	}
-
-	return res, nil
-}
-
-// sharpe computes an annualised Sharpe ratio assuming daily PnL observations.
-// Delegates to strategy/stats.Sharpe.
-func sharpe(pnls []decimal.Decimal) (decimal.Decimal, error) {
-	return stats.Sharpe(pnls)
+	return BacktestResult{
+		ClosedTrades: trades,
+		TradeRecords: tradeRecords,
+		TotalPnL:     summary.TotalPnL,
+		WinCount:     summary.WinCount,
+		LossCount:    summary.LossCount,
+		MaxDrawdown:  summary.MaxDrawdown,
+		SharpeRatio:  summary.SharpeRatio,
+	}, nil
 }

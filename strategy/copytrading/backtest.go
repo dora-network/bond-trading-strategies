@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
@@ -16,7 +15,6 @@ import (
 const (
 	initialBacktestBalance = 10000
 	bondQuantityScale      = 1000
-	hoursPerDay            = 24
 )
 
 type Backtester struct {
@@ -50,7 +48,7 @@ func (b *Backtester) Run(ctx context.Context, start, end time.Time) (BacktestRes
 	}
 
 	ch, done := b.history.StreamTrades(ctx, followedTrader, start, end)
-	result, simErr := b.simulate(ctx, ch)
+	result, simErr := b.simulate(ctx, ch, start, end)
 	prodErr := <-done
 
 	if prodErr != nil {
@@ -69,7 +67,7 @@ type position struct {
 	openTradeID uuid.UUID
 }
 
-func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade) (BacktestResult, error) {
+func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end time.Time) (BacktestResult, error) {
 	var (
 		tradeRecords []TradeRecord
 		closedTrades []ClosedTrade
@@ -128,7 +126,7 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade) (BacktestRes
 		)
 	}
 
-	return summarise(tradeRecords, closedTrades), nil
+	return summarise(tradeRecords, closedTrades, start, end)
 }
 
 func applyTrade(
@@ -404,79 +402,22 @@ func minDecimal(a, b decimal.Decimal) decimal.Decimal {
 	return b
 }
 
-func summarise(tradeRecords []TradeRecord, closedTrades []ClosedTrade) BacktestResult {
-	res := BacktestResult{
+func summarise(tradeRecords []TradeRecord, closedTrades []ClosedTrade, start, end time.Time) (BacktestResult, error) {
+	points := make([]stats.PnLPoint, len(closedTrades))
+	for i, t := range closedTrades {
+		points[i] = stats.PnLPoint{PnL: t.PnL, CloseTime: t.CloseTime}
+	}
+	summary, err := stats.Summarise(points, start, end)
+	if err != nil {
+		return BacktestResult{}, err
+	}
+	return BacktestResult{
 		TradeRecords: tradeRecords,
 		ClosedTrades: closedTrades,
-	}
-
-	if len(closedTrades) == 0 {
-		return res
-	}
-
-	equity := decimal.Zero
-	peak := decimal.Zero
-	maxDD := decimal.Zero
-
-	dailyPnLMap := make(map[string]decimal.Decimal)
-
-	for _, t := range closedTrades {
-		res.TotalPnL, _ = res.TotalPnL.Add(t.PnL)
-
-		dateStr := t.CloseTime.Format("2006-01-02")
-		current, ok := dailyPnLMap[dateStr]
-		if !ok {
-			current = decimal.Zero
-		}
-		dailyPnLMap[dateStr], _ = current.Add(t.PnL)
-
-		if t.PnL.IsPos() {
-			res.WinCount++
-		} else if t.PnL.IsNeg() {
-			res.LossCount++
-		}
-
-		equity, _ = equity.Add(t.PnL)
-		if equity.Cmp(peak) > 0 {
-			peak = equity
-		}
-		dd, _ := peak.Sub(equity)
-		if dd.Cmp(maxDD) > 0 {
-			maxDD = dd
-		}
-	}
-
-	res.MaxDrawdown = maxDD
-
-	var start, end time.Time
-	for _, t := range closedTrades {
-		if start.IsZero() || t.CloseTime.Before(start) {
-			start = t.CloseTime
-		}
-		if t.CloseTime.After(end) {
-			end = t.CloseTime
-		}
-	}
-
-	if !start.IsZero() && !end.IsZero() {
-		var dailyPnLs []decimal.Decimal
-		startDay := start.Truncate(hoursPerDay * time.Hour)
-		endDay := end.Truncate(hoursPerDay * time.Hour)
-		for d := startDay; !d.After(endDay); d = d.Add(hoursPerDay * time.Hour) {
-			dateStr := d.Format("2006-01-02")
-			pnl, ok := dailyPnLMap[dateStr]
-			if !ok {
-				pnl = decimal.Zero
-			}
-			dailyPnLs = append(dailyPnLs, pnl)
-		}
-		ratio, err := stats.Sharpe(dailyPnLs)
-		if err != nil {
-			slog.Error("compute sharpe ratio", "err", err)
-		} else {
-			res.SharpeRatio = ratio
-		}
-	}
-
-	return res
+		TotalPnL:     summary.TotalPnL,
+		WinCount:     summary.WinCount,
+		LossCount:    summary.LossCount,
+		MaxDrawdown:  summary.MaxDrawdown,
+		SharpeRatio:  summary.SharpeRatio,
+	}, nil
 }

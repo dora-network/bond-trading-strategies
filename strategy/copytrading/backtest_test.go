@@ -105,7 +105,7 @@ func TestSimulate_BuyOpensLong(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t0)
 	require.NoError(t, err)
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
@@ -140,7 +140,7 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t1)
 	require.NoError(t, err)
 
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
@@ -175,7 +175,7 @@ func TestSimulate_BuyThenPartialSell(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t1)
 	require.NoError(t, err)
 
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
@@ -205,7 +205,7 @@ func TestSimulate_MultipleBuysWeightedAvg(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t1)
 	require.NoError(t, err)
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
@@ -231,7 +231,7 @@ func TestSimulate_BuyClosesShort(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t1)
 	require.NoError(t, err)
 
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
@@ -261,7 +261,7 @@ func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t1)
 	require.NoError(t, err)
 
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
@@ -290,7 +290,7 @@ func TestSimulate_SellOpensShort(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t0)
 	require.NoError(t, err)
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
@@ -322,7 +322,7 @@ func TestSimulate_WinLossCount(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t3)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, res.GetWinCount())
@@ -347,7 +347,7 @@ func TestSimulate_MaxDrawdownNonNegative(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t3)
 	require.NoError(t, err)
 
 	require.False(t, res.GetMaxDrawdown().IsNeg(), "MaxDrawdown must be >= 0, got %s", res.GetMaxDrawdown().String())
@@ -359,7 +359,7 @@ func TestSimulate_NoTrades(t *testing.T) {
 	followed := uuid.New()
 	trades := []Trade{}
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), time.Now(), time.Now())
 	require.NoError(t, err)
 
 	require.True(t, res.GetTotalPnL().IsZero())
@@ -395,7 +395,7 @@ func TestSimulate_MultiPageStream(t *testing.T) {
 	}
 
 	b := newBacktesterForSimulation(followed)
-	res, err := b.simulate(t.Context(), feedChannel(t, trades))
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t0.Add(299*time.Second))
 	require.NoError(t, err)
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
