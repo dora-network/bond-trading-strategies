@@ -28,7 +28,8 @@ type doraAPIClient struct {
 	// cachedUserID is the bot's DORA user ID, fetched from GetUserSelf
 	// on first use and cached for the lifetime of the client. It's
 	// stable for the API key, so a single round-trip is enough.
-	userIDMu     sync.Mutex
+	// RWMutex: many concurrent readers, one writer (the first fetch).
+	userIDMu     sync.RWMutex
 	cachedUserID string
 }
 
@@ -86,8 +87,16 @@ func (c *doraAPIClient) GetPortfolioV2(ctx context.Context) (*doraclient.Account
 // use. The user ID is stable for the API key lifetime, so a single
 // round-trip is sufficient.
 func (c *doraAPIClient) userID(ctx context.Context) (string, error) {
+	c.userIDMu.RLock()
+	cached := c.cachedUserID
+	c.userIDMu.RUnlock()
+	if cached != "" {
+		return cached, nil
+	}
 	c.userIDMu.Lock()
 	defer c.userIDMu.Unlock()
+	// Re-check after taking the write lock; another goroutine may
+	// have populated the cache while we were upgrading.
 	if c.cachedUserID != "" {
 		return c.cachedUserID, nil
 	}

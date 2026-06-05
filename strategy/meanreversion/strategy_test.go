@@ -470,9 +470,8 @@ func TestInitializeBalances_SetsOpenSignalFromDORAPosition(t *testing.T) {
 			s := meanreversion.New(cfg, nil)
 			client := &meanreversionfakes.FakeMarketAPIClient{}
 			client.QuoteAssetIDReturns("usd-id", nil)
-			client.SelfUserIDReturns("user-1", nil)
 			// AssetPosition is called twice: once for the bond, once for USD.
-			client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+			client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 				if assetID == "bond-id" {
 					return tc.held, tc.borrowed, nil
 				}
@@ -508,9 +507,8 @@ func TestRunLoop_NoNewEntryWhenPositionOpen(t *testing.T) {
 	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
-	client.SelfUserIDReturns("user-1", nil)
 	// Simulate an existing long position fetched from DORA on startup.
-	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 		if assetID == "bond-id" {
 			return decimal.MustNew(5, 0), decimal.Zero, nil
 		}
@@ -588,9 +586,8 @@ func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
 	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
-	client.SelfUserIDReturns("user-1", nil)
 	// Existing long position (5 bonds) from a prior run.
-	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 		if assetID == "bond-id" {
 			return decimal.MustNew(5, 0), decimal.Zero, nil
 		}
@@ -671,9 +668,8 @@ func TestRunLoop_NoNewEntryWhenQuantityZero(t *testing.T) {
 	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
-	client.SelfUserIDReturns("user-1", nil)
 	// Balance has no existing position, and tracking initialised
-	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 		return decimal.Zero, decimal.Zero, nil
 	}
 	meanreversion.SetLookupClient(s, client)
@@ -746,12 +742,11 @@ func TestRunLoop_SelfHealsWhenPositionDoesNotExistOnExchange(t *testing.T) {
 	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
-	client.SelfUserIDReturns("user-1", nil)
 
 	// Simulate initialization with an existing position of 5 bonds
 	var count int
 	var mu sync.Mutex
-	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if assetID == "bond-id" {

@@ -261,11 +261,7 @@ func (s *Strategy) currentPosition(ctx context.Context, assetID string) (decimal
 	if strings.TrimSpace(assetID) == "" {
 		return decimal.Zero, errors.New("asset ID is required")
 	}
-	accountID, err := s.marketAPIClient.SelfUserID(ctx)
-	if err != nil {
-		return decimal.Zero, err
-	}
-	long, short, err := s.marketAPIClient.AssetPosition(ctx, accountID, assetID)
+	long, short, err := s.marketAPIClient.AssetPosition(ctx, assetID)
 	if err != nil {
 		return decimal.Zero, err
 	}
@@ -382,18 +378,12 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 		s.log.Warn("initialise balances: v2 portfolio unavailable, falling back to legacy path", "err", err)
 	}
 
-	// Fallback: use the legacy SelfUserID + AssetPosition path.
-	// This uses the global account regardless of leverage.
-	accountID, err := s.marketAPIClient.SelfUserID(ctx)
-	if err != nil {
-		s.mu.Lock()
-		s.errs = append(s.errs, fmt.Errorf("initialise balances: get user ID: %w", err))
-		s.mu.Unlock()
-		return
-	}
+	// Fallback: use the AssetPosition path. This uses the global
+	// account regardless of leverage. The user ID is resolved (and
+	// cached) inside AssetPosition.
 
 	// Fetch bond position.
-	bondAvailable, bondBorrowed, err := s.marketAPIClient.AssetPosition(ctx, accountID, baseAssetID)
+	bondAvailable, bondBorrowed, err := s.marketAPIClient.AssetPosition(ctx, baseAssetID)
 	if err != nil {
 		s.mu.Lock()
 		s.errs = append(s.errs, fmt.Errorf("initialise balances: get bond position: %w", err))
@@ -409,7 +399,7 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 	}
 
 	// Fetch USD balance.
-	usdAvailable, _, err := s.marketAPIClient.AssetPosition(ctx, accountID, quoteAssetID)
+	usdAvailable, _, err := s.marketAPIClient.AssetPosition(ctx, quoteAssetID)
 	if err != nil {
 		s.mu.Lock()
 		s.errs = append(s.errs, fmt.Errorf("initialise balances: get USD balance: %w", err))
