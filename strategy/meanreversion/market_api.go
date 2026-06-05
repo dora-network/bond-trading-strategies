@@ -32,6 +32,13 @@ type doraAPIClient struct {
 	// RWMutex: many concurrent readers, one writer (the first fetch).
 	userIDMu     sync.RWMutex
 	cachedUserID string
+
+	// orderBookByID caches the full OrderBook by ID so BaseAssetID
+	// and QuoteAssetID can both be served from a single DORA
+	// round-trip. Same RWMutex + double-checked pattern as the user
+	// ID cache above.
+	orderBookMu   sync.RWMutex
+	orderBookByID map[string]*doraclient.OrderBook
 }
 
 const (
@@ -58,37 +65,68 @@ func newDoraClient() *doraAPIClient {
 }
 
 func (c *doraAPIClient) BaseAssetID(ctx context.Context, orderBookID string) (string, error) {
-	return c.getOrderBookAssetID(ctx, orderBookID, "base asset",
-		func(data *doraclient.OrderBook) string { return data.BaseAssetId })
+	book, err := c.orderBook(ctx, orderBookID)
+	if err != nil {
+		return "", err
+	}
+	if book.BaseAssetId == "" {
+		return "", fmt.Errorf("get order book %s: missing base asset ID", orderBookID)
+	}
+	return book.BaseAssetId, nil
 }
 
 func (c *doraAPIClient) QuoteAssetID(ctx context.Context, orderBookID string) (string, error) {
-	return c.getOrderBookAssetID(ctx, orderBookID, "quote asset",
-		func(data *doraclient.OrderBook) string { return data.QuoteAssetId })
+	book, err := c.orderBook(ctx, orderBookID)
+	if err != nil {
+		return "", err
+	}
+	if book.QuoteAssetId == "" {
+		return "", fmt.Errorf("get order book %s: missing quote asset ID", orderBookID)
+	}
+	return book.QuoteAssetId, nil
 }
 
-func (c *doraAPIClient) getOrderBookAssetID(ctx context.Context, orderBookID, fieldName string, getID func(*doraclient.OrderBook) string) (string, error) { //nolint:lll
+// orderBook returns the cached OrderBook for the given ID, fetching
+// from DORA on first use. The mapping is stable for the lifetime of
+// the order book, so a single round-trip is enough.
+func (c *doraAPIClient) orderBook(ctx context.Context, orderBookID string) (*doraclient.OrderBook, error) {
 	if c == nil || c.client == nil {
-		return "", errors.New("DORA client is not configured")
+		return nil, errors.New("DORA client is not configured")
 	}
 	if c.apiKey == "" {
-		return "", errors.New("user API key is not configured")
+		return nil, errors.New("user API key is not configured")
 	}
+
+	// Fast path: read lock.
+	c.orderBookMu.RLock()
+	cached, ok := c.orderBookByID[orderBookID]
+	c.orderBookMu.RUnlock()
+	if ok {
+		return cached, nil
+	}
+
+	// Slow path: upgrade to write lock and re-check.
+	c.orderBookMu.Lock()
+	defer c.orderBookMu.Unlock()
+	if cached, ok := c.orderBookByID[orderBookID]; ok {
+		return cached, nil
+	}
+
 	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
 		"apiKey": {Key: c.apiKey},
 	})
 	resp, _, err := c.client.DefaultAPI.GetOrderbookById(authCtx, orderBookID).Execute() //nolint:bodyclose
 	if err != nil {
-		return "", fmt.Errorf("get order book %s: %w", orderBookID, err)
+		return nil, fmt.Errorf("get order book %s: %w", orderBookID, err)
 	}
 	if resp == nil || resp.Data == nil {
-		return "", fmt.Errorf("get order book %s: missing response data", orderBookID)
+		return nil, fmt.Errorf("get order book %s: missing response data", orderBookID)
 	}
-	id := getID(resp.Data)
-	if id == "" {
-		return "", fmt.Errorf("get order book %s: missing %s ID", orderBookID, fieldName)
+	if c.orderBookByID == nil {
+		c.orderBookByID = make(map[string]*doraclient.OrderBook)
 	}
-	return id, nil
+	c.orderBookByID[orderBookID] = resp.Data
+	return resp.Data, nil
 }
 
 // userID returns the cached user ID, fetching it from DORA on first

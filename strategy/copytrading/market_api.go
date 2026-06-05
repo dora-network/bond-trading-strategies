@@ -32,6 +32,14 @@ type doraAPIClient struct {
 	// RWMutex: many concurrent readers, one writer (the first fetch).
 	userIDMu     sync.RWMutex
 	cachedUserID string
+
+	// quoteAssetByBook caches the quote (cash) asset ID for each
+	// order book, fetched on first use. The mapping is stable for
+	// the life of the order book, so a single round-trip per book
+	// is enough. Same RWMutex + double-checked pattern as the user
+	// ID cache above.
+	quoteAssetMu     sync.RWMutex
+	quoteAssetByBook map[string]string
 }
 
 const (
@@ -182,7 +190,9 @@ func (c *doraAPIClient) GetAssetPosition(ctx context.Context, assetID string) (
 
 // QuoteAssetID returns the quote (cash) asset ID for the given order
 // book. Used to know which balance to size an order against — see
-// balanceAssetFor in strategy.go for the rule.
+// balanceAssetFor in strategy.go for the rule. Cached for the
+// lifetime of the client; the order book → quote asset mapping is
+// stable.
 func (c *doraAPIClient) QuoteAssetID(ctx context.Context, orderBookID string) (string, error) {
 	if c == nil || c.client == nil {
 		return "", errors.New("DORA client is not configured")
@@ -190,6 +200,22 @@ func (c *doraAPIClient) QuoteAssetID(ctx context.Context, orderBookID string) (s
 	if c.apiKey == "" {
 		return "", errors.New("API_KEY is not configured")
 	}
+
+	// Fast path: read lock.
+	c.quoteAssetMu.RLock()
+	cached, ok := c.quoteAssetByBook[orderBookID]
+	c.quoteAssetMu.RUnlock()
+	if ok {
+		return cached, nil
+	}
+
+	// Slow path: upgrade to write lock and re-check.
+	c.quoteAssetMu.Lock()
+	defer c.quoteAssetMu.Unlock()
+	if cached, ok := c.quoteAssetByBook[orderBookID]; ok {
+		return cached, nil
+	}
+
 	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
 		"apiKeyAuthHeader": {
 			Key:    c.apiKey,
@@ -206,6 +232,10 @@ func (c *doraAPIClient) QuoteAssetID(ctx context.Context, orderBookID string) (s
 	if resp.Data.QuoteAssetId == "" {
 		return "", fmt.Errorf("get order book %s: missing quote asset ID", orderBookID)
 	}
+	if c.quoteAssetByBook == nil {
+		c.quoteAssetByBook = make(map[string]string)
+	}
+	c.quoteAssetByBook[orderBookID] = resp.Data.QuoteAssetId
 	return resp.Data.QuoteAssetId, nil
 }
 
