@@ -8,7 +8,7 @@
 CREATE TABLE IF NOT EXISTS strategy_backtest_trades (
   id BIGSERIAL PRIMARY KEY,
   backtest_id UUID NOT NULL,
-  time TIMESTAMPTZ NOT NULL,
+  time TIMESTAMP NOT NULL,
   bond_id UUID,
   signal TEXT NOT NULL,
   price NUMERIC(42,18),
@@ -31,8 +31,8 @@ CREATE INDEX idx_strategy_backtest_trades_lookup
 CREATE TABLE IF NOT EXISTS strategy_backtest_closed_trades (
   id BIGSERIAL PRIMARY KEY,
   backtest_id UUID NOT NULL,
-  open_time TIMESTAMPTZ NOT NULL,
-  close_time TIMESTAMPTZ NOT NULL,
+  open_time TIMESTAMP NOT NULL,
+  close_time TIMESTAMP NOT NULL,
   bond_id UUID,
   open_signal TEXT NOT NULL,
   close_signal TEXT NOT NULL,
