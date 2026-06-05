@@ -109,36 +109,96 @@ func TestFromGlobalPosition(t *testing.T) {
 	tests := []struct {
 		name     string
 		side     doraclient.Side
+		current  positionDirection
 		leverage decimal.Decimal
 		want     bool
 	}{
+		// Closes: never need DORA leverage, regardless of cfg.Leverage.
 		{
-			name:     "long, no leverage → global",
-			side:     doraclient.Side("buy"),
+			name:     "SELL closing a long → global (close)",
+			side:     doraclient.SIDE_SELL,
+			current:  positionLong,
 			leverage: decimal.MustParse("1.0"),
 			want:     true,
 		},
 		{
-			name:     "long, zero leverage → global (degenerate)",
-			side:     doraclient.Side("buy"),
-			leverage: decimal.Zero,
+			name:     "SELL closing a long, with leverage → global (close)",
+			side:     doraclient.SIDE_SELL,
+			current:  positionLong,
+			leverage: decimal.MustParse("2.0"),
 			want:     true,
 		},
 		{
-			name:     "long, leveraged → isolated",
-			side:     doraclient.Side("buy"),
+			name:     "BUY closing a short → global (close)",
+			side:     doraclient.SIDE_BUY,
+			current:  positionShort,
+			leverage: decimal.MustParse("1.0"),
+			want:     true,
+		},
+		{
+			name:     "BUY closing a short, with leverage → global (close)",
+			side:     doraclient.SIDE_BUY,
+			current:  positionShort,
+			leverage: decimal.MustParse("2.0"),
+			want:     true,
+		},
+
+		// Opens of a long: fromGlobal depends on leverage.
+		{
+			name:     "BUY opening a long, no leverage → global",
+			side:     doraclient.SIDE_BUY,
+			current:  positionFlat,
+			leverage: decimal.MustParse("1.0"),
+			want:     true,
+		},
+		{
+			name:     "BUY opening a long, leveraged → isolated",
+			side:     doraclient.SIDE_BUY,
+			current:  positionFlat,
 			leverage: decimal.MustParse("2.0"),
 			want:     false,
 		},
 		{
-			name:     "short, no leverage → isolated (shorting requires leverage)",
-			side:     doraclient.Side("sell"),
+			name:     "BUY extending a long, no leverage → global",
+			side:     doraclient.SIDE_BUY,
+			current:  positionLong,
+			leverage: decimal.MustParse("1.0"),
+			want:     true,
+		},
+		{
+			name:     "BUY extending a long, leveraged → isolated",
+			side:     doraclient.SIDE_BUY,
+			current:  positionLong,
+			leverage: decimal.MustParse("2.0"),
+			want:     false,
+		},
+
+		// Opens/extends of a short: always need DORA leverage.
+		{
+			name:     "SELL opening a short, no leverage → isolated (shorting requires leverage)",
+			side:     doraclient.SIDE_SELL,
+			current:  positionFlat,
 			leverage: decimal.MustParse("1.0"),
 			want:     false,
 		},
 		{
-			name:     "short, leveraged → isolated",
-			side:     doraclient.Side("sell"),
+			name:     "SELL opening a short, leveraged → isolated",
+			side:     doraclient.SIDE_SELL,
+			current:  positionFlat,
+			leverage: decimal.MustParse("2.0"),
+			want:     false,
+		},
+		{
+			name:     "SELL extending a short, no leverage → isolated",
+			side:     doraclient.SIDE_SELL,
+			current:  positionShort,
+			leverage: decimal.MustParse("1.0"),
+			want:     false,
+		},
+		{
+			name:     "SELL extending a short, leveraged → isolated",
+			side:     doraclient.SIDE_SELL,
+			current:  positionShort,
 			leverage: decimal.MustParse("2.0"),
 			want:     false,
 		},
@@ -148,7 +208,35 @@ func TestFromGlobalPosition(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, fromGlobalPosition(tt.side, tt.leverage))
+			require.Equal(t, tt.want, fromGlobalPosition(tt.side, tt.current, tt.leverage))
+		})
+	}
+}
+
+func TestInverseLeverage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		leverage decimal.Decimal
+		want     string
+	}{
+		{name: "leverage 1.0 → 1.0", leverage: decimal.MustParse("1.0"), want: "1"},
+		{name: "leverage 2.0 → 0.5", leverage: decimal.MustParse("2.0"), want: "0.5"},
+		{name: "leverage 3.0 → 0.333...", leverage: decimal.MustParse("3.0"), want: "0.3333333333333333333"},
+		{name: "leverage 0 → 1 (degenerate)", leverage: decimal.Zero, want: "1"},
+		{name: "leverage 0.5 → 1 (degenerate, only leverage>1 triggers division)", leverage: decimal.MustParse("0.5"), want: "1"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inverse := decimal.One
+			if tt.leverage.IsPos() && tt.leverage.Cmp(decimal.One) > 0 {
+				inverse, _ = decimal.One.Quo(tt.leverage)
+			}
+			require.True(t, inverse.Equal(decimal.MustParse(tt.want)),
+				"expected %s, got %s", tt.want, inverse)
 		})
 	}
 }

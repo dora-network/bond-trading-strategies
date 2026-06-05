@@ -162,18 +162,29 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		return nil
 	}
 
-	// Determine side
+	// Determine side. The trade stream sends lowercase ("buy"/"sell");
+	// DORA's API expects the typed uppercase constants.
 	var side doraclient.Side
 	if trade.Side == "buy" {
-		side = doraclient.Side("buy")
+		side = doraclient.SIDE_BUY
 	} else {
-		side = doraclient.Side("sell")
+		side = doraclient.SIDE_SELL
 	}
 
-	// DORA's from_global_position flag is true only for unleveraged
-	// longs. Shorts always need isolated margin, and leveraged longs
-	// need it too so DORA can scope margin to the order's leverage.
-	fromGlobal := fromGlobalPosition(side, s.cfg.Leverage)
+	// DORA's from_global_position flag depends on whether this order
+	// closes/reduces an existing position (no leverage needed) or
+	// opens/extends a position (leverage rules apply).
+	fromGlobal := fromGlobalPosition(side, positionForAsset(portfolio, trade.AssetID.String()), s.cfg.Leverage)
+
+	// DORA's inverse_leverage is 1/leverage. DORA uses it to verify
+	// our balance plus the implied borrow is sufficient to cover the
+	// (client-side pre-leveraged) orderSize. When leverage is 1 (no
+	// leverage), inverse_leverage is 1.0; when leverage is 0
+	// (degenerate), treat as 1.
+	inverseLeverage := decimal.One
+	if s.cfg.Leverage.IsPos() && s.cfg.Leverage.Cmp(decimal.One) > 0 {
+		inverseLeverage, _ = decimal.One.Quo(s.cfg.Leverage)
+	}
 
 	// Place market order
 	err = s.marketAPI.CreateMarketOrder(
@@ -181,7 +192,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		trade.OrderBookID.String(),
 		side,
 		orderSize,
-		decimal.One,
+		inverseLeverage,
 		fromGlobal,
 	)
 	if err != nil {
@@ -198,13 +209,73 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	return nil
 }
 
-// fromGlobalPosition reports whether a DORA order with the given side and
-// strategy-level leverage should use DORA's global (cross-margin) position
-// pool. It is true only for unleveraged longs; shorts and leveraged longs
-// must use isolated margin so DORA can scope margin to the order.
-func fromGlobalPosition(side doraclient.Side, leverage decimal.Decimal) bool {
+// positionDirection is the net direction of the bot's holdings for a given
+// asset, derived from the portfolio by summing (Available - Borrowed)
+// across all accounts.
+type positionDirection int
+
+const (
+	positionFlat positionDirection = iota
+	positionLong
+	positionShort
+)
+
+// positionForAsset returns the net position direction for an asset by
+// summing (Available - Borrowed) across all portfolio accounts. A positive
+// net is a long, a negative net is a short, zero is flat. Isolated and
+// global accounts are both included; for the copytrading bot the order
+// book is implied by the asset, so the net across all accounts is the
+// right signal.
+func positionForAsset(portfolio *doraclient.AccountPortfolioV2, assetID string) positionDirection {
+	if portfolio == nil {
+		return positionFlat
+	}
+	for _, assetMap := range portfolio.GetAccounts() {
+		account, ok := assetMap[assetID]
+		if !ok {
+			continue
+		}
+		available, _ := decimal.Parse(account.Available)
+		borrowed, _ := decimal.Parse(account.Borrowed)
+		net, _ := available.Sub(borrowed)
+		if net.IsPos() {
+			return positionLong
+		}
+		if net.IsNeg() {
+			return positionShort
+		}
+	}
+	return positionFlat
+}
+
+// fromGlobalPosition reports whether a DORA order with the given side
+// and current asset position should use DORA's global (cross-margin)
+// position pool.
+//
+// The flag is true when the order doesn't need DORA's leverage
+// mechanism. That happens for closing trades (any side that reduces
+// an existing position) and for opens of a long with no strategy-level
+// leverage. Shorts and leveraged longs need isolated margin so DORA
+// can scope margin to the order.
+func fromGlobalPosition(side doraclient.Side, current positionDirection, leverage decimal.Decimal) bool {
+	// Closes never need leverage.
+	if current == positionLong && side == doraclient.SIDE_SELL {
+		return true
+	}
+	if current == positionShort && side == doraclient.SIDE_BUY {
+		return true
+	}
+
+	// Opens/extends. Shorts always need leverage; longs only when
+	// strategy-level leverage > 1.
 	noLeverage := leverage.Cmp(decimal.One) <= 0
-	return side == doraclient.Side("buy") && noLeverage
+	switch side {
+	case doraclient.SIDE_BUY:
+		return noLeverage
+	case doraclient.SIDE_SELL:
+		return false
+	}
+	return false
 }
 
 // calculateAvailableBalance sums the available balance across all accounts and assets.
