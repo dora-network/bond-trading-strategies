@@ -115,7 +115,7 @@ func TestFromGlobalPosition(t *testing.T) {
 		want             bool
 	}{
 		// Closes: fromGlobal mirrors the IsGlobal of the account
-		// holding the existing position.
+		// holding the existing position. Leverage is irrelevant here.
 		{
 			name:             "SELL closing a long in global account → global",
 			side:             doraclient.SIDE_SELL,
@@ -165,7 +165,9 @@ func TestFromGlobalPosition(t *testing.T) {
 			want:             false,
 		},
 
-		// Opens of a long: fromGlobal depends on leverage.
+		// Opens/extends: fromGlobal depends on leverage only.
+		// (The leverage rule: leverage ≤ 1 longs → global, leverage ≤ 1
+		// shorts → isolated, leverage > 1 all → isolated.)
 		{
 			name:             "BUY opening a long, no leverage → global",
 			side:             doraclient.SIDE_BUY,
@@ -198,8 +200,6 @@ func TestFromGlobalPosition(t *testing.T) {
 			positionOnGlobal: true,
 			want:             false,
 		},
-
-		// Opens/extends of a short: always need DORA leverage.
 		{
 			name:             "SELL opening a short, no leverage → isolated (shorting requires leverage)",
 			side:             doraclient.SIDE_SELL,

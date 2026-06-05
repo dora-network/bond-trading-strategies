@@ -154,9 +154,11 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		side = doraclient.SIDE_SELL
 	}
 
-	// Fetch the current position on the traded asset. Needed before
-	// we can decide from_global_position (and which balance to size
-	// the order from).
+	// Fetch the current position on the traded asset. Needed to:
+	//   1. Decide if the order closes an existing position
+	//      (affects fromGlobalPosition for the close path).
+	//   2. Pick which balance to size the order from (closes look at
+	//      the bond; opens/extends look at USD).
 	available, borrowed, err := s.positionForAsset(ctx, trade.AssetID.String())
 	if err != nil {
 		return fmt.Errorf("position for asset %s: %w", trade.AssetID, err)
@@ -301,17 +303,17 @@ func balanceAssetFor(side doraclient.Side, current positionDirection, bondAssetI
 //
 // The rule is two-part:
 //
-//   - Closing trades (Long+SELL or Short+BUY): fromGlobal mirrors the
-//     IsGlobal flag of the account that holds the existing position.
-//     A close on the global account uses the global pool
-//     (fromGlobal=true); a close on an isolated account uses
-//     isolated margin (fromGlobal=false). The caller resolves
-//     positionOnGlobal from the portfolio before calling this
-//     function.
+//   - Closes (Long+SELL or Short+BUY): fromGlobal mirrors the
+//     IsGlobal flag of the account that holds the existing position
+//     (positionOnGlobal). A close on the global account uses the
+//     global pool (fromGlobal=true); a close on an isolated account
+//     uses isolated margin (fromGlobal=false). The caller resolves
+//     positionOnGlobal from the portfolio.
 //
-//   - Opens/extends: long with no strategy-level leverage uses the
-//     global pool (fromGlobal=true); leveraged longs and all shorts
-//     use isolated margin (fromGlobal=false).
+//   - Opens/extends: long with no leverage → global (true);
+//     leveraged long or any short → isolated (false). This is
+//     purely a function of (side, leverage) — the position doesn't
+//     matter because there's nothing to close.
 func fromGlobalPosition(side doraclient.Side, current positionDirection, leverage decimal.Decimal, positionOnGlobal bool) bool {
 	closesLong := current == positionLong && side == doraclient.SIDE_SELL
 	closesShort := current == positionShort && side == doraclient.SIDE_BUY
