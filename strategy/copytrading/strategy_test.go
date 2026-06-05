@@ -240,3 +240,84 @@ func TestInverseLeverage(t *testing.T) {
 		})
 	}
 }
+
+func TestAvailableBalanceFor(t *testing.T) {
+	t.Parallel()
+
+	assetA := uuid.New().String()
+	assetB := uuid.New().String()
+
+	// Build a portfolio with both a global and an isolated account
+	// for assetA, plus a global account for assetB. IsGlobal is
+	// pointer-typed in DORA's model; we set it explicitly.
+	yes := true
+	no := false
+	portfolio := &doraclient.AccountPortfolioV2{
+		Accounts: map[string]map[string]doraclient.AccountV2{
+			"global-A": {
+				assetA: {AssetId: assetA, IsGlobal: &yes, Available: "1000"},
+			},
+			"isolated-A": {
+				assetA: {AssetId: assetA, IsGlobal: &no, Available: "250"},
+			},
+			"global-B": {
+				assetB: {AssetId: assetB, IsGlobal: &yes, Available: "777"},
+			},
+		},
+	}
+
+	s := New(Config{}) // strategy shell — we only call the method, no state needed
+
+	tests := []struct {
+		name       string
+		assetID    string
+		fromGlobal bool
+		want       string
+	}{
+		{
+			name:       "fromGlobal=true picks global account for asset",
+			assetID:    assetA,
+			fromGlobal: true,
+			want:       "1000",
+		},
+		{
+			name:       "fromGlobal=false picks isolated account for asset",
+			assetID:    assetA,
+			fromGlobal: false,
+			want:       "250",
+		},
+		{
+			name:       "fromGlobal=false with no isolated account falls back to global",
+			assetID:    assetB,
+			fromGlobal: false,
+			want:       "777",
+		},
+		{
+			name:       "unknown asset returns zero",
+			assetID:    uuid.New().String(),
+			fromGlobal: true,
+			want:       "0",
+		},
+		{
+			name:       "nil portfolio returns zero",
+			assetID:    assetA,
+			fromGlobal: true,
+			want:       "0",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got decimal.Decimal
+			if tt.name == "nil portfolio returns zero" {
+				got = s.availableBalanceFor(nil, tt.assetID, tt.fromGlobal)
+			} else {
+				got = s.availableBalanceFor(portfolio, tt.assetID, tt.fromGlobal)
+			}
+			require.True(t, got.Equal(decimal.MustParse(tt.want)),
+				"expected %s, got %s", tt.want, got)
+		})
+	}
+}

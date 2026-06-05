@@ -145,28 +145,6 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		return nil
 	}
 
-	// Query DORA for available balance (used to size the order) and
-	// for the current position on the asset (used to decide
-	// from_global_position).
-	portfolio, err := s.marketAPI.GetPortfolioV2(ctx)
-	if err != nil {
-		return fmt.Errorf("get portfolio: %w", err)
-	}
-	availableBalance := s.calculateAvailableBalance(portfolio)
-
-	available, borrowed, err := s.positionForAsset(ctx, trade.AssetID.String())
-	if err != nil {
-		return fmt.Errorf("position for asset %s: %w", trade.AssetID, err)
-	}
-
-	// Calculate order size: availableBalance * percentageOfAvailable * leverage
-	orderSize := calculateOrderSize(availableBalance, s.cfg.PercentageOfAvailable, s.cfg.Leverage, s.cfg.MinOrderSize, s.cfg.MaxOrderSize)
-
-	if orderSize.IsZero() || orderSize.IsNeg() {
-		s.log.Info("skipping trade: calculated order size is zero or negative", "order_size", orderSize)
-		return nil
-	}
-
 	// Determine side. The trade stream sends lowercase ("buy"/"sell");
 	// DORA's API expects the typed uppercase constants.
 	var side doraclient.Side
@@ -176,10 +154,39 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		side = doraclient.SIDE_SELL
 	}
 
+	// Fetch the current position on the traded asset. Needed before
+	// we can decide from_global_position (and which account to size
+	// the order from).
+	available, borrowed, err := s.positionForAsset(ctx, trade.AssetID.String())
+	if err != nil {
+		return fmt.Errorf("position for asset %s: %w", trade.AssetID, err)
+	}
+
 	// DORA's from_global_position flag depends on whether this order
 	// closes/reduces an existing position (no leverage needed) or
 	// opens/extends a position (leverage rules apply).
 	fromGlobal := fromGlobalPosition(side, positionForAsset(available, borrowed), s.cfg.Leverage)
+
+	// Now size the order against the appropriate account's
+	// available balance. The account depends on fromGlobal:
+	//   - fromGlobal=true: use the global account.
+	//   - fromGlobal=false: use the isolated account for the asset.
+	//     If no isolated account exists yet (first leveraged order),
+	//     fall back to the global account; the isolated one will be
+	//     created by DORA on first order.
+	portfolio, err := s.marketAPI.GetPortfolioV2(ctx)
+	if err != nil {
+		return fmt.Errorf("get portfolio: %w", err)
+	}
+	availableBalance := s.availableBalanceFor(portfolio, trade.AssetID.String(), fromGlobal)
+
+	// Calculate order size: availableBalance * percentageOfAvailable * leverage
+	orderSize := calculateOrderSize(availableBalance, s.cfg.PercentageOfAvailable, s.cfg.Leverage, s.cfg.MinOrderSize, s.cfg.MaxOrderSize)
+
+	if orderSize.IsZero() || orderSize.IsNeg() {
+		s.log.Info("skipping trade: calculated order size is zero or negative", "order_size", orderSize)
+		return nil
+	}
 
 	// DORA's inverse_leverage is 1/leverage. DORA uses it to verify
 	// our balance plus the implied borrow is sufficient to cover the
@@ -277,27 +284,60 @@ func fromGlobalPosition(side doraclient.Side, current positionDirection, leverag
 	return false
 }
 
-// calculateAvailableBalance sums the available balance across all accounts and assets.
-func (s *Strategy) calculateAvailableBalance(portfolio *doraclient.AccountPortfolioV2) decimal.Decimal {
+// availableBalanceFor returns the available balance from the
+// appropriate account for the traded asset, given the
+// fromGlobalPosition rule:
+//   - fromGlobal=true:  use the global account (one per asset).
+//   - fromGlobal=false: use the isolated account for the asset. If
+//     no isolated account exists yet (e.g. the first leveraged
+//     order on this asset — DORA creates it on first order), fall
+//     back to the global account.
+//
+// The available balance is the account's Available field for the
+// matched asset, summed if multiple matching accounts exist.
+func (s *Strategy) availableBalanceFor(portfolio *doraclient.AccountPortfolioV2, assetID string, fromGlobal bool) decimal.Decimal {
 	if portfolio == nil {
 		return decimal.Zero
 	}
-
 	accounts := portfolio.GetAccounts()
 	if len(accounts) == 0 {
 		return decimal.Zero
 	}
 
-	total := decimal.Zero
-	for _, accountMap := range accounts {
-		for _, asset := range accountMap {
-			available, err := decimal.Parse(asset.Available)
-			if err == nil {
-				total, _ = total.Add(available)
-			}
-		}
+	// First pass: try the desired account type.
+	if total := sumAvailableByAccountType(accounts, fromGlobal, assetID); !total.IsZero() {
+		return total
 	}
 
+	// Fallback: if the desired type isn't found and we were looking
+	// for an isolated account, use the global account. The isolated
+	// one will be created by the first leveraged order.
+	if !fromGlobal {
+		return sumAvailableByAccountType(accounts, true, assetID)
+	}
+	return decimal.Zero
+}
+
+func sumAvailableByAccountType(
+	accounts map[string]map[string]doraclient.AccountV2,
+	wantGlobal bool,
+	assetID string,
+) decimal.Decimal {
+	var total decimal.Decimal
+	for _, assetMap := range accounts {
+		account, ok := assetMap[assetID]
+		if !ok {
+			continue
+		}
+		if account.GetIsGlobal() != wantGlobal {
+			continue
+		}
+		available, err := decimal.Parse(account.Available)
+		if err != nil {
+			continue
+		}
+		total, _ = total.Add(available)
+	}
 	return total
 }
 
