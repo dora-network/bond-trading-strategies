@@ -229,7 +229,7 @@ test_valid_3day() {
     followed_trades=$(psql "$DATABASE_URL" -tA -c \
         "SELECT COUNT(*) FROM trades_history WHERE user_id = '019c4d37-311e-7a2f-8d58-f17c39170865' AND created_at >= '2026-05-30T00:00:00Z' AND created_at <= '2026-06-02T00:00:00Z';")
     following_records=$(psql "$DATABASE_URL" -tA -c \
-        "SELECT jsonb_array_length(result->'trade_records') FROM strategy_backtests WHERE id = '$id';")
+        "SELECT COUNT(*) FROM strategy_backtest_trades WHERE backtest_id = '$id';")
 
     ok "$name: followed_trader_trades=$followed_trades, following_trader_records=$following_records, pnl=$pnl, wins=$wins, losses=$losses, elapsed=${elapsed}s (id=$id)"
 }
