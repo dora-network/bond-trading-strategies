@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/govalues/decimal"
@@ -16,14 +17,19 @@ import (
 
 type marketAPIClient interface {
 	GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error)
-	SelfUserID(ctx context.Context) (string, error)
-	GetAssetPosition(ctx context.Context, accountID, assetID string) (decimal.Decimal, decimal.Decimal, error)
+	GetAssetPosition(ctx context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error)
 	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool) error //nolint:lll
 }
 
 type doraAPIClient struct {
 	apiKey string
 	client *doraclient.APIClient
+
+	// cachedUserID is the bot's DORA user ID, fetched from GetUserSelf
+	// on first use and cached for the lifetime of the client. It's
+	// stable for the API key, so a single round-trip is enough.
+	userIDMu     sync.Mutex
+	cachedUserID string
 }
 
 const (
@@ -76,7 +82,15 @@ func (c *doraAPIClient) GetPortfolioV2(ctx context.Context) (*doraclient.Account
 	return portfolio, nil
 }
 
-func (c *doraAPIClient) SelfUserID(ctx context.Context) (string, error) {
+// userID returns the cached user ID, fetching it from DORA on first
+// use. The user ID is stable for the API key lifetime, so a single
+// round-trip is sufficient.
+func (c *doraAPIClient) userID(ctx context.Context) (string, error) {
+	c.userIDMu.Lock()
+	defer c.userIDMu.Unlock()
+	if c.cachedUserID != "" {
+		return c.cachedUserID, nil
+	}
 	if c == nil || c.client == nil {
 		return "", errors.New("DORA client is not configured")
 	}
@@ -99,15 +113,15 @@ func (c *doraAPIClient) SelfUserID(ctx context.Context) (string, error) {
 	if resp.Data.Id == "" {
 		return "", errors.New("get user self: missing user ID")
 	}
-	return resp.Data.Id, nil
+	c.cachedUserID = resp.Data.Id
+	return c.cachedUserID, nil
 }
 
 // GetAssetPosition returns the (available, borrowed) position for the
 // given asset on the bot's DORA account, sourced from
-// GetLedgerPositionsSelf. The caller is expected to fetch SelfUserID
-// first and pass it as accountID; this matches the meanreversion
-// strategy's convention.
-func (c *doraAPIClient) GetAssetPosition(ctx context.Context, accountID, assetID string) (
+// GetLedgerPositionsSelf. Resolves the user ID once (cached for the
+// lifetime of the client) and looks up the position.
+func (c *doraAPIClient) GetAssetPosition(ctx context.Context, assetID string) (
 	decimal.Decimal, decimal.Decimal, error,
 ) {
 	if c == nil || c.client == nil {
@@ -115,6 +129,10 @@ func (c *doraAPIClient) GetAssetPosition(ctx context.Context, accountID, assetID
 	}
 	if c.apiKey == "" {
 		return decimal.Zero, decimal.Zero, errors.New("API_KEY is not configured")
+	}
+	accountID, err := c.userID(ctx)
+	if err != nil {
+		return decimal.Zero, decimal.Zero, err
 	}
 	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
 		"apiKeyAuthHeader": {

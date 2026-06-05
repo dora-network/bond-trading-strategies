@@ -218,11 +218,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 // for the given asset via GetLedgerPositionsSelf. Returns zeros (no
 // error) when the bot has no position on the asset.
 func (s *Strategy) positionForAsset(ctx context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
-	accountID, err := s.marketAPI.SelfUserID(ctx)
-	if err != nil {
-		return decimal.Zero, decimal.Zero, err
-	}
-	return s.marketAPI.GetAssetPosition(ctx, accountID, assetID)
+	return s.marketAPI.GetAssetPosition(ctx, assetID)
 }
 
 // positionDirection is the net direction of the bot's holdings for a given
