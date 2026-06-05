@@ -1,5 +1,10 @@
 -- Write your migrate up statements here
 
+-- Convention: `created_at` is stored as TIMESTAMP (no time zone) but
+-- every value MUST be written in UTC. The database server's default
+-- timezone is UTC, so pgx reads the wall-clock value back as UTC.
+-- Use TIMESTAMPTZ only if a writer can't guarantee UTC.
+
 CREATE TABLE IF NOT EXISTS trades_history (
   transaction_id UUID NOT NULL PRIMARY KEY,
   order_id UUID NOT NULL,

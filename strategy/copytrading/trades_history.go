@@ -13,6 +13,11 @@ import (
 // Trade is the in-memory representation of a single row in trades_history.
 // It is intentionally decoupled from doraclient.Trade so the simulation
 // does not depend on the DORA client's generated types.
+//
+// Timestamp convention: trades_history.created_at is stored as TIMESTAMP
+// (no time zone). The DB server is UTC and writers write UTC, so the
+// wall-clock value round-trips as UTC. Callers that compare against
+// CreatedAt should use UTC-anchored times.
 
 const streamBatchSize = 1000
 
