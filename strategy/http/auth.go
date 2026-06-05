@@ -81,6 +81,13 @@ func authFromContext(ctx context.Context) (authInfo, bool) {
 	return info, ok
 }
 
+// WithAPIKey returns a context that carries the given API key for DORA
+// authentication. It is intended for server startup code that needs to
+// make DORA API calls outside of an HTTP request context.
+func WithAPIKey(ctx context.Context, apiKey string) context.Context {
+	return context.WithValue(ctx, authContextKey{}, authInfo{APIKey: apiKey})
+}
+
 // doraUserIDFromContext retrieves the DORA user ID stored in ctx by requireAuth.
 // The second return value is false when no user ID is present.
 func doraUserIDFromContext(ctx context.Context) (string, bool) {

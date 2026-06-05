@@ -92,6 +92,13 @@ func WithLogger(log *slog.Logger) func(*Strategy) {
 	}
 }
 
+// WithTradeStream sets the live trade stream for the strategy.
+func WithTradeStream(ts *streams.TradeStream) func(*Strategy) {
+	return func(s *Strategy) {
+		s.tradeStream = ts
+	}
+}
+
 // Backtest runs a backtest simulation for the given time range.
 func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtestResult types.BacktestResult, err error) {
 	if s.backtestStore == nil {
@@ -108,6 +115,9 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 }
 
 func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error {
+	if s.tradeStream == nil {
+		return errors.New("trade stream not configured: use WithTradeStream")
+	}
 	subscriberID, tradeCh := s.tradeStream.Subscribe(s.cfg.FollowedTrader)
 	defer s.tradeStream.Unsubscribe(subscriberID)
 

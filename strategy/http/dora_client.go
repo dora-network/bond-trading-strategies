@@ -47,7 +47,9 @@ type liveDORAClient struct {
 	client *doraclient.APIClient
 }
 
-func newDORAClient() *liveDORAClient {
+// NewDORAClient creates a new DORA HTTP client using the DORA_BASE_URL
+// environment variable (if set) for the server URL.
+func NewDORAClient() *liveDORAClient {
 	cfg := doraclient.NewConfiguration()
 
 	if baseURL := os.Getenv("DORA_BASE_URL"); baseURL != "" {

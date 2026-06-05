@@ -19,6 +19,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 )
@@ -48,6 +49,7 @@ type Handler struct {
 	runStore           RunStore
 	backtestStore      BacktestStore
 	tradesHistoryStore *copytrading.PGTradesHistoryStore
+	tradeStream        *streams.TradeStream
 	encryptionKey      []byte // 32-byte AES-256 key for encrypting API keys at rest
 	mux                *http.ServeMux
 	authedMux          http.Handler
@@ -224,7 +226,7 @@ func (h *Handler) resolveOrderbookAsset(ctx context.Context, orderBookID string)
 
 	client := h.doraClient
 	if client == nil {
-		client = newDORAClient()
+		client = NewDORAClient()
 	}
 
 	orderbooks, err := client.ListOrderBooks(ctx)
@@ -431,7 +433,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		h.log = slog.Default()
 	}
 	if h.strategies == nil {
-		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.log)
+		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.log)
 	}
 
 	h.mux = http.NewServeMux()
@@ -493,6 +495,13 @@ func WithBacktestStore(store BacktestStore) func(*Handler) {
 func WithTradesHistoryStore(store *copytrading.PGTradesHistoryStore) func(*Handler) {
 	return func(h *Handler) {
 		h.tradesHistoryStore = store
+	}
+}
+
+// WithTradeStream sets the live trade stream used by copy-trading runs.
+func WithTradeStream(ts *streams.TradeStream) func(*Handler) {
+	return func(h *Handler) {
+		h.tradeStream = ts
 	}
 }
 
@@ -579,7 +588,7 @@ func (h *Handler) handleDORAOrderBooks(w http.ResponseWriter, r *http.Request) {
 
 	client := h.doraClient
 	if client == nil {
-		client = newDORAClient()
+		client = NewDORAClient()
 	}
 	items, err := client.ListOrderBooks(r.Context())
 	if err != nil {
@@ -617,7 +626,7 @@ func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
 
 	client := h.doraClient
 	if client == nil {
-		client = newDORAClient()
+		client = NewDORAClient()
 	}
 	users, err := client.ListBotUsers(r.Context())
 	if err != nil {
@@ -1503,7 +1512,7 @@ func (h *Handler) resolveDORAUserID(ctx context.Context) (string, error) {
 	}
 	client := h.doraClient
 	if client == nil {
-		client = newDORAClient()
+		client = NewDORAClient()
 	}
 	return client.GetUserID(ctx)
 }
@@ -1567,11 +1576,12 @@ func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, c
 func defaultStrategies(
 	pricesHandler *prices.Handler,
 	tradesHistoryStore *copytrading.PGTradesHistoryStore,
+	tradeStream *streams.TradeStream,
 	log *slog.Logger,
 ) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
-		newCopyTradingDefinition(tradesHistoryStore),
+		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -1679,7 +1689,7 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 	}
 }
 
-func newCopyTradingDefinition(tradesHistoryStore *copytrading.PGTradesHistoryStore) StrategyDefinition {
+func newCopyTradingDefinition(tradesHistoryStore *copytrading.PGTradesHistoryStore, tradeStream *streams.TradeStream) StrategyDefinition {
 	return StrategyDefinition{
 		Type:        "copytrading",
 		Status:      strategyStatusAvailable,
@@ -1742,6 +1752,9 @@ func newCopyTradingDefinition(tradesHistoryStore *copytrading.PGTradesHistorySto
 			opts := []func(*copytrading.Strategy){
 				copytrading.WithLogger(slog.Default()),
 				copytrading.WithBacktestStore(tradesHistoryStore),
+			}
+			if capability == string(capabilityRun) && tradeStream != nil {
+				opts = append(opts, copytrading.WithTradeStream(tradeStream))
 			}
 			if tradeWriter != nil {
 				opts = append(opts, copytrading.WithBacktestWriter(tradeWriter))

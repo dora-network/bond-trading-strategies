@@ -20,6 +20,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/streams"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	flag "github.com/spf13/pflag"
 )
@@ -113,6 +114,31 @@ func main() {
 		}
 	}()
 
+	// Start the live trade stream for copy-trading runs.
+	tradeStream := streams.NewTradeStream()
+	if *apiKey != "" {
+		doraClient := strategyhttp.NewDORAClient()
+		obCtx := strategyhttp.WithAPIKey(ctx, *apiKey)
+		orderbooks, err := doraClient.ListOrderBooks(obCtx)
+		if err != nil {
+			slog.Error("failed to list order books for trade stream", "err", err)
+		} else {
+			openBooks := make([]uuid.UUID, 0, len(orderbooks))
+			for _, ob := range orderbooks {
+				if ob.Status == "OPEN" {
+					openBooks = append(openBooks, uuid.MustParse(ob.ID))
+				}
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := tradeStream.Start(ctx, *wsURL, *apiKey, openBooks); err != nil && !errors.Is(err, context.Canceled) {
+					errCh <- err
+				}
+			}()
+		}
+	}
+
 	log := slog.With("service", "strategy-server")
 	service := strategycore.NewService(strategycore.WithBaseContext(ctx))
 	handlerImpl := strategyhttp.NewHandler(
@@ -121,6 +147,7 @@ func main() {
 		strategyhttp.WithBacktestStore(strategyhttp.NewPGBacktestStore(pool)),
 		strategyhttp.WithTradesHistoryStore(copytrading.NewPGTradesHistoryStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
+		strategyhttp.WithTradeStream(tradeStream),
 		strategyhttp.WithLogger(log),
 		strategyhttp.WithEncryptionKey(encryptionKey),
 	)
