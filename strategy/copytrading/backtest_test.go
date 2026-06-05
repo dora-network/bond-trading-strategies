@@ -113,10 +113,10 @@ func TestSimulate_BuyOpensLong(t *testing.T) {
 	require.Len(t, records, 1)
 	rec := records[0]
 	require.Equal(t, types.SignalBuy, rec.Signal)
-	require.Equal(t, "10", rec.Quantity.String())
-	require.Equal(t, "1000", rec.OrderSize.String())
+	require.Equal(t, "1", rec.Quantity.String())
+	require.Equal(t, "100", rec.OrderSize.String())
 	require.Equal(t, "0", rec.Cash.String())
-	require.Equal(t, "10", rec.OpenPosition.String())
+	require.Equal(t, "1", rec.OpenPosition.String())
 
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
@@ -147,12 +147,12 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
 	ct := closed[0]
-	require.Equal(t, "10", ct.Quantity.String())
+	require.Equal(t, "1", ct.Quantity.String())
 	require.Equal(t, "100", ct.EntryPrice.String())
 	require.Equal(t, "120", ct.ExitPrice.String())
-	require.Equal(t, "200", ct.PnL.String())
+	require.Equal(t, "20", ct.PnL.String())
 
-	require.Equal(t, "200", res.GetTotalPnL().String())
+	require.Equal(t, "20", res.GetTotalPnL().String())
 	require.Equal(t, 1, res.GetWinCount())
 	require.Equal(t, 0, res.GetLossCount())
 
@@ -181,15 +181,15 @@ func TestSimulate_BuyThenPartialSell(t *testing.T) {
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
-	require.Equal(t, "4", closed[0].Quantity.String())
+	require.Equal(t, "0.4", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "150", closed[0].ExitPrice.String())
-	require.Equal(t, "200", closed[0].PnL.String())
+	require.Equal(t, "20.0", closed[0].PnL.String())
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 2)
-	require.Equal(t, "6", records[1].OpenPosition.String())
+	require.Equal(t, "0.6", records[1].OpenPosition.String())
 }
 
 func TestSimulate_MultipleBuysWeightedAvg(t *testing.T) {
@@ -211,7 +211,7 @@ func TestSimulate_MultipleBuysWeightedAvg(t *testing.T) {
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 2)
-	require.Equal(t, "10", records[1].OpenPosition.String())
+	require.Equal(t, "1.0", records[1].OpenPosition.String())
 
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
@@ -237,15 +237,15 @@ func TestSimulate_BuyClosesShort(t *testing.T) {
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
-	require.Equal(t, "4", closed[0].Quantity.String())
+	require.Equal(t, "0.4", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "80", closed[0].ExitPrice.String())
-	require.Equal(t, "80", closed[0].PnL.String())
+	require.Equal(t, "8.0", closed[0].PnL.String())
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 2)
-	require.Equal(t, "-6", records[1].OpenPosition.String())
+	require.Equal(t, "-0.6", records[1].OpenPosition.String())
 }
 
 func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
@@ -267,16 +267,16 @@ func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
-	require.Equal(t, "10", closed[0].Quantity.String())
+	require.Equal(t, "1", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "90", closed[0].ExitPrice.String())
-	require.Equal(t, "100", closed[0].PnL.String())
+	require.Equal(t, "10", closed[0].PnL.String())
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.GreaterOrEqual(t, len(records), 2)
 	last := records[len(records)-1]
-	require.Equal(t, "5", last.OpenPosition.String())
+	require.Equal(t, "0.5", last.OpenPosition.String())
 }
 
 func TestSimulate_SellOpensShort(t *testing.T) {
@@ -298,9 +298,9 @@ func TestSimulate_SellOpensShort(t *testing.T) {
 	require.Len(t, records, 1)
 	rec := records[0]
 	require.Equal(t, types.SignalSell, rec.Signal)
-	require.Equal(t, "10", rec.Quantity.String())
+	require.Equal(t, "1", rec.Quantity.String())
 	require.Equal(t, "0", rec.Cash.String())
-	require.Equal(t, "-10", rec.OpenPosition.String())
+	require.Equal(t, "-1", rec.OpenPosition.String())
 
 	require.True(t, res.GetTotalPnL().IsZero())
 }
@@ -327,7 +327,7 @@ func TestSimulate_WinLossCount(t *testing.T) {
 
 	require.Equal(t, 1, res.GetWinCount())
 	require.Equal(t, 1, res.GetLossCount())
-	require.Equal(t, "300", res.GetTotalPnL().String())
+	require.Equal(t, "30", res.GetTotalPnL().String())
 }
 
 func TestSimulate_MaxDrawdownNonNegative(t *testing.T) {

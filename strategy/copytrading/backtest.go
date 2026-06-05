@@ -20,7 +20,6 @@ const (
 	// tests and zero-value Config literals continue to behave
 	// sensibly.
 	initialBacktestBalance = 10000
-	bondQuantityScale      = 1000
 )
 
 type Backtester struct {
@@ -108,9 +107,6 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 			margin = maxSize
 		}
 	}
-	scale, _ := margin.Quo(decimal.MustNew(bondQuantityScale, 0))
-	scale = scale.Round(0)
-
 	for trade := range ch {
 		select {
 		case <-ctx.Done():
@@ -126,8 +122,7 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 			continue
 		}
 
-		ourQty, _ := trade.Quantity.Mul(scale)
-		ourQty = ourQty.Round(0)
+		ourQty := trade.Quantity
 		tradeID, _ := uuid.Parse(trade.TransactionID)
 
 		var ourSignal types.Signal
