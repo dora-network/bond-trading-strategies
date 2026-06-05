@@ -1190,9 +1190,11 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	// Inject the user's API key into the strategy so it can authenticate with DORA.
 	authInfo, _ := authFromContext(r.Context())
 	if authInfo.APIKey != "" {
-		if withClient, ok := strat.(*meanreversion.Strategy); ok {
-			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))
-			withClientOpts(withClient)
+		switch withClient := strat.(type) {
+		case *meanreversion.Strategy:
+			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))(withClient)
+		case *copytrading.Strategy:
+			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(authInfo.APIKey))(withClient)
 		}
 	}
 
@@ -1479,8 +1481,11 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		if err2 != nil {
 			return fmt.Errorf("decrypt api key for run %s: %w", detail.ID, err2)
 		}
-		if mr, ok := strat.(*meanreversion.Strategy); ok {
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(string(apiKeyDecrypted)))(mr)
+		switch withClient := strat.(type) {
+		case *meanreversion.Strategy:
+			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+		case *copytrading.Strategy:
+			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		}
 	}
 
