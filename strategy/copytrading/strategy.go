@@ -357,7 +357,7 @@ func balanceAssetFor(side doraclient.Side, current positionDirection, bondAssetI
 // and current asset position should use DORA's global (cross-margin)
 // position pool.
 //
-// The rule is two-part:
+// The rule is three-part:
 //
 //   - Closes (Long+SELL or Short+BUY): fromGlobal mirrors the
 //     IsGlobal flag of the account that holds the existing position
@@ -366,10 +366,14 @@ func balanceAssetFor(side doraclient.Side, current positionDirection, bondAssetI
 //     uses isolated margin (fromGlobal=false). The caller resolves
 //     positionOnGlobal from the portfolio.
 //
-//   - Opens/extends: long with no leverage → global (true);
-//     leveraged long or any short → isolated (false). This is
-//     purely a function of (side, leverage) — the position doesn't
-//     matter because there's nothing to close.
+//   - First trade when flat: use global (true). The isolated margin
+//     account for the bond does not exist yet; DORA creates it on
+//     the first leveraged order. Without this, DORA sees a zero
+//     balance in the isolated account and rejects the order with
+//     "insufficient available balance".
+//
+//   - Opens/extends (existing position): long with no leverage →
+//     global (true); leveraged long or any short → isolated (false).
 func fromGlobalPosition(side doraclient.Side, current positionDirection, leverage decimal.Decimal, positionOnGlobal bool) bool {
 	closesLong := current == positionLong && side == doraclient.SIDE_SELL
 	closesShort := current == positionShort && side == doraclient.SIDE_BUY
@@ -377,8 +381,14 @@ func fromGlobalPosition(side doraclient.Side, current positionDirection, leverag
 		return positionOnGlobal
 	}
 
-	// Opens/extends. Shorts always need leverage; longs only when
-	// strategy-level leverage > 1.
+	// First trade when flat: isolated account doesn't exist yet;
+	// use global so DORA checks the global balance.
+	if current == positionFlat {
+		return true
+	}
+
+	// Opens/extends on existing position. Shorts always need
+	// leverage; longs only when strategy-level leverage > 1.
 	noLeverage := leverage.Cmp(decimal.One) <= 0
 	switch side {
 	case doraclient.SIDE_BUY:

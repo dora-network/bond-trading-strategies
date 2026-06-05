@@ -165,25 +165,42 @@ func TestFromGlobalPosition(t *testing.T) {
 			want:             false,
 		},
 
-		// Opens/extends: fromGlobal depends on leverage only.
-		// (The leverage rule: leverage ≤ 1 longs → global, leverage ≤ 1
-		// shorts → isolated, leverage > 1 all → isolated.)
+		// First trade when flat: isolated account doesn't exist yet;
+		// use global so DORA checks the global balance.
 		{
-			name:             "BUY opening a long, no leverage → global",
+			name:             "BUY opening a long, first trade → global",
 			side:             doraclient.SIDE_BUY,
 			current:          positionFlat,
 			leverage:         decimal.MustParse("1.0"),
-			positionOnGlobal: false, // ignored for opens
+			positionOnGlobal: false, // ignored for flat
 			want:             true,
 		},
 		{
-			name:             "BUY opening a long, leveraged → isolated",
+			name:             "BUY opening a long leveraged, first trade → global",
 			side:             doraclient.SIDE_BUY,
 			current:          positionFlat,
 			leverage:         decimal.MustParse("2.0"),
 			positionOnGlobal: false,
-			want:             false,
+			want:             true,
 		},
+		{
+			name:             "SELL opening a short, first trade → global",
+			side:             doraclient.SIDE_SELL,
+			current:          positionFlat,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: false,
+			want:             true,
+		},
+		{
+			name:             "SELL opening a short leveraged, first trade → global",
+			side:             doraclient.SIDE_SELL,
+			current:          positionFlat,
+			leverage:         decimal.MustParse("2.0"),
+			positionOnGlobal: false,
+			want:             true,
+		},
+
+		// Extends on existing position: leverage rules apply.
 		{
 			name:             "BUY extending a long, no leverage → global",
 			side:             doraclient.SIDE_BUY,
@@ -198,22 +215,6 @@ func TestFromGlobalPosition(t *testing.T) {
 			current:          positionLong,
 			leverage:         decimal.MustParse("2.0"),
 			positionOnGlobal: true,
-			want:             false,
-		},
-		{
-			name:             "SELL opening a short, no leverage → isolated (shorting requires leverage)",
-			side:             doraclient.SIDE_SELL,
-			current:          positionFlat,
-			leverage:         decimal.MustParse("1.0"),
-			positionOnGlobal: false,
-			want:             false,
-		},
-		{
-			name:             "SELL opening a short, leveraged → isolated",
-			side:             doraclient.SIDE_SELL,
-			current:          positionFlat,
-			leverage:         decimal.MustParse("2.0"),
-			positionOnGlobal: false,
 			want:             false,
 		},
 		{
