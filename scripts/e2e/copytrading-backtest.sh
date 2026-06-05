@@ -366,8 +366,11 @@ test_window_before_data() {
 test_window_after_data() {
     local name="window_after_data"
     local id
+    # Use a previous-year window that no trader will ever have data
+    # in, so the "outside available data" path is deterministically hit
+    # regardless of the local DB's data freshness.
     id=$(submit_backtest "019c4d37-311e-7a2f-8d58-f17c39170865" \
-        "2026-06-03T12:00:00Z" "2026-06-03T12:01:00Z")
+        "2020-01-01T00:00:00Z" "2020-01-01T00:01:00Z")
     local status
     status=$(wait_for_done "$id" 30)
     if [ "$status" != "failed" ]; then
