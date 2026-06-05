@@ -165,42 +165,25 @@ func TestFromGlobalPosition(t *testing.T) {
 			want:             false,
 		},
 
-		// First trade when flat: isolated account doesn't exist yet;
-		// use global so DORA checks the global balance.
+		// Opens/extends: fromGlobal depends on leverage only.
+		// (The leverage rule: leverage ≤ 1 longs → global, leverage ≤ 1
+		// shorts → isolated, leverage > 1 all → isolated.)
 		{
-			name:             "BUY opening a long, first trade → global",
+			name:             "BUY opening a long, no leverage → global",
 			side:             doraclient.SIDE_BUY,
 			current:          positionFlat,
 			leverage:         decimal.MustParse("1.0"),
-			positionOnGlobal: false, // ignored for flat
+			positionOnGlobal: false, // ignored for opens
 			want:             true,
 		},
 		{
-			name:             "BUY opening a long leveraged, first trade → global",
+			name:             "BUY opening a long, leveraged → isolated",
 			side:             doraclient.SIDE_BUY,
 			current:          positionFlat,
 			leverage:         decimal.MustParse("2.0"),
 			positionOnGlobal: false,
-			want:             true,
+			want:             false,
 		},
-		{
-			name:             "SELL opening a short, first trade → global",
-			side:             doraclient.SIDE_SELL,
-			current:          positionFlat,
-			leverage:         decimal.MustParse("1.0"),
-			positionOnGlobal: false,
-			want:             true,
-		},
-		{
-			name:             "SELL opening a short leveraged, first trade → global",
-			side:             doraclient.SIDE_SELL,
-			current:          positionFlat,
-			leverage:         decimal.MustParse("2.0"),
-			positionOnGlobal: false,
-			want:             true,
-		},
-
-		// Extends on existing position: leverage rules apply.
 		{
 			name:             "BUY extending a long, no leverage → global",
 			side:             doraclient.SIDE_BUY,
@@ -215,6 +198,22 @@ func TestFromGlobalPosition(t *testing.T) {
 			current:          positionLong,
 			leverage:         decimal.MustParse("2.0"),
 			positionOnGlobal: true,
+			want:             false,
+		},
+		{
+			name:             "SELL opening a short, no leverage → isolated (shorting requires leverage)",
+			side:             doraclient.SIDE_SELL,
+			current:          positionFlat,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: false,
+			want:             false,
+		},
+		{
+			name:             "SELL opening a short, leveraged → isolated",
+			side:             doraclient.SIDE_SELL,
+			current:          positionFlat,
+			leverage:         decimal.MustParse("2.0"),
+			positionOnGlobal: false,
 			want:             false,
 		},
 		{
@@ -399,24 +398,30 @@ func TestPositionAccountIsGlobal(t *testing.T) {
 func TestAvailableBalanceFor(t *testing.T) {
 	t.Parallel()
 
-	assetA := uuid.New().String()
-	assetB := uuid.New().String()
+	bondA := uuid.New().String()
+	bondB := uuid.New().String()
+	usd := uuid.New().String()
 
-	// Build a portfolio with both a global and an isolated account
-	// for assetA, plus a global account for assetB. IsGlobal is
-	// pointer-typed in DORA's model; we set it explicitly.
+	// Build a portfolio with:
+	//   - Global account: bondA=1000, bondB=777
+	//   - Isolated account for bondA: bondA=50, usd=250
+	//   - Isolated account for bondB: bondB=30, usd=500
+	// IsGlobal is pointer-typed in DORA's model.
 	yes := true
 	no := false
 	portfolio := &doraclient.AccountPortfolioV2{
 		Accounts: map[string]map[string]doraclient.AccountV2{
-			"global-A": {
-				assetA: {AssetId: assetA, IsGlobal: &yes, Available: "1000"},
+			"global": {
+				bondA: {AssetId: bondA, IsGlobal: &yes, Available: "1000"},
+				bondB: {AssetId: bondB, IsGlobal: &yes, Available: "777"},
 			},
 			"isolated-A": {
-				assetA: {AssetId: assetA, IsGlobal: &no, Available: "250"},
+				bondA: {AssetId: bondA, IsGlobal: &no, Available: "50"},
+				usd:   {AssetId: usd, IsGlobal: &no, Available: "250"},
 			},
-			"global-B": {
-				assetB: {AssetId: assetB, IsGlobal: &yes, Available: "777"},
+			"isolated-B": {
+				bondB: {AssetId: bondB, IsGlobal: &no, Available: "30"},
+				usd:   {AssetId: usd, IsGlobal: &no, Available: "500"},
 			},
 		},
 	}
@@ -424,40 +429,53 @@ func TestAvailableBalanceFor(t *testing.T) {
 	s := New(Config{}) // strategy shell — we only call the method, no state needed
 
 	tests := []struct {
-		name       string
-		assetID    string
-		fromGlobal bool
-		want       string
+		name         string
+		balanceAsset string
+		bondAsset    string
+		fromGlobal   bool
+		want         string
 	}{
 		{
-			name:       "fromGlobal=true picks global account for asset",
-			assetID:    assetA,
-			fromGlobal: true,
-			want:       "1000",
+			name:         "global reads global account",
+			balanceAsset: usd,
+			bondAsset:    bondA,
+			fromGlobal:   true,
+			want:         "0", // global account has no USD entry
 		},
 		{
-			name:       "fromGlobal=false picks isolated account for asset",
-			assetID:    assetA,
-			fromGlobal: false,
-			want:       "250",
+			name:         "isolated reads bondA account usd balance",
+			balanceAsset: usd,
+			bondAsset:    bondA,
+			fromGlobal:   false,
+			want:         "250",
 		},
 		{
-			name:       "fromGlobal=false with no isolated account falls back to global",
-			assetID:    assetB,
-			fromGlobal: false,
-			want:       "777",
+			name:         "isolated reads bondB account usd balance",
+			balanceAsset: usd,
+			bondAsset:    bondB,
+			fromGlobal:   false,
+			want:         "500",
 		},
 		{
-			name:       "unknown asset returns zero",
-			assetID:    uuid.New().String(),
-			fromGlobal: true,
-			want:       "0",
+			name:         "isolated with no account falls back to global",
+			balanceAsset: usd,
+			bondAsset:    uuid.New().String(),
+			fromGlobal:   false,
+			want:         "0",
 		},
 		{
-			name:       "nil portfolio returns zero",
-			assetID:    assetA,
-			fromGlobal: true,
-			want:       "0",
+			name:         "unknown asset returns zero",
+			balanceAsset: uuid.New().String(),
+			bondAsset:    bondA,
+			fromGlobal:   true,
+			want:         "0",
+		},
+		{
+			name:         "nil portfolio returns zero",
+			balanceAsset: usd,
+			bondAsset:    bondA,
+			fromGlobal:   true,
+			want:         "0",
 		},
 	}
 
@@ -467,9 +485,9 @@ func TestAvailableBalanceFor(t *testing.T) {
 			t.Parallel()
 			var got decimal.Decimal
 			if tt.name == "nil portfolio returns zero" {
-				got = s.availableBalanceFor(nil, tt.assetID, tt.fromGlobal)
+				got = s.availableBalanceFor(nil, tt.balanceAsset, tt.bondAsset, tt.fromGlobal)
 			} else {
-				got = s.availableBalanceFor(portfolio, tt.assetID, tt.fromGlobal)
+				got = s.availableBalanceFor(portfolio, tt.balanceAsset, tt.bondAsset, tt.fromGlobal)
 			}
 			require.True(t, got.Equal(decimal.MustParse(tt.want)),
 				"expected %s, got %s", tt.want, got)
