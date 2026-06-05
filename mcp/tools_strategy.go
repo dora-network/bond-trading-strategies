@@ -104,7 +104,8 @@ func configProperties() map[string]any {
 		"max_position_size": fraction("Maximum fraction of capital allocated per trade, in (0,1]."),
 		"order_book_id":     map[string]any{"type": "string", "format": "uuid", "description": "DORA order book UUID."},
 		"tenor":             map[string]any{"type": "string", "description": "Benchmark tenor code (e.g. 10Y)."},
-		"initial_balance":   posNum("Starting capital allocated to the strategy."),
+		//nolint:lll // description spans two strategies' rules
+		"initial_balance": num("Starting capital allocated to the strategy. Omit or 0 uses the default (10000 for copytrading); must be > 0 for mean_reversion."),
 	}
 }
 

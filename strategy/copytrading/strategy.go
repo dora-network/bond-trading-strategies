@@ -26,6 +26,12 @@ type Config struct {
 	MinOrderSize          int
 	MaxOrderSize          int
 	DisallowedBonds       []uuid.UUID
+	// InitialBalance is the starting cash for a backtest simulation. A
+	// zero value falls back to a package-level default (see the
+	// Backtester for the exact number). Callers that want to use a
+	// non-default balance should populate this field explicitly; the
+	// HTTP decoder does so when the request sets initial_balance.
+	InitialBalance decimal.Decimal
 }
 
 // Strategy implements the copy trading strategy.

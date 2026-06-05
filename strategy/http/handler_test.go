@@ -150,8 +150,11 @@ func TestHandlerListsStrategies(t *testing.T) {
 	require.Len(t, resp.Items, 2)
 	assert.Equal(t, "copytrading", resp.Items[0].Type)
 	assert.Equal(t, "available", resp.Items[0].Status)
-	require.Len(t, resp.Items[0].ConfigFields, 6)
+	require.Len(t, resp.Items[0].ConfigFields, 7)
 	assert.Equal(t, "followed_trader", resp.Items[0].ConfigFields[0].Name)
+	assert.Equal(t, "initial_balance", resp.Items[0].ConfigFields[6].Name)
+	assert.Equal(t, "number", resp.Items[0].ConfigFields[6].Type)
+	assert.False(t, resp.Items[0].ConfigFields[6].Required)
 	assert.True(t, resp.Items[0].ConfigFields[0].Required)
 	assert.Equal(t, "percentage_of_available", resp.Items[0].ConfigFields[1].Name)
 	assert.Equal(t, "number", resp.Items[0].ConfigFields[1].Type)
@@ -2290,4 +2293,82 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
+}
+
+func TestHandlerCopyTradingBacktestInitialBalance(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	newHandler := func() http.Handler {
+		return strategyhttp.NewHandler(
+			&strategyfakes.FakeService{},
+			strategyhttp.WithNow(func() time.Time { return now }),
+			strategyhttp.WithDORAClient(doraClientFunc{
+				getUserID: func(context.Context) (string, error) { return "user-1", nil },
+			}),
+			strategyhttp.WithTradesHistoryStore(nil),
+		)
+	}
+
+	// omit returns the map unchanged so we can leave initial_balance out.
+	buildBody := func(initial any) map[string]any {
+		cfg := map[string]any{
+			"followed_trader":         uuid.NewString(),
+			"percentage_of_available": 0.5,
+			"leverage":                1.0,
+			"min_order_size":          0,
+			"max_order_size":          0,
+			"disallowed_bonds":        []string{},
+		}
+		if initial != "omit" {
+			cfg["initial_balance"] = initial
+		}
+		return map[string]any{
+			"strategy_type": "copytrading",
+			"config":        cfg,
+			"start":         now.Add(-24 * time.Hour).Format(time.RFC3339),
+			"end":           now.Format(time.RFC3339),
+		}
+	}
+
+	cases := []struct {
+		name     string
+		initial  any
+		wantCode int
+		wantBody string
+	}{
+		{
+			name:     "absent falls through to default",
+			initial:  "omit",
+			wantCode: http.StatusAccepted,
+		},
+		{
+			name:     "explicit zero falls through to default",
+			initial:  0.0,
+			wantCode: http.StatusAccepted,
+		},
+		{
+			name:     "positive is accepted",
+			initial:  25000.0,
+			wantCode: http.StatusAccepted,
+		},
+		{
+			name:     "negative is rejected",
+			initial:  -1.0,
+			wantCode: http.StatusBadRequest,
+			wantBody: "config.initial_balance must be non-negative",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := performJSONRequest(t, newHandler(), "/v1/backtests", buildBody(tc.initial))
+			require.Equal(t, tc.wantCode, rec.Code)
+			if tc.wantBody != "" {
+				assert.Contains(t, rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
 }

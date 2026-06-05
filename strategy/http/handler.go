@@ -1721,6 +1721,12 @@ func newCopyTradingDefinition(tradesHistoryStore *copytrading.PGTradesHistorySto
 				Description: "Optional list of bond UUIDs to skip. Empty means no bonds are disallowed.",
 				Required:    false,
 			},
+			{
+				Name:        "initial_balance",
+				Type:        "number",
+				Description: "Starting cash for the backtest. Must be non-negative; omit or set to 0 to use the default of 10000.",
+				Required:    false,
+			},
 		},
 		SupportsRun:      true,
 		SupportsBacktest: true,
@@ -1888,6 +1894,12 @@ type copyTradingConfigPayload struct {
 	MinOrderSize          int      `json:"min_order_size"`
 	MaxOrderSize          int      `json:"max_order_size"`
 	DisallowedBonds       []string `json:"disallowed_bonds"`
+	// InitialBalance is optional. Pointer-to-float64 lets us distinguish
+	// "not provided" (nil) from "explicitly 0" (treated as "use the
+	// default"). The decoder falls back to the package-level default
+	// when the field is absent or zero; only negative values are
+	// rejected as an explicit caller error.
+	InitialBalance *float64 `json:"initial_balance,omitempty"`
 }
 
 func decodeCopyTradingConfig(raw json.RawMessage) (copytrading.Config, json.RawMessage, error) {
@@ -1932,6 +1944,21 @@ func decodeCopyTradingConfig(raw json.RawMessage) (copytrading.Config, json.RawM
 		return copytrading.Config{}, nil, fmt.Errorf("config.leverage: %w", err)
 	}
 
+	// initial_balance: absent or zero both fall through to the
+	// package default; only a negative value is an explicit error.
+	initialBalance := decimal.Zero
+	if payload.InitialBalance != nil {
+		if *payload.InitialBalance < 0 {
+			return copytrading.Config{}, nil, fmt.Errorf("config.initial_balance must be non-negative")
+		}
+		if *payload.InitialBalance > 0 {
+			initialBalance, err = decimal.NewFromFloat64(*payload.InitialBalance)
+			if err != nil {
+				return copytrading.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+			}
+		}
+	}
+
 	normalised, err := json.Marshal(payload)
 	if err != nil {
 		return copytrading.Config{}, nil, fmt.Errorf("marshal normalised config: %w", err)
@@ -1943,6 +1970,7 @@ func decodeCopyTradingConfig(raw json.RawMessage) (copytrading.Config, json.RawM
 		MinOrderSize:          payload.MinOrderSize,
 		MaxOrderSize:          payload.MaxOrderSize,
 		DisallowedBonds:       disallowedBonds,
+		InitialBalance:        initialBalance,
 	}, normalised, nil
 }
 

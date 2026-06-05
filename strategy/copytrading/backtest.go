@@ -14,6 +14,11 @@ import (
 )
 
 const (
+	// initialBacktestBalance is the default starting cash for a backtest
+	// when the caller doesn't specify initial_balance. A configurable
+	// value overrides this at runtime; the constant exists so existing
+	// tests and zero-value Config literals continue to behave
+	// sensibly.
 	initialBacktestBalance = 10000
 	bondQuantityScale      = 1000
 )
@@ -26,6 +31,16 @@ type Backtester struct {
 
 func NewBacktester(s *Strategy, store tradesHistoryStore, writer stats.BacktestTradeWriter) *Backtester {
 	return &Backtester{strategy: s, history: store, writer: writer}
+}
+
+// startingBalance returns the configured InitialBalance if the caller set
+// one, otherwise the package-level default. A zero value in the config
+// is treated as "use the default" rather than as a literal balance of 0.
+func (b *Backtester) startingBalance() decimal.Decimal {
+	if bal := b.strategy.cfg.InitialBalance; !bal.IsZero() {
+		return bal
+	}
+	return decimal.MustNew(initialBacktestBalance, 0)
 }
 
 func (b *Backtester) Run(ctx context.Context, start, end time.Time) (BacktestResult, error) {
@@ -75,7 +90,7 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 		closedTrades []ClosedTrade
 	)
 
-	cash := decimal.MustNew(initialBacktestBalance, 0)
+	cash := b.startingBalance()
 	positions := make(map[string]*position)
 
 	margin, _ := cash.Mul(b.strategy.cfg.PercentageOfAvailable)
