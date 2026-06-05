@@ -18,6 +18,7 @@ import (
 type marketAPIClient interface {
 	GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error)
 	GetAssetPosition(ctx context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error)
+	QuoteAssetID(ctx context.Context, orderBookID string) (string, error)
 	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool) error //nolint:lll
 }
 
@@ -177,6 +178,35 @@ func (c *doraAPIClient) GetAssetPosition(ctx context.Context, assetID string) (
 		return decimal.Zero, decimal.Zero, fmt.Errorf("parse position borrowed for asset %s: %w", assetID, err)
 	}
 	return available, borrowed, nil
+}
+
+// QuoteAssetID returns the quote (cash) asset ID for the given order
+// book. Used to know which balance to size an order against — see
+// balanceAssetFor in strategy.go for the rule.
+func (c *doraAPIClient) QuoteAssetID(ctx context.Context, orderBookID string) (string, error) {
+	if c == nil || c.client == nil {
+		return "", errors.New("DORA client is not configured")
+	}
+	if c.apiKey == "" {
+		return "", errors.New("API_KEY is not configured")
+	}
+	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
+		"apiKeyAuthHeader": {
+			Key:    c.apiKey,
+			Prefix: apiKeyPrefix,
+		},
+	})
+	resp, _, err := c.client.DefaultAPI.GetOrderbookById(authCtx, orderBookID).Execute()
+	if err != nil {
+		return "", fmt.Errorf("get order book %s: %w", orderBookID, err)
+	}
+	if resp == nil || resp.Data == nil {
+		return "", fmt.Errorf("get order book %s: missing response data", orderBookID)
+	}
+	if resp.Data.QuoteAssetId == "" {
+		return "", fmt.Errorf("get order book %s: missing quote asset ID", orderBookID)
+	}
+	return resp.Data.QuoteAssetId, nil
 }
 
 func (c *doraAPIClient) CreateMarketOrder(

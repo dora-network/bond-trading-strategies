@@ -8,16 +8,28 @@ import (
 	"github.com/govalues/decimal"
 )
 
-// findAccountAndBalance locates the correct account and extracts the available USD
-// balance based on the fromGlobalPosition rule:
+// findAccountAndBalance locates the correct account and extracts the
+// available USD balance and the bond (base asset) position from it.
 //
-//	If fromGlobalPosition is true (leverage == 1x):  use the global account.
-//	If fromGlobalPosition is false (leverage > 1x): use the isolated account
-//	  whose asset ID matches the base asset. If no isolated account exists yet
-//	  (because no leveraged position has been opened), fall back to the global
-//	  account — the isolated account will be created by the first order.
+// Account selection (the fromGlobalPosition rule):
+//   - fromGlobalPosition is true (leverage == 1x):  use the global account.
+//   - fromGlobalPosition is false (leverage > 1x): use the isolated account
+//     whose asset ID matches the base asset. If no isolated account
+//     exists yet (because no leveraged position has been opened), fall
+//     back to the global account — the isolated account will be
+//     created by the first order.
 //
-// It also returns the bond (base asset) position from the same account.
+// Balance selection per side (the close/open rule):
+//   - Buys always size off usdAvailable — the cash to spend.
+//   - Sells cap at the current bond position (held on the strategy as
+//     bondQty), so we return the bond's net position from the same
+//     account too. This mirrors the copytrading strategy's rule:
+//     closes look at the traded bond; opens/extends look at USD.
+//
+// Returns both values so the per-trade sizing code can pick the right
+// one. The function reads both from the same account so the USD and
+// bond figures are consistent (e.g. when leverage is on, both come
+// from the isolated account).
 func findAccountAndBalance(
 	accounts map[string]map[string]doraclient.AccountV2,
 	fromGlobalPosition bool,

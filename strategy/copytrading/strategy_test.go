@@ -241,6 +241,38 @@ func TestInverseLeverage(t *testing.T) {
 	}
 }
 
+func TestBalanceAssetFor(t *testing.T) {
+	t.Parallel()
+
+	bond := uuid.New().String()
+	usd := uuid.New().String()
+
+	tests := []struct {
+		name    string
+		side    doraclient.Side
+		current positionDirection
+		want    string
+	}{
+		// Opens/extends always look at USD.
+		{name: "flat + buy → USD (open long)", side: doraclient.SIDE_BUY, current: positionFlat, want: usd},
+		{name: "flat + sell → USD (open short, USD is collateral)", side: doraclient.SIDE_SELL, current: positionFlat, want: usd},
+		{name: "long + buy → USD (extend long)", side: doraclient.SIDE_BUY, current: positionLong, want: usd},
+		{name: "short + sell → USD (extend short, USD is collateral)", side: doraclient.SIDE_SELL, current: positionShort, want: usd},
+		// Closes look at the bond.
+		{name: "long + sell → bond (close long)", side: doraclient.SIDE_SELL, current: positionLong, want: bond},
+		{name: "short + buy → bond (close short)", side: doraclient.SIDE_BUY, current: positionShort, want: bond},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := balanceAssetFor(tt.side, tt.current, bond, usd)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestAvailableBalanceFor(t *testing.T) {
 	t.Parallel()
 
