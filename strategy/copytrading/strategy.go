@@ -170,6 +170,11 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		side = doraclient.Side("sell")
 	}
 
+	// DORA's from_global_position flag is true only for unleveraged
+	// longs. Shorts always need isolated margin, and leveraged longs
+	// need it too so DORA can scope margin to the order's leverage.
+	fromGlobal := fromGlobalPosition(side, s.cfg.Leverage)
+
 	// Place market order
 	err = s.marketAPI.CreateMarketOrder(
 		ctx,
@@ -177,7 +182,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		side,
 		orderSize,
 		decimal.One,
-		true,
+		fromGlobal,
 	)
 	if err != nil {
 		return fmt.Errorf("create market order: %w", err)
@@ -191,6 +196,15 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		"followed_trader", trade.TraderID)
 
 	return nil
+}
+
+// fromGlobalPosition reports whether a DORA order with the given side and
+// strategy-level leverage should use DORA's global (cross-margin) position
+// pool. It is true only for unleveraged longs; shorts and leveraged longs
+// must use isolated margin so DORA can scope margin to the order.
+func fromGlobalPosition(side doraclient.Side, leverage decimal.Decimal) bool {
+	noLeverage := leverage.Cmp(decimal.One) <= 0
+	return side == doraclient.Side("buy") && noLeverage
 }
 
 // calculateAvailableBalance sums the available balance across all accounts and assets.

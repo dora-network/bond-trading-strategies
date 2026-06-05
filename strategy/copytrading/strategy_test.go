@@ -3,6 +3,7 @@ package copytrading
 import (
 	"testing"
 
+	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/require"
@@ -98,6 +99,56 @@ func TestCalculateOrderSize(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := calculateOrderSize(tt.available, tt.percentage, tt.leverage, tt.minOrderSize, tt.maxOrderSize)
 			require.True(t, result.Equal(tt.expected), "expected %s, got %s", tt.expected, result)
+		})
+	}
+}
+
+func TestFromGlobalPosition(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		side     doraclient.Side
+		leverage decimal.Decimal
+		want     bool
+	}{
+		{
+			name:     "long, no leverage → global",
+			side:     doraclient.Side("buy"),
+			leverage: decimal.MustParse("1.0"),
+			want:     true,
+		},
+		{
+			name:     "long, zero leverage → global (degenerate)",
+			side:     doraclient.Side("buy"),
+			leverage: decimal.Zero,
+			want:     true,
+		},
+		{
+			name:     "long, leveraged → isolated",
+			side:     doraclient.Side("buy"),
+			leverage: decimal.MustParse("2.0"),
+			want:     false,
+		},
+		{
+			name:     "short, no leverage → isolated (shorting requires leverage)",
+			side:     doraclient.Side("sell"),
+			leverage: decimal.MustParse("1.0"),
+			want:     false,
+		},
+		{
+			name:     "short, leveraged → isolated",
+			side:     doraclient.Side("sell"),
+			leverage: decimal.MustParse("2.0"),
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, fromGlobalPosition(tt.side, tt.leverage))
 		})
 	}
 }
