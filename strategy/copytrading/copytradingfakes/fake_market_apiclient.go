@@ -26,6 +26,23 @@ type FakeMarketAPIClient struct {
 	createMarketOrderReturnsOnCall map[int]struct {
 		result1 error
 	}
+	GetAssetPositionStub        func(context.Context, string, string) (decimal.Decimal, decimal.Decimal, error)
+	getAssetPositionMutex       sync.RWMutex
+	getAssetPositionArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+		arg3 string
+	}
+	getAssetPositionReturns struct {
+		result1 decimal.Decimal
+		result2 decimal.Decimal
+		result3 error
+	}
+	getAssetPositionReturnsOnCall map[int]struct {
+		result1 decimal.Decimal
+		result2 decimal.Decimal
+		result3 error
+	}
 	GetPortfolioV2Stub        func(context.Context) (*doraclient.AccountPortfolioV2, error)
 	getPortfolioV2Mutex       sync.RWMutex
 	getPortfolioV2ArgsForCall []struct {
@@ -37,6 +54,19 @@ type FakeMarketAPIClient struct {
 	}
 	getPortfolioV2ReturnsOnCall map[int]struct {
 		result1 *doraclient.AccountPortfolioV2
+		result2 error
+	}
+	SelfUserIDStub        func(context.Context) (string, error)
+	selfUserIDMutex       sync.RWMutex
+	selfUserIDArgsForCall []struct {
+		arg1 context.Context
+	}
+	selfUserIDReturns struct {
+		result1 string
+		result2 error
+	}
+	selfUserIDReturnsOnCall map[int]struct {
+		result1 string
 		result2 error
 	}
 	invocations      map[string][][]interface{}
@@ -109,6 +139,75 @@ func (fake *FakeMarketAPIClient) CreateMarketOrderReturnsOnCall(i int, result1 e
 	}{result1}
 }
 
+func (fake *FakeMarketAPIClient) GetAssetPosition(arg1 context.Context, arg2 string, arg3 string) (decimal.Decimal, decimal.Decimal, error) {
+	fake.getAssetPositionMutex.Lock()
+	ret, specificReturn := fake.getAssetPositionReturnsOnCall[len(fake.getAssetPositionArgsForCall)]
+	fake.getAssetPositionArgsForCall = append(fake.getAssetPositionArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+		arg3 string
+	}{arg1, arg2, arg3})
+	stub := fake.GetAssetPositionStub
+	fakeReturns := fake.getAssetPositionReturns
+	fake.recordInvocation("GetAssetPosition", []interface{}{arg1, arg2, arg3})
+	fake.getAssetPositionMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeMarketAPIClient) GetAssetPositionCallCount() int {
+	fake.getAssetPositionMutex.RLock()
+	defer fake.getAssetPositionMutex.RUnlock()
+	return len(fake.getAssetPositionArgsForCall)
+}
+
+func (fake *FakeMarketAPIClient) GetAssetPositionCalls(stub func(context.Context, string, string) (decimal.Decimal, decimal.Decimal, error)) {
+	fake.getAssetPositionMutex.Lock()
+	defer fake.getAssetPositionMutex.Unlock()
+	fake.GetAssetPositionStub = stub
+}
+
+func (fake *FakeMarketAPIClient) GetAssetPositionArgsForCall(i int) (context.Context, string, string) {
+	fake.getAssetPositionMutex.RLock()
+	defer fake.getAssetPositionMutex.RUnlock()
+	argsForCall := fake.getAssetPositionArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeMarketAPIClient) GetAssetPositionReturns(result1 decimal.Decimal, result2 decimal.Decimal, result3 error) {
+	fake.getAssetPositionMutex.Lock()
+	defer fake.getAssetPositionMutex.Unlock()
+	fake.GetAssetPositionStub = nil
+	fake.getAssetPositionReturns = struct {
+		result1 decimal.Decimal
+		result2 decimal.Decimal
+		result3 error
+	}{result1, result2, result3}
+}
+
+func (fake *FakeMarketAPIClient) GetAssetPositionReturnsOnCall(i int, result1 decimal.Decimal, result2 decimal.Decimal, result3 error) {
+	fake.getAssetPositionMutex.Lock()
+	defer fake.getAssetPositionMutex.Unlock()
+	fake.GetAssetPositionStub = nil
+	if fake.getAssetPositionReturnsOnCall == nil {
+		fake.getAssetPositionReturnsOnCall = make(map[int]struct {
+			result1 decimal.Decimal
+			result2 decimal.Decimal
+			result3 error
+		})
+	}
+	fake.getAssetPositionReturnsOnCall[i] = struct {
+		result1 decimal.Decimal
+		result2 decimal.Decimal
+		result3 error
+	}{result1, result2, result3}
+}
+
 func (fake *FakeMarketAPIClient) GetPortfolioV2(arg1 context.Context) (*doraclient.AccountPortfolioV2, error) {
 	fake.getPortfolioV2Mutex.Lock()
 	ret, specificReturn := fake.getPortfolioV2ReturnsOnCall[len(fake.getPortfolioV2ArgsForCall)]
@@ -169,6 +268,70 @@ func (fake *FakeMarketAPIClient) GetPortfolioV2ReturnsOnCall(i int, result1 *dor
 	}
 	fake.getPortfolioV2ReturnsOnCall[i] = struct {
 		result1 *doraclient.AccountPortfolioV2
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeMarketAPIClient) SelfUserID(arg1 context.Context) (string, error) {
+	fake.selfUserIDMutex.Lock()
+	ret, specificReturn := fake.selfUserIDReturnsOnCall[len(fake.selfUserIDArgsForCall)]
+	fake.selfUserIDArgsForCall = append(fake.selfUserIDArgsForCall, struct {
+		arg1 context.Context
+	}{arg1})
+	stub := fake.SelfUserIDStub
+	fakeReturns := fake.selfUserIDReturns
+	fake.recordInvocation("SelfUserID", []interface{}{arg1})
+	fake.selfUserIDMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeMarketAPIClient) SelfUserIDCallCount() int {
+	fake.selfUserIDMutex.RLock()
+	defer fake.selfUserIDMutex.RUnlock()
+	return len(fake.selfUserIDArgsForCall)
+}
+
+func (fake *FakeMarketAPIClient) SelfUserIDCalls(stub func(context.Context) (string, error)) {
+	fake.selfUserIDMutex.Lock()
+	defer fake.selfUserIDMutex.Unlock()
+	fake.SelfUserIDStub = stub
+}
+
+func (fake *FakeMarketAPIClient) SelfUserIDArgsForCall(i int) context.Context {
+	fake.selfUserIDMutex.RLock()
+	defer fake.selfUserIDMutex.RUnlock()
+	argsForCall := fake.selfUserIDArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeMarketAPIClient) SelfUserIDReturns(result1 string, result2 error) {
+	fake.selfUserIDMutex.Lock()
+	defer fake.selfUserIDMutex.Unlock()
+	fake.SelfUserIDStub = nil
+	fake.selfUserIDReturns = struct {
+		result1 string
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeMarketAPIClient) SelfUserIDReturnsOnCall(i int, result1 string, result2 error) {
+	fake.selfUserIDMutex.Lock()
+	defer fake.selfUserIDMutex.Unlock()
+	fake.SelfUserIDStub = nil
+	if fake.selfUserIDReturnsOnCall == nil {
+		fake.selfUserIDReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 error
+		})
+	}
+	fake.selfUserIDReturnsOnCall[i] = struct {
+		result1 string
 		result2 error
 	}{result1, result2}
 }

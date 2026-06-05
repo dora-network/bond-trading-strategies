@@ -145,14 +145,19 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		return nil
 	}
 
-	// Query DORA for current position
+	// Query DORA for available balance (used to size the order) and
+	// for the current position on the asset (used to decide
+	// from_global_position).
 	portfolio, err := s.marketAPI.GetPortfolioV2(ctx)
 	if err != nil {
 		return fmt.Errorf("get portfolio: %w", err)
 	}
-
-	// Calculate available balance
 	availableBalance := s.calculateAvailableBalance(portfolio)
+
+	available, borrowed, err := s.positionForAsset(ctx, trade.AssetID.String())
+	if err != nil {
+		return fmt.Errorf("position for asset %s: %w", trade.AssetID, err)
+	}
 
 	// Calculate order size: availableBalance * percentageOfAvailable * leverage
 	orderSize := calculateOrderSize(availableBalance, s.cfg.PercentageOfAvailable, s.cfg.Leverage, s.cfg.MinOrderSize, s.cfg.MaxOrderSize)
@@ -174,7 +179,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	// DORA's from_global_position flag depends on whether this order
 	// closes/reduces an existing position (no leverage needed) or
 	// opens/extends a position (leverage rules apply).
-	fromGlobal := fromGlobalPosition(side, positionForAsset(portfolio, trade.AssetID.String()), s.cfg.Leverage)
+	fromGlobal := fromGlobalPosition(side, positionForAsset(available, borrowed), s.cfg.Leverage)
 
 	// DORA's inverse_leverage is 1/leverage. DORA uses it to verify
 	// our balance plus the implied borrow is sufficient to cover the
@@ -209,9 +214,19 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	return nil
 }
 
+// positionForAsset fetches the current available and borrowed amounts
+// for the given asset via GetLedgerPositionsSelf. Returns zeros (no
+// error) when the bot has no position on the asset.
+func (s *Strategy) positionForAsset(ctx context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+	accountID, err := s.marketAPI.SelfUserID(ctx)
+	if err != nil {
+		return decimal.Zero, decimal.Zero, err
+	}
+	return s.marketAPI.GetAssetPosition(ctx, accountID, assetID)
+}
+
 // positionDirection is the net direction of the bot's holdings for a given
-// asset, derived from the portfolio by summing (Available - Borrowed)
-// across all accounts.
+// asset, derived from the ledger positions endpoint.
 type positionDirection int
 
 const (
@@ -220,30 +235,18 @@ const (
 	positionShort
 )
 
-// positionForAsset returns the net position direction for an asset by
-// summing (Available - Borrowed) across all portfolio accounts. A positive
-// net is a long, a negative net is a short, zero is flat. Isolated and
-// global accounts are both included; for the copytrading bot the order
-// book is implied by the asset, so the net across all accounts is the
-// right signal.
-func positionForAsset(portfolio *doraclient.AccountPortfolioV2, assetID string) positionDirection {
-	if portfolio == nil {
-		return positionFlat
+// positionForAsset returns the net position direction for an asset. A
+// positive net (Available > Borrowed) is a long, a negative net is a
+// short, zero is flat. Sourced from GetLedgerPositionsSelf so the value
+// is consistent with the meanreversion strategy's view of "the bot's
+// position on this asset".
+func positionForAsset(available, borrowed decimal.Decimal) positionDirection {
+	net, _ := available.Sub(borrowed)
+	if net.IsPos() {
+		return positionLong
 	}
-	for _, assetMap := range portfolio.GetAccounts() {
-		account, ok := assetMap[assetID]
-		if !ok {
-			continue
-		}
-		available, _ := decimal.Parse(account.Available)
-		borrowed, _ := decimal.Parse(account.Borrowed)
-		net, _ := available.Sub(borrowed)
-		if net.IsPos() {
-			return positionLong
-		}
-		if net.IsNeg() {
-			return positionShort
-		}
+	if net.IsNeg() {
+		return positionShort
 	}
 	return positionFlat
 }
