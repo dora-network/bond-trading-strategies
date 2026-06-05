@@ -153,6 +153,7 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 	}
 }
 
+//nolint:funlen // diagnostic logging — will be refined after debugging
 func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) error {
 	// Check disallowed bonds
 	if _, disallowed := s.disallowedSet[trade.AssetID]; disallowed {
@@ -182,6 +183,12 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		return fmt.Errorf("position for asset %s: %w", trade.AssetID, err)
 	}
 	current := positionForAsset(available, borrowed)
+	s.log.Debug("position state",
+		"asset", trade.AssetID,
+		"available", available,
+		"borrowed", borrowed,
+		"current", current,
+	)
 
 	// Fetch the portfolio. We need it for two things:
 	//   1. To know which account (global vs isolated) holds the
@@ -192,7 +199,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	if err != nil {
 		return fmt.Errorf("get portfolio: %w", err)
 	}
-	positionOnGlobal, _ := positionAccountIsGlobal(portfolio, trade.AssetID.String())
+	positionOnGlobal, hasPosition := positionAccountIsGlobal(portfolio, trade.AssetID.String())
 
 	// DORA's from_global_position flag:
 	//   - Closes mirror the IsGlobal of the account holding the
@@ -200,6 +207,12 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	//   - Opens/extends follow the leverage rules: long with no
 	//     leverage → true; leveraged long or short → false.
 	fromGlobal := fromGlobalPosition(side, current, s.cfg.Leverage, positionOnGlobal)
+	s.log.Debug("account selection",
+		"has_position", hasPosition,
+		"position_on_global", positionOnGlobal,
+		"from_global", fromGlobal,
+		"leverage", s.cfg.Leverage,
+	)
 
 	// Pick which asset's available balance to size the order from.
 	// Closes look at the traded bond (we need to know how much we
@@ -210,6 +223,11 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		return fmt.Errorf("quote asset ID for order book %s: %w", trade.OrderBookID, err)
 	}
 	balanceAsset := balanceAssetFor(side, current, trade.AssetID.String(), quoteAssetID)
+	s.log.Debug("balance asset selected",
+		"quote_asset", quoteAssetID,
+		"balance_asset", balanceAsset,
+		"side", side,
+	)
 
 	// Read the right account's available balance for the chosen
 	// asset. Account depends on fromGlobal:
@@ -218,9 +236,22 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	//     with fallback to global if no isolated account exists yet
 	//     (DORA creates it on first leveraged order).
 	availableBalance := s.availableBalanceFor(portfolio, balanceAsset, fromGlobal)
+	s.log.Info("available balance for sizing",
+		"balance_asset", balanceAsset,
+		"available_balance", availableBalance,
+		"from_global", fromGlobal,
+	)
 
 	// Calculate order size: availableBalance * percentageOfAvailable * leverage
 	orderSize := calculateOrderSize(availableBalance, s.cfg.PercentageOfAvailable, s.cfg.Leverage, s.cfg.MinOrderSize, s.cfg.MaxOrderSize)
+	s.log.Info("calculated order size",
+		"available_balance", availableBalance,
+		"percentage", s.cfg.PercentageOfAvailable,
+		"leverage", s.cfg.Leverage,
+		"order_size", orderSize,
+		"min_order_size", s.cfg.MinOrderSize,
+		"max_order_size", s.cfg.MaxOrderSize,
+	)
 
 	if orderSize.IsZero() || orderSize.IsNeg() {
 		s.log.Info("skipping trade: calculated order size is zero or negative", "order_size", orderSize)
@@ -236,6 +267,13 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	if s.cfg.Leverage.IsPos() && s.cfg.Leverage.Cmp(decimal.One) > 0 {
 		inverseLeverage, _ = decimal.One.Quo(s.cfg.Leverage)
 	}
+	s.log.Info("placing market order",
+		"order_book", trade.OrderBookID,
+		"side", side,
+		"order_size", orderSize,
+		"inverse_leverage", inverseLeverage,
+		"from_global", fromGlobal,
+	)
 
 	// Place market order
 	err = s.marketAPI.CreateMarketOrder(

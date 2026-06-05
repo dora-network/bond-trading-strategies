@@ -61,6 +61,7 @@ func (ts *TradeStream) Start(ctx context.Context, wsURL, apiKey string, orderBoo
 	}
 	ts.mu.Unlock()
 
+	since := time.Now().UTC()
 	for _, obID := range orderBookIDs {
 		obStr := obID.String()
 		ts.mu.Lock()
@@ -70,7 +71,7 @@ func (ts *TradeStream) Start(ctx context.Context, wsURL, apiKey string, orderBoo
 		}
 		ts.mu.Unlock()
 
-		tradeChan, cancel, err := ts.dialTradeStream(ctx, wsURL, apiKey, obStr)
+		tradeChan, cancel, err := ts.dialTradeStream(ctx, wsURL, apiKey, obStr, since)
 		if err != nil {
 			slog.Error("failed to start trade stream", "order_book", obStr, "err", err)
 			continue
@@ -88,18 +89,23 @@ func (ts *TradeStream) Start(ctx context.Context, wsURL, apiKey string, orderBoo
 	return nil
 }
 
-func (ts *TradeStream) dialTradeStream(ctx context.Context, wsURL, apiKey, orderBookID string) (<-chan []byte, context.CancelFunc, error) {
+func (ts *TradeStream) dialTradeStream(
+	ctx context.Context,
+	wsURL, apiKey, orderBookID string,
+	since time.Time,
+) (<-chan []byte, context.CancelFunc, error) {
 	base, err := url.Parse(wsURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse ws url: %w", err)
 	}
-	base.Path = "/v1/trades/stream"
+	base.Path = fmt.Sprintf("/v1/trades/%s/stream", orderBookID)
 
 	q := base.Query()
-	q.Set("api_key", apiKey)
-	q.Set("order_book_id", orderBookID)
+	q.Set("x-api-key", apiKey)
+	q.Set("since", since.Format(time.RFC3339))
 	base.RawQuery = q.Encode()
 
+	slog.Info("dialing trade stream", "url", base.String())
 	conn, _, err := websocket.Dial(ctx, base.String(), nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dial trade stream: %w", err)

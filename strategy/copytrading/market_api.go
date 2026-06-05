@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -277,6 +278,13 @@ func (c *doraAPIClient) CreateMarketOrder(
 		side,
 		fromGlobalPosition,
 		orderBookID,
+	)
+	slog.Info("create order request",
+		"order_book", orderBookID,
+		"side", side,
+		"quantity", quantity.String(),
+		"inverse_leverage", inverseLeverage.String(),
+		"from_global", fromGlobalPosition,
 	)
 	_, rawResp, err := c.client.DefaultAPI.CreateOrder(authCtx).CreateOrderRequest(*request).Execute()
 	if rawResp != nil && rawResp.Body != nil {
