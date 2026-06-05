@@ -107,100 +107,130 @@ func TestFromGlobalPosition(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		side     doraclient.Side
-		current  positionDirection
-		leverage decimal.Decimal
-		want     bool
+		name             string
+		side             doraclient.Side
+		current          positionDirection
+		leverage         decimal.Decimal
+		positionOnGlobal bool
+		want             bool
 	}{
-		// Closes: never need DORA leverage, regardless of cfg.Leverage.
+		// Closes: fromGlobal mirrors the IsGlobal of the account
+		// holding the existing position.
 		{
-			name:     "SELL closing a long → global (close)",
-			side:     doraclient.SIDE_SELL,
-			current:  positionLong,
-			leverage: decimal.MustParse("1.0"),
-			want:     true,
+			name:             "SELL closing a long in global account → global",
+			side:             doraclient.SIDE_SELL,
+			current:          positionLong,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: true,
+			want:             true,
 		},
 		{
-			name:     "SELL closing a long, with leverage → global (close)",
-			side:     doraclient.SIDE_SELL,
-			current:  positionLong,
-			leverage: decimal.MustParse("2.0"),
-			want:     true,
+			name:             "SELL closing a long in isolated account → isolated",
+			side:             doraclient.SIDE_SELL,
+			current:          positionLong,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: false,
+			want:             false,
 		},
 		{
-			name:     "BUY closing a short → global (close)",
-			side:     doraclient.SIDE_BUY,
-			current:  positionShort,
-			leverage: decimal.MustParse("1.0"),
-			want:     true,
+			name:             "SELL closing a long, leverage irrelevant (close on global)",
+			side:             doraclient.SIDE_SELL,
+			current:          positionLong,
+			leverage:         decimal.MustParse("2.0"),
+			positionOnGlobal: true,
+			want:             true,
 		},
 		{
-			name:     "BUY closing a short, with leverage → global (close)",
-			side:     doraclient.SIDE_BUY,
-			current:  positionShort,
-			leverage: decimal.MustParse("2.0"),
-			want:     true,
+			name:             "BUY closing a short in global account → global",
+			side:             doraclient.SIDE_BUY,
+			current:          positionShort,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: true,
+			want:             true,
+		},
+		{
+			name:             "BUY closing a short in isolated account → isolated",
+			side:             doraclient.SIDE_BUY,
+			current:          positionShort,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: false,
+			want:             false,
+		},
+		{
+			name:             "BUY closing a short, leverage irrelevant (close on isolated)",
+			side:             doraclient.SIDE_BUY,
+			current:          positionShort,
+			leverage:         decimal.MustParse("2.0"),
+			positionOnGlobal: false,
+			want:             false,
 		},
 
 		// Opens of a long: fromGlobal depends on leverage.
 		{
-			name:     "BUY opening a long, no leverage → global",
-			side:     doraclient.SIDE_BUY,
-			current:  positionFlat,
-			leverage: decimal.MustParse("1.0"),
-			want:     true,
+			name:             "BUY opening a long, no leverage → global",
+			side:             doraclient.SIDE_BUY,
+			current:          positionFlat,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: false, // ignored for opens
+			want:             true,
 		},
 		{
-			name:     "BUY opening a long, leveraged → isolated",
-			side:     doraclient.SIDE_BUY,
-			current:  positionFlat,
-			leverage: decimal.MustParse("2.0"),
-			want:     false,
+			name:             "BUY opening a long, leveraged → isolated",
+			side:             doraclient.SIDE_BUY,
+			current:          positionFlat,
+			leverage:         decimal.MustParse("2.0"),
+			positionOnGlobal: false,
+			want:             false,
 		},
 		{
-			name:     "BUY extending a long, no leverage → global",
-			side:     doraclient.SIDE_BUY,
-			current:  positionLong,
-			leverage: decimal.MustParse("1.0"),
-			want:     true,
+			name:             "BUY extending a long, no leverage → global",
+			side:             doraclient.SIDE_BUY,
+			current:          positionLong,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: true, // ignored for extends
+			want:             true,
 		},
 		{
-			name:     "BUY extending a long, leveraged → isolated",
-			side:     doraclient.SIDE_BUY,
-			current:  positionLong,
-			leverage: decimal.MustParse("2.0"),
-			want:     false,
+			name:             "BUY extending a long, leveraged → isolated",
+			side:             doraclient.SIDE_BUY,
+			current:          positionLong,
+			leverage:         decimal.MustParse("2.0"),
+			positionOnGlobal: true,
+			want:             false,
 		},
 
 		// Opens/extends of a short: always need DORA leverage.
 		{
-			name:     "SELL opening a short, no leverage → isolated (shorting requires leverage)",
-			side:     doraclient.SIDE_SELL,
-			current:  positionFlat,
-			leverage: decimal.MustParse("1.0"),
-			want:     false,
+			name:             "SELL opening a short, no leverage → isolated (shorting requires leverage)",
+			side:             doraclient.SIDE_SELL,
+			current:          positionFlat,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: false,
+			want:             false,
 		},
 		{
-			name:     "SELL opening a short, leveraged → isolated",
-			side:     doraclient.SIDE_SELL,
-			current:  positionFlat,
-			leverage: decimal.MustParse("2.0"),
-			want:     false,
+			name:             "SELL opening a short, leveraged → isolated",
+			side:             doraclient.SIDE_SELL,
+			current:          positionFlat,
+			leverage:         decimal.MustParse("2.0"),
+			positionOnGlobal: false,
+			want:             false,
 		},
 		{
-			name:     "SELL extending a short, no leverage → isolated",
-			side:     doraclient.SIDE_SELL,
-			current:  positionShort,
-			leverage: decimal.MustParse("1.0"),
-			want:     false,
+			name:             "SELL extending a short, no leverage → isolated",
+			side:             doraclient.SIDE_SELL,
+			current:          positionShort,
+			leverage:         decimal.MustParse("1.0"),
+			positionOnGlobal: false,
+			want:             false,
 		},
 		{
-			name:     "SELL extending a short, leveraged → isolated",
-			side:     doraclient.SIDE_SELL,
-			current:  positionShort,
-			leverage: decimal.MustParse("2.0"),
-			want:     false,
+			name:             "SELL extending a short, leveraged → isolated",
+			side:             doraclient.SIDE_SELL,
+			current:          positionShort,
+			leverage:         decimal.MustParse("2.0"),
+			positionOnGlobal: false,
+			want:             false,
 		},
 	}
 
@@ -208,7 +238,7 @@ func TestFromGlobalPosition(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, fromGlobalPosition(tt.side, tt.current, tt.leverage))
+			require.Equal(t, tt.want, fromGlobalPosition(tt.side, tt.current, tt.leverage, tt.positionOnGlobal))
 		})
 	}
 }
@@ -269,6 +299,98 @@ func TestBalanceAssetFor(t *testing.T) {
 			t.Parallel()
 			got := balanceAssetFor(tt.side, tt.current, bond, usd)
 			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPositionAccountIsGlobal(t *testing.T) {
+	t.Parallel()
+
+	assetA := uuid.New().String()
+	assetB := uuid.New().String()
+
+	yes := true
+	no := false
+
+	tests := []struct {
+		name      string
+		portfolio *doraclient.AccountPortfolioV2
+		assetID   string
+		wantIsG   bool
+		wantFound bool
+	}{
+		{
+			name: "long in global account → (true, true)",
+			portfolio: &doraclient.AccountPortfolioV2{
+				Accounts: map[string]map[string]doraclient.AccountV2{
+					"global-A": {assetA: {AssetId: assetA, IsGlobal: &yes, Available: "1000"}},
+				},
+			},
+			assetID:   assetA,
+			wantIsG:   true,
+			wantFound: true,
+		},
+		{
+			name: "long in isolated account → (false, true)",
+			portfolio: &doraclient.AccountPortfolioV2{
+				Accounts: map[string]map[string]doraclient.AccountV2{
+					"isolated-A": {assetA: {AssetId: assetA, IsGlobal: &no, Available: "250"}},
+				},
+			},
+			assetID:   assetA,
+			wantIsG:   false,
+			wantFound: true,
+		},
+		{
+			name: "short in isolated account (Borrowed > 0) → (false, true)",
+			portfolio: &doraclient.AccountPortfolioV2{
+				Accounts: map[string]map[string]doraclient.AccountV2{
+					"isolated-A": {assetA: {AssetId: assetA, IsGlobal: &no, Available: "0", Borrowed: "300"}},
+				},
+			},
+			assetID:   assetA,
+			wantIsG:   false,
+			wantFound: true,
+		},
+		{
+			name: "global has it AND isolated has it → global wins (closes against global first)",
+			portfolio: &doraclient.AccountPortfolioV2{
+				Accounts: map[string]map[string]doraclient.AccountV2{
+					"global-A":   {assetA: {AssetId: assetA, IsGlobal: &yes, Available: "100"}},
+					"isolated-A": {assetA: {AssetId: assetA, IsGlobal: &no, Available: "200"}},
+				},
+			},
+			assetID:   assetA,
+			wantIsG:   true,
+			wantFound: true,
+		},
+		{
+			name: "no positions anywhere → (false, false)",
+			portfolio: &doraclient.AccountPortfolioV2{
+				Accounts: map[string]map[string]doraclient.AccountV2{
+					"global-B": {assetB: {AssetId: assetB, IsGlobal: &yes, Available: "0"}},
+				},
+			},
+			assetID:   assetA, // ask about an asset nothing has
+			wantIsG:   false,
+			wantFound: false,
+		},
+		{
+			name:      "nil portfolio → (false, false)",
+			portfolio: nil,
+			assetID:   assetA,
+			wantIsG:   false,
+			wantFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			isG, found := positionAccountIsGlobal(tt.portfolio, tt.assetID)
+			require.Equal(t, tt.wantIsG, isG, "isGlobal")
+			require.Equal(t, tt.wantFound, found, "found")
 		})
 	}
 }
