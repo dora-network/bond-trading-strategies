@@ -49,6 +49,8 @@ func NewTradeStream() *TradeStream {
 }
 
 func (ts *TradeStream) Start(ctx context.Context, wsURL, apiKey string, orderBookIDs []uuid.UUID) error {
+	slog.Info("starting trade stream", "order_books", len(orderBookIDs), "ws_url", wsURL)
+
 	ts.mu.Lock()
 	for _, obID := range orderBookIDs {
 		obStr := obID.String()
@@ -78,6 +80,7 @@ func (ts *TradeStream) Start(ctx context.Context, wsURL, apiKey string, orderBoo
 		ts.bookCancels[obStr] = cancel
 		ts.mu.Unlock()
 
+		slog.Info("trade stream connected", "order_book", obStr)
 		go ts.readLoop(ctx, tradeChan, obID)
 	}
 
@@ -124,12 +127,15 @@ func (ts *TradeStream) dialTradeStream(ctx context.Context, wsURL, apiKey, order
 }
 
 func (ts *TradeStream) readLoop(ctx context.Context, tradeChan <-chan []byte, orderBookID uuid.UUID) {
+	slog.Info("trade readLoop started", "order_book", orderBookID)
+	defer slog.Info("trade readLoop exiting", "order_book", orderBookID)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case data, ok := <-tradeChan:
 			if !ok {
+				slog.Warn("trade channel closed", "order_book", orderBookID)
 				return
 			}
 			ts.routeTrade(data, orderBookID)
@@ -139,65 +145,88 @@ func (ts *TradeStream) readLoop(ctx context.Context, tradeChan <-chan []byte, or
 
 func (ts *TradeStream) routeTrade(data []byte, orderBookID uuid.UUID) {
 	//nolint:tagliatelle
-	var entry struct {
-		Val map[string]any `json:"Val"`
-	}
-	if err := json.Unmarshal(data, &entry); err != nil {
-		slog.Warn("failed to unmarshal trade", "err", err)
-		return
+	type entryT struct {
+		Val  map[string]any `json:"Val"`
+		Time string         `json:"Time"`
 	}
 
-	val := entry.Val
-	if val == nil {
-		return
+	var entries []entryT
+	if err := json.Unmarshal(data, &entries); err != nil {
+		// Fallback: DORA may send a single object instead of an array.
+		var single entryT
+		if err2 := json.Unmarshal(data, &single); err2 != nil {
+			slog.Warn("failed to unmarshal trade", "err", err)
+			return
+		}
+		entries = []entryT{single}
 	}
 
-	traderID, err := uuid.Parse(fmt.Sprintf("%v", val["user_id"]))
-	if err != nil {
-		slog.Warn("failed to parse trader ID", "raw", val["user_id"])
-	}
-	assetID, err := uuid.Parse(fmt.Sprintf("%v", val["asset_0"]))
-	if err != nil {
-		slog.Warn("failed to parse asset ID", "raw", val["asset_0"])
-	}
-	executionID, err := uuid.Parse(fmt.Sprintf("%v", val["transaction_id"]))
-	if err != nil {
-		slog.Warn("failed to parse execution ID", "raw", val["transaction_id"])
-	}
-	side, _ := val["side"].(string)
-	priceStr, _ := val["price"].(string)
-	quantityStr, _ := val["quantity_0"].(string)
+	for _, entry := range entries {
+		val := entry.Val
+		if val == nil {
+			continue
+		}
 
-	price, err := decimal.Parse(priceStr)
-	if err != nil {
-		slog.Warn("failed to parse price", "raw", priceStr)
-	}
-	quantity, err := decimal.Parse(quantityStr)
-	if err != nil {
-		slog.Warn("failed to parse quantity", "raw", quantityStr)
-	}
+		traderID, err := uuid.Parse(fmt.Sprintf("%v", val["user_id"]))
+		if err != nil {
+			slog.Warn("failed to parse trader ID", "raw", val["user_id"])
+			continue
+		}
+		assetID, err := uuid.Parse(fmt.Sprintf("%v", val["asset_0"]))
+		if err != nil {
+			slog.Warn("failed to parse asset ID", "raw", val["asset_0"])
+			continue
+		}
+		executionID, err := uuid.Parse(fmt.Sprintf("%v", val["transaction_id"]))
+		if err != nil {
+			slog.Warn("failed to parse execution ID", "raw", val["transaction_id"])
+			continue
+		}
+		side, _ := val["side"].(string)
+		priceStr, _ := val["price"].(string)
+		quantityStr, _ := val["quantity_0"].(string)
 
-	event := TradeEvent{
-		TraderID:    traderID,
-		OrderBookID: orderBookID,
-		AssetID:     assetID,
-		Side:        side,
-		Quantity:    quantity,
-		Price:       price,
-		ExecutionID: executionID.String(),
-	}
+		price, err := decimal.Parse(priceStr)
+		if err != nil {
+			slog.Warn("failed to parse price", "raw", priceStr)
+			continue
+		}
+		quantity, err := decimal.Parse(quantityStr)
+		if err != nil {
+			slog.Warn("failed to parse quantity", "raw", quantityStr)
+			continue
+		}
 
-	ts.mu.Lock()
-	for _, sub := range ts.subscribers {
-		if sub.followedTrader == traderID {
-			select {
-			case sub.ch <- event:
-			default:
-				slog.Warn("subscriber channel full, dropping trade", "subscriber", sub.followedTrader)
+		event := TradeEvent{
+			TraderID:    traderID,
+			OrderBookID: orderBookID,
+			AssetID:     assetID,
+			Side:        side,
+			Quantity:    quantity,
+			Price:       price,
+			ExecutionID: executionID.String(),
+		}
+
+		ts.mu.Lock()
+		matched := false
+		for _, sub := range ts.subscribers {
+			if sub.followedTrader == traderID {
+				matched = true
+				select {
+				case sub.ch <- event:
+				default:
+					slog.Warn("subscriber channel full, dropping trade", "subscriber", sub.followedTrader)
+				}
 			}
 		}
+		ts.mu.Unlock()
+
+		if matched {
+			slog.Info("routed trade to subscriber", "trader", traderID, "order_book", orderBookID, "side", side)
+		} else {
+			slog.Debug("no subscriber for trade", "trader", traderID, "order_book", orderBookID)
+		}
 	}
-	ts.mu.Unlock()
 }
 
 // Subscribe registers a subscriber for trades from the given followedTrader UUID.
@@ -212,6 +241,11 @@ func (ts *TradeStream) Subscribe(followedTrader uuid.UUID) (uuid.UUID, <-chan Tr
 		ch:             make(chan TradeEvent, 100), //nolint:mnd
 	}
 	ts.subscribers[subscriberID] = s
+	slog.Info("trade stream subscriber added",
+		"subscriber_id", subscriberID,
+		"followed_trader", followedTrader,
+		"total_subscribers", len(ts.subscribers),
+	)
 	return subscriberID, s.ch
 }
 

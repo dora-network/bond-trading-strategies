@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy"
@@ -121,6 +122,8 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 	subscriberID, tradeCh := s.tradeStream.Subscribe(s.cfg.FollowedTrader)
 	defer s.tradeStream.Unsubscribe(subscriberID)
 
+	s.log.Info("copy trading run loop started", "run_id", s.runID, "followed_trader", s.cfg.FollowedTrader)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -139,8 +142,10 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 			}
 		case trade, ok := <-tradeCh:
 			if !ok {
+				s.log.Info("trade channel closed, exiting run loop", "run_id", s.runID)
 				return nil
 			}
+			s.log.Info("received trade event", "run_id", s.runID, "trader", trade.TraderID, "side", trade.Side, "order_book", trade.OrderBookID)
 			if err := s.handleTrade(ctx, trade); err != nil {
 				s.log.Error("failed to handle trade", "err", err, "trade", trade.ExecutionID)
 			}
@@ -155,13 +160,16 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		return nil
 	}
 
-	// Determine side. The trade stream sends lowercase ("buy"/"sell");
-	// DORA's API expects the typed uppercase constants.
+	// Determine side. The trade stream sends "buy"/"sell" in varying
+	// case; DORA's API expects the typed uppercase constants.
 	var side doraclient.Side
-	if trade.Side == "buy" {
+	switch strings.ToLower(trade.Side) {
+	case "buy":
 		side = doraclient.SIDE_BUY
-	} else {
+	case "sell":
 		side = doraclient.SIDE_SELL
+	default:
+		return fmt.Errorf("unknown trade side %q", trade.Side)
 	}
 
 	// Fetch the current position on the traded asset. Needed to:
