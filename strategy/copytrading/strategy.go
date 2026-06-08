@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy"
@@ -45,6 +46,8 @@ type Strategy struct {
 	tradeStream   *streams.TradeStream
 	runID         uuid.UUID
 	disallowedSet map[uuid.UUID]struct{}
+	paused        bool
+	mu            sync.Mutex
 }
 
 // New creates a new Strategy with the given configuration and functional options.
@@ -122,6 +125,10 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 	subscriberID, tradeCh := s.tradeStream.Subscribe(s.cfg.FollowedTrader)
 	defer s.tradeStream.Unsubscribe(subscriberID)
 
+	return s.runLoop(ctx, msgCh, tradeCh)
+}
+
+func (s *Strategy) runLoop(ctx context.Context, msgCh <-chan strategy.Message, tradeCh <-chan streams.TradeEvent) error {
 	s.log.Info("copy trading run loop started", "run_id", s.runID, "followed_trader", s.cfg.FollowedTrader)
 
 	for {
@@ -136,14 +143,27 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 			case strategy.Stop:
 				return nil
 			case strategy.Pause:
+				s.mu.Lock()
+				s.paused = true
+				s.mu.Unlock()
 				s.log.Info("copy trading paused", "run_id", s.runID)
 			case strategy.Resume:
+				s.mu.Lock()
+				s.paused = false
+				s.mu.Unlock()
 				s.log.Info("copy trading resumed", "run_id", s.runID)
 			}
 		case trade, ok := <-tradeCh:
 			if !ok {
 				s.log.Info("trade channel closed, exiting run loop", "run_id", s.runID)
 				return nil
+			}
+			s.mu.Lock()
+			isPaused := s.paused
+			s.mu.Unlock()
+			if isPaused {
+				s.log.Debug("skipping trade while paused", "run_id", s.runID, "trader", trade.TraderID)
+				continue
 			}
 			s.log.Info("received trade event", "run_id", s.runID, "trader", trade.TraderID, "side", trade.Side, "order_book", trade.OrderBookID)
 			if err := s.handleTrade(ctx, trade); err != nil {

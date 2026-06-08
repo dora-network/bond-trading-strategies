@@ -162,6 +162,36 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 	require.Equal(t, "-1", records[2].OpenPosition.String())
 }
 
+func TestSimulate_ReverseLongToShort_CloseRecordHasOriginalQuantity(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	trades := []Trade{
+		makeTrade("tx-open", asset.String(), "buy", "100", "1", t0),
+		makeTrade("tx-reverse", asset.String(), "sell", "120", "0.5", t1),
+	}
+
+	b := newBacktesterForSimulation(followed)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t1)
+	require.NoError(t, err)
+
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
+	require.Len(t, records, 3)
+
+	// The close record (index 1) must show the original long
+	// quantity and a zero open position — not zero quantity.
+	closeRec := records[1]
+	require.Equal(t, types.SignalSell, closeRec.Signal)
+	require.Equal(t, "1", closeRec.Quantity.String(),
+		"close record must show original long quantity, not zero")
+	require.Equal(t, "0", closeRec.OpenPosition.String(),
+		"open position must be zero immediately after full close")
+}
+
 func TestSimulate_BuyThenPartialSell(t *testing.T) {
 	t.Parallel()
 

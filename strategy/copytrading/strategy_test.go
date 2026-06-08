@@ -1,8 +1,13 @@
 package copytrading
 
 import (
+	"context"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -493,4 +498,121 @@ func TestAvailableBalanceFor(t *testing.T) {
 				"expected %s, got %s", tt.want, got)
 		})
 	}
+}
+
+func TestRunLoop_PauseSuppressesTradeHandling(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	bondID := uuid.New()
+	orderBookID := uuid.New()
+	usdID := uuid.New().String()
+
+	cfg := Config{
+		FollowedTrader:        followed,
+		PercentageOfAvailable: decimal.MustParse("0.5"),
+		Leverage:              decimal.MustParse("1.0"),
+	}
+	s := New(cfg)
+
+	client := &fakeMarketAPI{}
+	client.portfolio = &doraclient.AccountPortfolioV2{
+		Accounts: map[string]map[string]doraclient.AccountV2{
+			"global": {
+				bondID.String(): {AssetId: bondID.String(), IsGlobal: boolPtr(true), Available: "1000"},
+				usdID:           {AssetId: usdID, IsGlobal: boolPtr(true), Available: "10000"},
+			},
+		},
+	}
+	client.quoteAssetID = usdID
+	SetMarketAPI(s, client)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msgCh := make(chan strategy.Message)
+	tradeCh := make(chan streams.TradeEvent, 10)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+	}()
+
+	trade := streams.TradeEvent{
+		TraderID:    followed,
+		OrderBookID: orderBookID,
+		AssetID:     bondID,
+		Side:        "buy",
+		Quantity:    decimal.MustParse("1"),
+		Price:       decimal.MustParse("100"),
+		ExecutionID: "exec-1",
+	}
+
+	// 1. Trade while running → CreateMarketOrder should be called.
+	tradeCh <- trade
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, 1, client.createMarketOrderCount(),
+		"expected CreateMarketOrder to be called when not paused")
+
+	// 2. Send Pause.
+	msgCh <- strategy.Pause
+	time.Sleep(20 * time.Millisecond)
+
+	// 3. Trade while paused → CreateMarketOrder should NOT be called.
+	trade.ExecutionID = "exec-2"
+	tradeCh <- trade
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, 1, client.createMarketOrderCount(),
+		"expected CreateMarketOrder to NOT be called while paused")
+
+	// 4. Send Resume.
+	msgCh <- strategy.Resume
+	time.Sleep(20 * time.Millisecond)
+
+	// 5. Trade after resume → CreateMarketOrder should be called again.
+	trade.ExecutionID = "exec-3"
+	tradeCh <- trade
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, 2, client.createMarketOrderCount(),
+		"expected CreateMarketOrder to be called after resume")
+
+	cancel()
+	<-done
+}
+
+type fakeMarketAPI struct {
+	mu                     sync.Mutex
+	portfolio              *doraclient.AccountPortfolioV2
+	quoteAssetID           string
+	createMarketOrderCalls int
+}
+
+func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, _ doraclient.Side, _ decimal.Decimal, _ decimal.Decimal, _ bool) error {
+	f.mu.Lock()
+	f.createMarketOrderCalls++
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeMarketAPI) GetAssetPosition(_ context.Context, _ string) (decimal.Decimal, decimal.Decimal, error) {
+	return decimal.Zero, decimal.Zero, nil
+}
+
+func (f *fakeMarketAPI) GetPortfolioV2(_ context.Context) (*doraclient.AccountPortfolioV2, error) {
+	return f.portfolio, nil
+}
+
+func (f *fakeMarketAPI) QuoteAssetID(_ context.Context, _ string) (string, error) {
+	return f.quoteAssetID, nil
+}
+
+func (f *fakeMarketAPI) createMarketOrderCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.createMarketOrderCalls
+}
+
+func boolPtr(b bool) *bool {
+	return &b
 }
