@@ -109,6 +109,11 @@ type position struct {
 	avgEntry    decimal.Decimal
 	openTime    time.Time
 	openTradeID uuid.UUID
+	// openBalance is the cash balance at the time the position was
+	// opened, before any cash flow for the opening trade. Recorded so
+	// the ClosedTrade that closes this position can report the balance
+	// that was actually deployed, not the balance at close time.
+	openBalance decimal.Decimal
 }
 
 func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end time.Time) (BacktestResult, error) {
@@ -387,6 +392,7 @@ func buyClosesShort(
 		avgEntry:    price,
 		openTime:    trade.CreatedAt,
 		openTradeID: tradeID,
+		openBalance: preOpenCash,
 	}
 	positions[trade.Asset] = pos
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, newQty, price, preOpenCash, pos.qty, tradeRecords)
@@ -416,6 +422,7 @@ func buyOpensOrAddsLong(
 			avgEntry:    price,
 			openTime:    trade.CreatedAt,
 			openTradeID: tradeID,
+			openBalance: preTradeCash,
 		}
 	} else {
 		oldCost, _ := pos.qty.Mul(pos.avgEntry)
@@ -506,6 +513,7 @@ func sellClosesLong(
 		avgEntry:    price,
 		openTime:    trade.CreatedAt,
 		openTradeID: tradeID,
+		openBalance: preOpenCash,
 	}
 	positions[trade.Asset] = pos
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, newQty, price, preOpenCash, pos.qty, tradeRecords)
@@ -536,6 +544,7 @@ func sellOpensOrAddsShort(
 			avgEntry:    price,
 			openTime:    trade.CreatedAt,
 			openTradeID: tradeID,
+			openBalance: preTradeCash,
 		}
 	} else {
 		absQty := pos.qty.Abs()
@@ -572,7 +581,7 @@ func closeLongPosition(
 		EntryPrice:   pos.avgEntry,
 		ExitPrice:    price,
 		PnL:          pnl,
-		EntryBalance: cash,
+		EntryBalance: pos.openBalance,
 		OpenTradeID:  pos.openTradeID,
 		CloseTradeID: tradeID,
 	})
@@ -602,7 +611,7 @@ func closeShortPosition(
 		EntryPrice:   pos.avgEntry,
 		ExitPrice:    price,
 		PnL:          pnl,
-		EntryBalance: cash,
+		EntryBalance: pos.openBalance,
 		OpenTradeID:  pos.openTradeID,
 		CloseTradeID: tradeID,
 	})
