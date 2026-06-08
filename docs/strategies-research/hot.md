@@ -9,7 +9,7 @@ updated: 2026-06-04T00:00:00Z
 
 ## Recent Activity
 
-- [2026-06-04] INIT — vault created at docs/wiki/
+- [2026-06-04] INIT — vault created at docs/strategies-research/
 - [2026-06-04] WIKI_RESEARCH — "Bond Trading Strategies" (23 pages)
 - [2026-06-04] WIKI_RESEARCH — "Continuous Fractionalized Marketplace" (12 pages)
 - [2026-06-04] WIKI_RESEARCH — "Technical Indicators in Continuous Bond Markets" (7 pages)

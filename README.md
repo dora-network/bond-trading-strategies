@@ -569,3 +569,57 @@ go build -trimpath -o price-daemon ./cmd/price-daemon
 - **mcp-server** wraps both systems in the Model Context Protocol so that AI
   agents can discover strategies, run backtests, manage live runs, and query
   FRED yield-curve data using natural-language tools.
+
+---
+
+## Research wiki (Obsidian)
+
+Research notes, concept summaries, reference digests, and synthesis documents
+for bond trading strategies live in an Obsidian-compatible vault at
+[`docs/strategies-research/`](./docs/strategies-research/). It is a regular folder of Markdown files plus a
+`.obsidian/` config directory, so you can open it directly in Obsidian without
+any import step.
+
+### Open the wiki as a vault
+
+1. Launch [Obsidian](https://obsidian.md).
+2. Click **Open another vault** (or **Manage vaults → Open** on the vault
+   picker) in the left sidebar.
+3. Choose **Open folder as vault**.
+4. Select this repository's `docs/strategies-research/` directory and confirm.
+
+Obsidian will treat the folder as a vault and load its existing
+`.obsidian/` settings (appearance, plugins, graph view configuration) as-is.
+
+### What's inside
+
+| Folder         | Contents                                                       |
+| -------------- | -------------------------------------------------------------- |
+| `index.md`     | Vault entry point — start here                                 |
+| `hot.md`       | Recently active pages, surfaced for quick re-engagement        |
+| `log.md`       | Append-only activity log of wiki changes                       |
+| `concepts/`    | Bond trading concepts, strategies, theoretical foundations     |
+| `entities/`    | Exchanges, instruments, data providers, named techniques       |
+| `references/`  | Papers, articles, and external resources with digests          |
+| `synthesis/`   | Long-form research write-ups tying concepts to the project     |
+| `projects/`    | Project-scoped notes and tracked work                          |
+| `skills/`      | Notes about local skills and how they are wired in             |
+| `_raw/`        | Drafts pending promotion into the main wiki                    |
+| `_staging/`    | Ingestion staging area for sources being processed             |
+| `_archives/`   | Deprecated pages kept for historical reference                 |
+
+### Reading and analyzing
+
+- **Graph view** — open with `Ctrl/Cmd + G` to see how concepts, entities, and
+  references link together. Pages cross-link heavily via `[[wikilinks]]`.
+- **Backlinks** — open the right sidebar (`Ctrl/Cmd + E` → *Backlinks*) on any
+  page to see every other page that references it.
+- **Search** — `Ctrl/Cmd + Shift + F` runs a full-text search across the vault.
+- **Local graph** — click a page and use *Open local graph* to see only that
+  page's neighborhood.
+- **Tags and properties** — frontmatter `tags:` and YAML properties are
+  queryable through Obsidian's *Search* and *Bases* plugins.
+
+To regenerate or extend the wiki from sources, use the project's `wiki-*`
+skills (see `.agents/skills/`). The wiki's own `index.md` is rebuilt
+automatically by the `wiki-ingest` skill after each ingest.
