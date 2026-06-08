@@ -158,8 +158,8 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 2)
-	require.Equal(t, "0", records[1].OpenPosition.String())
+	require.Len(t, records, 3)
+	require.Equal(t, "-1", records[2].OpenPosition.String())
 }
 
 func TestSimulate_BuyThenPartialSell(t *testing.T) {
@@ -181,15 +181,15 @@ func TestSimulate_BuyThenPartialSell(t *testing.T) {
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
-	require.Equal(t, "0.4", closed[0].Quantity.String())
+	require.Equal(t, "1", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "150", closed[0].ExitPrice.String())
-	require.Equal(t, "20.0", closed[0].PnL.String())
+	require.Equal(t, "50", closed[0].PnL.String())
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 2)
-	require.Equal(t, "0.6", records[1].OpenPosition.String())
+	require.Len(t, records, 3)
+	require.Equal(t, "-0.4", records[2].OpenPosition.String())
 }
 
 func TestSimulate_MultipleBuysWeightedAvg(t *testing.T) {
@@ -237,15 +237,15 @@ func TestSimulate_BuyClosesShort(t *testing.T) {
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
-	require.Equal(t, "0.4", closed[0].Quantity.String())
+	require.Equal(t, "1", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "80", closed[0].ExitPrice.String())
-	require.Equal(t, "8.0", closed[0].PnL.String())
+	require.Equal(t, "20", closed[0].PnL.String())
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 2)
-	require.Equal(t, "-0.6", records[1].OpenPosition.String())
+	require.Len(t, records, 3)
+	require.Equal(t, "0.4", records[2].OpenPosition.String())
 }
 
 func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
@@ -274,9 +274,9 @@ func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.GreaterOrEqual(t, len(records), 2)
+	require.Len(t, records, 3)
 	last := records[len(records)-1]
-	require.Equal(t, "0.5", last.OpenPosition.String())
+	require.Equal(t, "1.5", last.OpenPosition.String())
 }
 
 func TestSimulate_SellOpensShort(t *testing.T) {
@@ -325,9 +325,9 @@ func TestSimulate_WinLossCount(t *testing.T) {
 	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t3)
 	require.NoError(t, err)
 
-	require.Equal(t, 1, res.GetWinCount())
+	require.Equal(t, 2, res.GetWinCount())
 	require.Equal(t, 1, res.GetLossCount())
-	require.Equal(t, "30", res.GetTotalPnL().String())
+	require.Equal(t, "80", res.GetTotalPnL().String())
 }
 
 func TestSimulate_MaxDrawdownNonNegative(t *testing.T) {
@@ -374,10 +374,12 @@ func TestSimulate_MultiPageStream(t *testing.T) {
 	asset := uuid.New()
 	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 
-	// 300 trades = 3 pages of 100. Even-indexed trades are BUYs that
-	// accumulate into a long position; odd-indexed are SELLs that
-	// close them. The simulation must process all 300 across the
-	// page boundary without dropping or reordering.
+	// 300 trades = 3 pages of 100. Even-indexed trades are BUYs,
+	// odd-indexed are SELLs. With full-close-on-reversal behaviour
+	// each trade after the first produces two records (close + open),
+	// so we expect 1 + 299*2 = 599 records. The simulation must
+	// process all 300 trades across the page boundary without
+	// dropping or reordering.
 	var trades []Trade
 	for i := 0; i < 300; i++ {
 		side := "buy"
@@ -400,11 +402,11 @@ func TestSimulate_MultiPageStream(t *testing.T) {
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 300, "every trade across all 3 pages must be processed")
+	require.Len(t, records, 599, "every trade across all 3 pages must be processed")
 
 	// First and last trade IDs must match the input order.
 	require.Equal(t, trades[0].TransactionID, records[0].TradeID.String())
-	require.Equal(t, trades[299].TransactionID, records[299].TradeID.String())
+	require.Equal(t, trades[299].TransactionID, records[len(records)-1].TradeID.String())
 }
 
 func TestBacktesterRun_NoDataForUser(t *testing.T) {
