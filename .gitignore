@@ -38,8 +38,7 @@ tmp/
 skills-lock.json
 opencode.jsonc
 .opencode
-graphify-out/manifest.json
-graphify-out/cost.json
-graphify-out/cache/
-graphify-out/.graphify_python
-graphify-out/.graphify_root
+opencode.json*
+db-bastion.sh
+scripts/sync-dora-trades.sh
+scripts/trades_history*.sql

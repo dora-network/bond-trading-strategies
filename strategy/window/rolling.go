@@ -2,6 +2,10 @@ package window
 
 import "github.com/govalues/decimal"
 
+// minWindowSize is the minimum number of values required for sample
+// variance to be defined (n-1 divisor).
+const minWindowSize = 2
+
 // Rolling maintains a fixed-size circular buffer of decimal.Decimal values and
 // provides efficient rolling mean and standard deviation.
 //
@@ -19,8 +23,8 @@ type Rolling struct {
 // NewRollingWindow creates an empty window with the given lookback size.
 // size must be ≥ 2 (required for standard deviation to be defined).
 func NewRollingWindow(size int) *Rolling {
-	if size < 2 { //nolint:mnd
-		size = 2
+	if size < minWindowSize {
+		size = minWindowSize
 	}
 	return &Rolling{
 		size: size,
@@ -128,7 +132,7 @@ func (w *Rolling) Mean() decimal.Decimal {
 // Variance returns the sample variance (divides by n−1).
 // Returns 0 if fewer than 2 values are present.
 func (w *Rolling) Variance() (decimal.Decimal, error) {
-	if w.count < 2 { //nolint:mnd
+	if w.count < minWindowSize {
 		return decimal.Zero, nil
 	}
 	countMinus1 := decimal.MustNew(int64(w.count-1), 0)

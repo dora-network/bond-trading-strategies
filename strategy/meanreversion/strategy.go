@@ -13,6 +13,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/config"
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
 	"github.com/dora-network/dora-client-go/doraclient"
@@ -100,6 +101,7 @@ type Strategy struct {
 	pricesReqID           uuid.UUID
 	benchmarkObservations []fred.Observation
 	errs                  []error
+	backtestWriter        stats.BacktestTradeWriter
 
 	// Tracked balances, initialised from DORA on Run and updated on trade
 	// execution.  Protected by mu.
@@ -160,6 +162,15 @@ func WithMarketAPIClient(client marketAPIClient) func(*Strategy) {
 	}
 }
 
+// WithBacktestWriter sets the destination for per-trade rows the
+// backtester emits during a backtest. If unset, trade rows are not
+// persisted and the /trades endpoints return empty.
+func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
+	return func(s *Strategy) {
+		s.backtestWriter = w
+	}
+}
+
 func (s *Strategy) logger() *slog.Logger {
 	if s.log == nil {
 		return slog.Default()
@@ -176,7 +187,7 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtest
 		return backtestResult, fmt.Errorf("start and end date must be in the past")
 	}
 
-	bt := NewBacktester(New(s.cfg, s.pricesHandler))
+	bt := NewBacktester(s, s.backtestWriter)
 	obs, err := s.getObservations(ctx, start, end)
 	if err != nil {
 		return backtestResult, err
@@ -250,11 +261,7 @@ func (s *Strategy) currentPosition(ctx context.Context, assetID string) (decimal
 	if strings.TrimSpace(assetID) == "" {
 		return decimal.Zero, errors.New("asset ID is required")
 	}
-	accountID, err := s.marketAPIClient.SelfUserID(ctx)
-	if err != nil {
-		return decimal.Zero, err
-	}
-	long, short, err := s.marketAPIClient.AssetPosition(ctx, accountID, assetID)
+	long, short, err := s.marketAPIClient.AssetPosition(ctx, assetID)
 	if err != nil {
 		return decimal.Zero, err
 	}
@@ -371,18 +378,12 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 		s.log.Warn("initialise balances: v2 portfolio unavailable, falling back to legacy path", "err", err)
 	}
 
-	// Fallback: use the legacy SelfUserID + AssetPosition path.
-	// This uses the global account regardless of leverage.
-	accountID, err := s.marketAPIClient.SelfUserID(ctx)
-	if err != nil {
-		s.mu.Lock()
-		s.errs = append(s.errs, fmt.Errorf("initialise balances: get user ID: %w", err))
-		s.mu.Unlock()
-		return
-	}
+	// Fallback: use the AssetPosition path. This uses the global
+	// account regardless of leverage. The user ID is resolved (and
+	// cached) inside AssetPosition.
 
 	// Fetch bond position.
-	bondAvailable, bondBorrowed, err := s.marketAPIClient.AssetPosition(ctx, accountID, baseAssetID)
+	bondAvailable, bondBorrowed, err := s.marketAPIClient.AssetPosition(ctx, baseAssetID)
 	if err != nil {
 		s.mu.Lock()
 		s.errs = append(s.errs, fmt.Errorf("initialise balances: get bond position: %w", err))
@@ -398,7 +399,7 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 	}
 
 	// Fetch USD balance.
-	usdAvailable, _, err := s.marketAPIClient.AssetPosition(ctx, accountID, quoteAssetID)
+	usdAvailable, _, err := s.marketAPIClient.AssetPosition(ctx, quoteAssetID)
 	if err != nil {
 		s.mu.Lock()
 		s.errs = append(s.errs, fmt.Errorf("initialise balances: get USD balance: %w", err))
@@ -928,11 +929,11 @@ func (s *Strategy) ShouldExit(openSignal types.Signal, currentZScore decimal.Dec
 	switch openSignal { //nolint:exhaustive // SignalHold → no exit needed, fall through to stop-loss check
 	case types.SignalBuy:
 		if currentZScore.Cmp(s.cfg.ExitZScore) <= 0 {
-			return true, types.ExitReasonTakeProfit
+			return true, ExitReasonTakeProfit
 		}
 	case types.SignalSell:
 		if currentZScore.Cmp(s.cfg.ExitZScore.Neg()) >= 0 {
-			return true, types.ExitReasonTakeProfit
+			return true, ExitReasonTakeProfit
 		}
 	}
 
@@ -943,13 +944,13 @@ func (s *Strategy) ShouldExit(openSignal types.Signal, currentZScore decimal.Dec
 			// We went long because spread was wide (z > +entry).
 			// Stop out if spread widens even further (z grows more positive).
 			if currentZScore.Cmp(s.cfg.StopLossZScore) >= 0 {
-				return true, types.ExitReasonStopLoss
+				return true, ExitReasonStopLoss
 			}
 		case types.SignalSell:
 			// We went short because spread was tight (z < -entry).
 			// Stop out if spread tightens even further (z grows more negative).
 			if currentZScore.Cmp(s.cfg.StopLossZScore.Neg()) <= 0 {
-				return true, types.ExitReasonStopLoss
+				return true, ExitReasonStopLoss
 			}
 		default:
 			return false, ""

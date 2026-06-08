@@ -451,3 +451,67 @@ func TestToolsListContainsExpectedTools(t *testing.T) {
 	}
 	assert.False(t, names["fred_backtest_from_series"])
 }
+
+// TestStrategyConfigSchemaIsTyped is a regression test for the bug where
+// `config` was exposed as an untyped object and MCP clients (opencode)
+// would stringify numeric/array values, causing the strategy-server to
+// reject requests with "cannot unmarshal string into ... of type float64".
+// The schema for `config` must declare explicit property types so clients
+// know to send numbers as numbers and arrays as arrays.
+func TestStrategyConfigSchemaIsTyped(t *testing.T) {
+	ts := newTestClient(t)
+	res, err := ts.Client().ListTools(context.Background(), mcp.ListToolsRequest{})
+	require.NoError(t, err)
+
+	toolsByName := make(map[string]mcp.Tool, len(res.Tools))
+	for _, tool := range res.Tools {
+		toolsByName[tool.Name] = tool
+	}
+
+	for _, name := range []string{"strategy_backtest_create", "strategy_run_create"} {
+		t.Run(name, func(t *testing.T) {
+			tool, ok := toolsByName[name]
+			require.True(t, ok, "tool %q not registered", name)
+
+			raw, err := json.Marshal(tool.InputSchema)
+			require.NoError(t, err)
+			var schema struct {
+				Properties map[string]struct {
+					Type       string `json:"type"`
+					Properties map[string]struct {
+						Type  string `json:"type"`
+						Items struct {
+							Type string `json:"type"`
+						} `json:"items"`
+					} `json:"properties"`
+				} `json:"properties"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &schema))
+
+			config, ok := schema.Properties["config"]
+			require.True(t, ok, "config property missing from %s schema", name)
+			require.Equal(t, "object", config.Type, "config must be type object")
+			require.NotEmpty(t, config.Properties, "config must declare explicit property types so clients don't stringify values")
+
+			checkField := func(field, wantType string) {
+				t.Helper()
+				f, ok := config.Properties[field]
+				require.True(t, ok, "%s.config.%s must be declared in schema", name, field)
+				require.Equal(t, wantType, f.Type, "%s.config.%s must be type %q, got %q", name, field, wantType, f.Type)
+			}
+			checkField("percentage_of_available", "number")
+			checkField("leverage", "number")
+			checkField("min_order_size", "integer")
+			checkField("max_order_size", "integer")
+			checkField("lookback_window", "integer")
+			checkField("entry_z_score", "number")
+			checkField("exit_z_score", "number")
+			checkField("max_position_size", "number")
+
+			arr, ok := config.Properties["disallowed_bonds"]
+			require.True(t, ok, "%s.config.disallowed_bonds must be declared in schema", name)
+			require.Equal(t, "array", arr.Type, "disallowed_bonds must be type array, got %q", arr.Type)
+			require.Equal(t, "string", arr.Items.Type, "disallowed_bonds items must be type string, got %q", arr.Items.Type)
+		})
+	}
+}

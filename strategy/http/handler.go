@@ -17,7 +17,9 @@ import (
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 )
@@ -27,26 +29,36 @@ const (
 	strategyStatusNotImplemented = "not_implemented"
 	defaultPaginationLimit       = 10
 	maxPaginationLimit           = 50
+	// batchSize is the row count that triggers a flush in the batching
+	// backtest trade writer. Tuned with flushAfter so a backtest emitting
+	// rows faster than the flush interval still drains in bounded chunks.
+	batchSize = 1000
+	// flushAfter bounds how long buffered rows can sit before being
+	// written, so a slow trickle of trades doesn't leave a tail of
+	// un-flushed rows in memory.
+	flushAfter = time.Second
 )
 
 type Handler struct {
-	service        strategycore.Service
-	now            func() time.Time
-	log            *slog.Logger
-	strategies     map[string]StrategyDefinition
-	prices         *prices.Handler
-	doraClient     doraClient
-	runStore       RunStore
-	backtestStore  BacktestStore
-	encryptionKey  []byte // 32-byte AES-256 key for encrypting API keys at rest
-	mux            *http.ServeMux
-	authedMux      http.Handler
-	mu             sync.RWMutex
-	backtests      map[uuid.UUID]*BacktestDetail
-	runs           map[uuid.UUID]*RunDetail
-	orderbookCache map[string]DORAOrderBookSummary
-	assetCache     map[string]AssetInfo
-	cacheMu        sync.RWMutex
+	service            strategycore.Service
+	now                func() time.Time
+	log                *slog.Logger
+	strategies         map[string]StrategyDefinition
+	prices             *prices.Handler
+	doraClient         doraClient
+	runStore           RunStore
+	backtestStore      BacktestStore
+	tradesHistoryStore *copytrading.PGTradesHistoryStore
+	tradeStream        *streams.TradeStream
+	encryptionKey      []byte // 32-byte AES-256 key for encrypting API keys at rest
+	mux                *http.ServeMux
+	authedMux          http.Handler
+	mu                 sync.RWMutex
+	backtests          map[uuid.UUID]*BacktestDetail
+	runs               map[uuid.UUID]*RunDetail
+	orderbookCache     map[string]DORAOrderBookSummary
+	assetCache         map[string]AssetInfo
+	cacheMu            sync.RWMutex
 }
 
 type runStarter interface {
@@ -60,7 +72,7 @@ type StrategyDefinition struct {
 	ConfigFields     []StrategyConfigField
 	SupportsRun      bool
 	SupportsBacktest bool
-	DecodeConfig     func(json.RawMessage, string) (json.RawMessage, strategycore.Strategy, error)
+	DecodeConfig     func(json.RawMessage, string, stats.BacktestTradeWriter) (json.RawMessage, strategycore.Strategy, error)
 }
 
 type StrategyConfigField struct {
@@ -109,6 +121,12 @@ type DORAUserSummary struct {
 	ID string `json:"id"`
 }
 
+// CopyTraderSummary is a single entry in the list-copy-traders response.
+type CopyTraderSummary struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+}
+
 type AssetInfo struct {
 	Name   string `json:"name"`
 	Symbol string `json:"symbol"`
@@ -141,12 +159,20 @@ func (h *Handler) summaryResult(ctx context.Context, d *BacktestDetail) Backtest
 		Config:       d.Config,
 		Error:        d.Error,
 	}
-	if d.Result != nil {
-		s.TotalPnL = d.Result.TotalPnL
-		s.WinCount = d.Result.WinCount
-		s.LossCount = d.Result.LossCount
-		s.MaxDrawdown = d.Result.MaxDrawdown
-		s.SharpeRatio = d.Result.SharpeRatio
+	if len(d.Result) > 0 {
+		var summary struct {
+			TotalPnL    string `json:"total_pnl"` //nolint:tagliatelle
+			WinCount    int    `json:"win_count"`
+			LossCount   int    `json:"loss_count"`
+			MaxDrawdown string `json:"max_drawdown"`
+			SharpeRatio string `json:"sharpe_ratio"`
+		}
+		_ = json.Unmarshal(d.Result, &summary)
+		s.TotalPnL = summary.TotalPnL
+		s.WinCount = summary.WinCount
+		s.LossCount = summary.LossCount
+		s.MaxDrawdown = summary.MaxDrawdown
+		s.SharpeRatio = summary.SharpeRatio
 	}
 
 	var cfg orderBookConfig
@@ -200,7 +226,7 @@ func (h *Handler) resolveOrderbookAsset(ctx context.Context, orderBookID string)
 
 	client := h.doraClient
 	if client == nil {
-		client = newDORAClient()
+		client = NewDORAClient()
 	}
 
 	orderbooks, err := client.ListOrderBooks(ctx)
@@ -250,7 +276,7 @@ type BacktestDetail struct {
 	BacktestSummary
 	Start  time.Time       `json:"start"`
 	End    time.Time       `json:"end"`
-	Result *BacktestResult `json:"result,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 type RunSummary struct {
@@ -350,17 +376,17 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-type BacktestResult struct {
-	ClosedTrades []ClosedTrade `json:"closed_trades"`
-	TradeRecords []TradeRecord `json:"trade_records"`
-	TotalPnL     string        `json:"total_pnl"` //nolint:tagliatelle
-	WinCount     int           `json:"win_count"`
-	LossCount    int           `json:"loss_count"`
-	MaxDrawdown  string        `json:"max_drawdown"`
-	SharpeRatio  string        `json:"sharpe_ratio"`
+type MeanReversionBacktestResult struct {
+	ClosedTrades []MeanReversionClosedTrade `json:"closed_trades"`
+	TradeRecords []MeanReversionTradeRecord `json:"trade_records"`
+	TotalPnL     string                     `json:"total_pnl"` //nolint:tagliatelle
+	WinCount     int                        `json:"win_count"`
+	LossCount    int                        `json:"loss_count"`
+	MaxDrawdown  string                     `json:"max_drawdown"`
+	SharpeRatio  string                     `json:"sharpe_ratio"`
 }
 
-type ClosedTrade struct {
+type MeanReversionClosedTrade struct {
 	BondID       string    `json:"bond_id"`
 	OpenTime     time.Time `json:"open_time"`
 	CloseTime    time.Time `json:"close_time"`
@@ -379,7 +405,7 @@ type ClosedTrade struct {
 	EntryBalance string    `json:"entry_balance"`
 }
 
-type TradeRecord struct {
+type MeanReversionTradeRecord struct {
 	Time         time.Time `json:"time"`
 	BondID       string    `json:"bond_id"`
 	Signal       string    `json:"signal"`
@@ -407,13 +433,14 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		h.log = slog.Default()
 	}
 	if h.strategies == nil {
-		h.strategies = defaultStrategies(h.prices, h.log)
+		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.log)
 	}
 
 	h.mux = http.NewServeMux()
 	h.mux.HandleFunc("/healthz", h.handleHealth)
 	h.mux.HandleFunc("/v1/dora/orderbooks", h.handleDORAOrderBooks)
 	h.mux.HandleFunc("/v1/dora/user", h.handleDORAUser)
+	h.mux.HandleFunc("/v1/copy-traders", h.handleCopyTraders)
 	h.mux.HandleFunc("/v1/tenors", h.handleTenors)
 	h.mux.HandleFunc("/v1/strategies", h.handleStrategies)
 	h.mux.HandleFunc("/v1/backtests", h.handleBacktests)
@@ -459,6 +486,22 @@ func WithRunStore(store RunStore) func(*Handler) {
 func WithBacktestStore(store BacktestStore) func(*Handler) {
 	return func(h *Handler) {
 		h.backtestStore = store
+	}
+}
+
+// WithTradesHistoryStore sets the store used by the copy-trading
+// backtest to read the followed trader's trade history from the
+// trades_history Postgres table.
+func WithTradesHistoryStore(store *copytrading.PGTradesHistoryStore) func(*Handler) {
+	return func(h *Handler) {
+		h.tradesHistoryStore = store
+	}
+}
+
+// WithTradeStream sets the live trade stream used by copy-trading runs.
+func WithTradeStream(ts *streams.TradeStream) func(*Handler) {
+	return func(h *Handler) {
+		h.tradeStream = ts
 	}
 }
 
@@ -545,7 +588,7 @@ func (h *Handler) handleDORAOrderBooks(w http.ResponseWriter, r *http.Request) {
 
 	client := h.doraClient
 	if client == nil {
-		client = newDORAClient()
+		client = NewDORAClient()
 	}
 	items, err := client.ListOrderBooks(r.Context())
 	if err != nil {
@@ -568,6 +611,37 @@ func (h *Handler) handleDORAUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, DORAUserSummary{ID: userID})
+}
+
+// handleCopyTraders returns the list of traders available to be followed by
+// copy-trading runs. This is a placeholder that filters DORA users by name
+// prefix until DORA exposes a dedicated "list available copy traders" endpoint.
+// TODO(remove-placeholder): when DORA ships the new endpoint, swap the body of
+// this handler to call it directly. The response shape must stay the same.
+func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	client := h.doraClient
+	if client == nil {
+		client = NewDORAClient()
+	}
+	users, err := client.ListBotUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list copy traders: %v", err))
+		return
+	}
+
+	items := make([]CopyTraderSummary, 0, len(users))
+	for _, u := range users {
+		items = append(items, CopyTraderSummary{
+			ID:          u.ID,
+			DisplayName: strings.TrimSpace(u.FirstName + " " + u.LastName),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (h *Handler) handleBacktests(w http.ResponseWriter, r *http.Request) {
@@ -696,7 +770,14 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	def, cfg, strat, statusCode, err := h.resolveStrategy(req.StrategyType, req.Config, capabilityBacktest)
+	id := uuid.Must(uuid.NewV7())
+	var tradeWriter stats.BacktestTradeWriter
+	var batcher *BatchingBacktestWriter
+	if h.backtestStore != nil {
+		batcher = NewBatchingBacktestWriter(h.backtestStore, batchSize, flushAfter)
+		tradeWriter = newScopedBacktestWriter(id, batcher)
+	}
+	def, cfg, strat, statusCode, err := h.resolveStrategy(req.StrategyType, req.Config, capabilityBacktest, tradeWriter)
 	if err != nil {
 		writeError(w, statusCode, err.Error())
 		return
@@ -722,7 +803,7 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, resultCh, err := h.service.RunBacktest(r.Context(), strat, req.Start, req.End)
+	resultCh, err := h.service.RunBacktest(r.Context(), id, strat, req.Start, req.End)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("run backtest: %v", err))
 		return
@@ -751,14 +832,14 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go h.awaitBacktestResult(id, resultCh) //nolint:contextcheck,gosec // backtest outlives the HTTP request context
+	go h.awaitBacktestResult(id, resultCh, batcher) //nolint:contextcheck,gosec // backtest outlives the HTTP request context
 	writeJSON(w, http.StatusAccepted, detail)
 }
 
-func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.BacktestResult) {
+func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.BacktestResult, batcher *BatchingBacktestWriter) {
 	result, ok := <-resultCh
 	if !ok {
-		result = types.BacktestResult{Err: errors.New("backtest result channel closed")}
+		result = types.ErrorResult{Err: errors.New("backtest result channel closed")}
 	}
 	now := h.now().UTC()
 
@@ -770,17 +851,46 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 	}
 	completedAt := now
 	detail.CompletedAt = &completedAt
-	if result.Err != nil {
+	switch r := result.(type) {
+	case types.ErrorResult:
 		detail.Status = "failed"
-		detail.Error = result.Err.Error()
-	} else {
+		detail.Error = r.Err.Error()
+	case meanreversion.BacktestResult:
 		detail.Status = "completed"
-		detail.Result = newBacktestResult(result)
+		raw, err := newBacktestResult(r)
+		if err != nil {
+			detail.Status = "failed"
+			detail.Error = err.Error()
+			break
+		}
+		detail.Result = raw
+	case copytrading.BacktestResult:
+		detail.Status = "completed"
+		raw, err := newCopyTradingBacktestResult(r)
+		if err != nil {
+			detail.Status = "failed"
+			detail.Error = err.Error()
+			break
+		}
+		detail.Result = raw
+	default:
+		detail.Status = "failed"
+		detail.Error = fmt.Sprintf("unknown backtest result type %T", result)
 	}
 	h.mu.Unlock()
 
 	if err := h.saveBacktest(context.Background(), detail); err != nil {
 		slog.Error("failed to save backtest result", "err", err, "backtest_id", id)
+	}
+
+	// Stop the batching writer's background ticker. The strategy engine
+	// already called writer.Flush() at the end of its simulation, so
+	// any remaining rows are persisted; Close drains anything that
+	// arrived in the final tick window and stops the goroutine.
+	if batcher != nil {
+		if err := batcher.Close(); err != nil {
+			slog.Error("close batching writer", "err", err, "backtest_id", id)
+		}
 	}
 }
 
@@ -890,9 +1000,9 @@ func (h *Handler) getBacktestClosedTrades(w http.ResponseWriter, r *http.Request
 	getBacktestSubResource(h, w, r, id, "closed trades", h.backtestStore.GetBacktestClosedTrades)
 }
 
-func getBacktestSubResource[T any](
+func getBacktestSubResource(
 	h *Handler, w http.ResponseWriter, r *http.Request, id uuid.UUID, label string,
-	fetch func(context.Context, uuid.UUID, int, int) ([]T, error),
+	fetch func(context.Context, uuid.UUID, string, int, int) (json.RawMessage, error),
 ) {
 	doraUserID, err := h.resolveDORAUserID(r.Context())
 	if err != nil {
@@ -909,13 +1019,15 @@ func getBacktestSubResource[T any](
 	}
 
 	page, limit := parsePagination(r)
-	items, err := fetch(r.Context(), id, page, limit)
+	raw, err := fetch(r.Context(), id, detail.StrategyType, page, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get backtest %s: %v", label, err))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 func parsePagination(r *http.Request) (page, limit int) {
@@ -960,13 +1072,12 @@ func (h *Handler) getBacktest(w http.ResponseWriter, r *http.Request, id uuid.UU
 	// are safe from concurrent awaitBacktestResult writes.
 	detailCopy := *detail
 	detailCopy.Result = nil
-	if detail.Result != nil {
-		rCopy := *detail.Result
-		detailCopy.Result = &rCopy
+	if len(detail.Result) > 0 {
+		detailCopy.Result = append(json.RawMessage(nil), detail.Result...)
 	}
 	h.mu.RUnlock()
 
-	if detailCopy.Status == "completed" && detailCopy.Result == nil && h.backtestStore != nil {
+	if detailCopy.Status == "completed" && len(detailCopy.Result) == 0 && h.backtestStore != nil {
 		result, err := h.backtestStore.LoadBacktestResult(r.Context(), id)
 		if err != nil {
 			slog.Error("failed to load backtest result", "err", err, "backtest_id", id)
@@ -1055,7 +1166,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	def, cfg, strat, statusCode, err := h.resolveStrategy(req.StrategyType, req.Config, capabilityRun)
+	def, cfg, strat, statusCode, err := h.resolveStrategy(req.StrategyType, req.Config, capabilityRun, nil)
 	if err != nil {
 		writeError(w, statusCode, err.Error())
 		return
@@ -1079,9 +1190,11 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	// Inject the user's API key into the strategy so it can authenticate with DORA.
 	authInfo, _ := authFromContext(r.Context())
 	if authInfo.APIKey != "" {
-		if withClient, ok := strat.(*meanreversion.Strategy); ok {
-			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))
-			withClientOpts(withClient)
+		switch withClient := strat.(type) {
+		case *meanreversion.Strategy:
+			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))(withClient)
+		case *copytrading.Strategy:
+			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(authInfo.APIKey))(withClient)
 		}
 	}
 
@@ -1352,7 +1465,7 @@ func (h *Handler) RestoreBacktests(ctx context.Context) error {
 }
 
 func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) error {
-	_, normalised, strat, _, err := h.resolveStrategy(detail.StrategyType, detail.Config, capabilityRun)
+	_, normalised, strat, _, err := h.resolveStrategy(detail.StrategyType, detail.Config, capabilityRun, nil)
 	if err != nil {
 		return err
 	}
@@ -1368,8 +1481,11 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		if err2 != nil {
 			return fmt.Errorf("decrypt api key for run %s: %w", detail.ID, err2)
 		}
-		if mr, ok := strat.(*meanreversion.Strategy); ok {
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(string(apiKeyDecrypted)))(mr)
+		switch withClient := strat.(type) {
+		case *meanreversion.Strategy:
+			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+		case *copytrading.Strategy:
+			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		}
 	}
 
@@ -1401,7 +1517,7 @@ func (h *Handler) resolveDORAUserID(ctx context.Context) (string, error) {
 	}
 	client := h.doraClient
 	if client == nil {
-		client = newDORAClient()
+		client = NewDORAClient()
 	}
 	return client.GetUserID(ctx)
 }
@@ -1434,7 +1550,7 @@ const (
 	capabilityBacktest strategyCapability = "backtest"
 )
 
-func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, capability strategyCapability) (StrategyDefinition, json.RawMessage, strategycore.Strategy, int, error) { //nolint:lll
+func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, capability strategyCapability, tradeWriter stats.BacktestTradeWriter) (StrategyDefinition, json.RawMessage, strategycore.Strategy, int, error) { //nolint:lll
 	if strategyType == "" {
 		return StrategyDefinition{}, nil, nil, http.StatusBadRequest, fmt.Errorf("strategy_type is required")
 	}
@@ -1455,17 +1571,22 @@ func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, c
 		return StrategyDefinition{}, nil, nil, http.StatusNotImplemented, fmt.Errorf("strategy_type %q has no config decoder", strategyType)
 	}
 
-	normalised, strat, err := def.DecodeConfig(config, string(capability))
+	normalised, strat, err := def.DecodeConfig(config, string(capability), tradeWriter)
 	if err != nil {
 		return StrategyDefinition{}, nil, nil, http.StatusBadRequest, err
 	}
 	return def, normalised, strat, http.StatusOK, nil
 }
 
-func defaultStrategies(pricesHandler *prices.Handler, log *slog.Logger) map[string]StrategyDefinition {
+func defaultStrategies(
+	pricesHandler *prices.Handler,
+	tradesHistoryStore *copytrading.PGTradesHistoryStore,
+	tradeStream *streams.TradeStream,
+	log *slog.Logger,
+) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
-		newCopyTradingDefinition(),
+		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -1552,27 +1673,49 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 		},
 		SupportsRun:      true,
 		SupportsBacktest: true,
-		DecodeConfig: func(raw json.RawMessage, capability string) (json.RawMessage, strategycore.Strategy, error) {
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
 			forRun := capability == string(capabilityRun)
 			cfg, normalised, err := decodeMeanReversionConfig(raw, forRun)
 			if err != nil {
 				return nil, nil, err
 			}
-			return normalised, meanreversion.New(cfg, pricesHandler, meanreversion.WithLogger(log)), nil
+			opts := []func(*meanreversion.Strategy){
+				meanreversion.WithLogger(log),
+			}
+			if tradeWriter != nil {
+				opts = append(opts, meanreversion.WithBacktestWriter(tradeWriter))
+			}
+			return normalised, meanreversion.New(cfg, pricesHandler, opts...), nil
 		},
 	}
 }
 
-func newCopyTradingDefinition() StrategyDefinition {
+func newCopyTradingDefinition(tradesHistoryStore *copytrading.PGTradesHistoryStore, tradeStream *streams.TradeStream) StrategyDefinition {
 	return StrategyDefinition{
 		Type:        "copytrading",
-		Status:      strategyStatusNotImplemented,
+		Status:      strategyStatusAvailable,
 		Description: "Copy trades from a followed trader subject to limits.",
 		ConfigFields: []StrategyConfigField{
 			{
 				Name:        "followed_trader",
 				Type:        "string(uuid)",
 				Description: "Trader UUID to mirror. Required.",
+				Required:    true,
+			},
+			{
+				Name:        "percentage_of_available",
+				Type:        "number",
+				Description: "Percentage of available balance to use per trade (0-1). Must be greater than 0.",
+				Required:    true,
+			},
+			{
+				Name:        "leverage",
+				Type:        "number",
+				Description: "Leverage multiplier for copied orders. Must be greater than 0.",
 				Required:    true,
 			},
 			{
@@ -1588,20 +1731,40 @@ func newCopyTradingDefinition() StrategyDefinition {
 				Required:    false,
 			},
 			{
-				Name:        "allowed_bonds",
+				Name:        "disallowed_bonds",
 				Type:        "array[string(uuid)]",
-				Description: "Optional allowlist of bond UUIDs. Empty means all bonds are eligible.",
+				Description: "Optional list of bond UUIDs to skip. Empty means no bonds are disallowed.",
+				Required:    false,
+			},
+			{
+				Name:        "initial_balance",
+				Type:        "number",
+				Description: "Starting cash for the backtest. Must be non-negative; omit or set to 0 to use the default of 10000.",
 				Required:    false,
 			},
 		},
-		SupportsRun:      false,
-		SupportsBacktest: false,
-		DecodeConfig: func(raw json.RawMessage, _ string) (json.RawMessage, strategycore.Strategy, error) {
+		SupportsRun:      true,
+		SupportsBacktest: true,
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
 			cfg, normalised, err := decodeCopyTradingConfig(raw)
 			if err != nil {
 				return nil, nil, err
 			}
-			return normalised, copytrading.New(cfg), nil
+			opts := []func(*copytrading.Strategy){
+				copytrading.WithLogger(slog.Default()),
+				copytrading.WithBacktestStore(tradesHistoryStore),
+			}
+			if capability == string(capabilityRun) && tradeStream != nil {
+				opts = append(opts, copytrading.WithTradeStream(tradeStream))
+			}
+			if tradeWriter != nil {
+				opts = append(opts, copytrading.WithBacktestWriter(tradeWriter))
+			}
+			return normalised, copytrading.New(cfg, opts...), nil
 		},
 	}
 }
@@ -1743,10 +1906,18 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 }
 
 type copyTradingConfigPayload struct {
-	FollowedTrader string   `json:"followed_trader"`
-	MinOrderSize   int      `json:"min_order_size"`
-	MaxOrderSize   int      `json:"max_order_size"`
-	AllowedBonds   []string `json:"allowed_bonds"`
+	FollowedTrader        string   `json:"followed_trader"`
+	PercentageOfAvailable float64  `json:"percentage_of_available"`
+	Leverage              float64  `json:"leverage"`
+	MinOrderSize          int      `json:"min_order_size"`
+	MaxOrderSize          int      `json:"max_order_size"`
+	DisallowedBonds       []string `json:"disallowed_bonds"`
+	// InitialBalance is optional. Pointer-to-float64 lets us distinguish
+	// "not provided" (nil) from "explicitly 0" (treated as "use the
+	// default"). The decoder falls back to the package-level default
+	// when the field is absent or zero; only negative values are
+	// rejected as an explicit caller error.
+	InitialBalance *float64 `json:"initial_balance,omitempty"`
 }
 
 func decodeCopyTradingConfig(raw json.RawMessage) (copytrading.Config, json.RawMessage, error) {
@@ -1757,9 +1928,15 @@ func decodeCopyTradingConfig(raw json.RawMessage) (copytrading.Config, json.RawM
 	if payload.FollowedTrader == "" {
 		return copytrading.Config{}, nil, fmt.Errorf("config.followed_trader is required")
 	}
-	followedTrader, err := uuid.Parse(payload.FollowedTrader)
+	followedTrader, err := uuid.Parse(strings.TrimSpace(payload.FollowedTrader))
 	if err != nil {
 		return copytrading.Config{}, nil, fmt.Errorf("config.followed_trader: %w", err)
+	}
+	if payload.PercentageOfAvailable <= 0 || payload.PercentageOfAvailable > 1 {
+		return copytrading.Config{}, nil, fmt.Errorf("config.percentage_of_available must be in (0,1]")
+	}
+	if payload.Leverage <= 0 {
+		return copytrading.Config{}, nil, fmt.Errorf("config.leverage must be greater than 0")
 	}
 	if payload.MinOrderSize < 0 {
 		return copytrading.Config{}, nil, fmt.Errorf("config.min_order_size must be non-negative")
@@ -1767,23 +1944,51 @@ func decodeCopyTradingConfig(raw json.RawMessage) (copytrading.Config, json.RawM
 	if payload.MaxOrderSize < payload.MinOrderSize {
 		return copytrading.Config{}, nil, fmt.Errorf("config.max_order_size must be greater than or equal to min_order_size")
 	}
-	allowedBonds := make([]uuid.UUID, 0, len(payload.AllowedBonds))
-	for i, bond := range payload.AllowedBonds {
+	disallowedBonds := make([]uuid.UUID, 0, len(payload.DisallowedBonds))
+	for i, bond := range payload.DisallowedBonds {
 		id, err := uuid.Parse(bond)
 		if err != nil {
-			return copytrading.Config{}, nil, fmt.Errorf("config.allowed_bonds[%d]: %w", i, err)
+			return copytrading.Config{}, nil, fmt.Errorf("config.disallowed_bonds[%d]: %w", i, err)
 		}
-		allowedBonds = append(allowedBonds, id)
+		disallowedBonds = append(disallowedBonds, id)
 	}
+
+	poa, err := decimal.NewFromFloat64(payload.PercentageOfAvailable)
+	if err != nil {
+		return copytrading.Config{}, nil, fmt.Errorf("config.percentage_of_available: %w", err)
+	}
+	lev, err := decimal.NewFromFloat64(payload.Leverage)
+	if err != nil {
+		return copytrading.Config{}, nil, fmt.Errorf("config.leverage: %w", err)
+	}
+
+	// initial_balance: absent or zero both fall through to the
+	// package default; only a negative value is an explicit error.
+	initialBalance := decimal.Zero
+	if payload.InitialBalance != nil {
+		if *payload.InitialBalance < 0 {
+			return copytrading.Config{}, nil, fmt.Errorf("config.initial_balance must be non-negative")
+		}
+		if *payload.InitialBalance > 0 {
+			initialBalance, err = decimal.NewFromFloat64(*payload.InitialBalance)
+			if err != nil {
+				return copytrading.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+			}
+		}
+	}
+
 	normalised, err := json.Marshal(payload)
 	if err != nil {
 		return copytrading.Config{}, nil, fmt.Errorf("marshal normalised config: %w", err)
 	}
 	return copytrading.Config{
-		FollowedTrader: followedTrader,
-		MinOrderSize:   payload.MinOrderSize,
-		MaxOrderSize:   payload.MaxOrderSize,
-		AllowedBonds:   allowedBonds,
+		FollowedTrader:        followedTrader,
+		PercentageOfAvailable: poa,
+		Leverage:              lev,
+		MinOrderSize:          payload.MinOrderSize,
+		MaxOrderSize:          payload.MaxOrderSize,
+		DisallowedBonds:       disallowedBonds,
+		InitialBalance:        initialBalance,
 	}, normalised, nil
 }
 
@@ -1799,51 +2004,42 @@ func decodeRawConfig(raw json.RawMessage, dst any) error {
 	return nil
 }
 
-func newBacktestResult(result types.BacktestResult) *BacktestResult {
-	closedTrades := make([]ClosedTrade, 0, len(result.ClosedTrades))
-	for _, trade := range result.ClosedTrades {
-		closedTrades = append(closedTrades, ClosedTrade{
-			BondID:       trade.BondID,
-			OpenTime:     trade.OpenTime,
-			CloseTime:    trade.CloseTime,
-			Signal:       trade.Signal.String(),
-			ExitSignal:   trade.ExitSignal.String(),
-			EntrySpread:  trade.EntrySpread.String(),
-			ExitSpread:   trade.ExitSpread.String(),
-			EntryZScore:  trade.EntryZScore.String(),
-			ExitZScore:   trade.ExitZScore.String(),
-			PositionSize: trade.PositionSize.String(),
-			PnL:          trade.PnL.String(),
-			ExitReason:   trade.ExitReason,
-			EntryPrice:   trade.EntryPrice.String(),
-			ExitPrice:    trade.ExitPrice.String(),
-			Quantity:     trade.Quantity.String(),
-			EntryBalance: trade.EntryBalance.String(),
-		})
+func newBacktestResult(result meanreversion.BacktestResult) (json.RawMessage, error) {
+	// Per-trade and per-closed-trade rows are persisted to
+	// strategy_backtest_trades and strategy_backtest_closed_trades by the
+	// backtest engine via stats.BacktestTradeWriter. The summary-result
+	// JSON only carries aggregate metrics.
+	out := MeanReversionBacktestResult{
+		TotalPnL:    result.TotalPnL.String(),
+		WinCount:    result.WinCount,
+		LossCount:   result.LossCount,
+		MaxDrawdown: result.MaxDrawdown.String(),
+		SharpeRatio: result.SharpeRatio.String(),
 	}
-	tradeRecords := make([]TradeRecord, 0, len(result.TradeRecords))
-	for _, tr := range result.TradeRecords {
-		tradeRecords = append(tradeRecords, TradeRecord{
-			Time:         tr.Time,
-			BondID:       tr.BondID,
-			Signal:       tr.Signal.String(),
-			Spread:       tr.Spread.String(),
-			PositionSize: tr.PositionSize.String(),
-			ZScore:       tr.ZScore.String(),
-			Price:        tr.Price.String(),
-			Quantity:     tr.Quantity.String(),
-			EntryBalance: tr.EntryBalance.String(),
-		})
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal backtest result: %w", err)
 	}
-	return &BacktestResult{
-		ClosedTrades: closedTrades,
-		TradeRecords: tradeRecords,
-		TotalPnL:     result.TotalPnL.String(),
-		WinCount:     result.WinCount,
-		LossCount:    result.LossCount,
-		MaxDrawdown:  result.MaxDrawdown.String(),
-		SharpeRatio:  result.SharpeRatio.String(),
+	return b, nil
+}
+
+func newCopyTradingBacktestResult(result copytrading.BacktestResult) (json.RawMessage, error) {
+	// Per-trade and per-closed-trade rows are persisted to
+	// strategy_backtest_trades and strategy_backtest_closed_trades by the
+	// backtest engine via stats.BacktestTradeWriter. The summary-result
+	// JSON only carries aggregate metrics.
+	out := CopyTradingBacktestResult{
+		TotalPnL:    result.TotalPnL.String(),
+		WinCount:    result.WinCount,
+		LossCount:   result.LossCount,
+		MaxDrawdown: result.MaxDrawdown.String(),
+		SharpeRatio: result.SharpeRatio.String(),
 	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal copytrading backtest result: %w", err)
+	}
+	return b, nil
 }
 
 func decodeJSON(r *http.Request, dst any) error {

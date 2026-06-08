@@ -64,6 +64,10 @@ func (c *strategyClient) getDORAUser(ctx context.Context) (map[string]any, error
 	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, "/v1/dora/user", nil)
 }
 
+func (c *strategyClient) listCopyTraders(ctx context.Context) (map[string]any, error) {
+	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, "/v1/copy-traders", nil)
+}
+
 func (c *strategyClient) listTenors(ctx context.Context) (map[string]any, error) {
 	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, "/v1/tenors", nil)
 }

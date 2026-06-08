@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/govalues/decimal"
@@ -16,8 +17,7 @@ import (
 type marketAPIClient interface {
 	BaseAssetID(ctx context.Context, orderBookID string) (string, error)
 	QuoteAssetID(ctx context.Context, orderBookID string) (string, error)
-	SelfUserID(ctx context.Context) (string, error)
-	AssetPosition(ctx context.Context, accountID, assetID string) (decimal.Decimal, decimal.Decimal, error)
+	AssetPosition(ctx context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error)
 	GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error)
 	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool) error //nolint:lll
 	AssetCollateralWeight(ctx context.Context, assetID string) (decimal.Decimal, error)
@@ -26,6 +26,19 @@ type marketAPIClient interface {
 type doraAPIClient struct {
 	apiKey string
 	client *doraclient.APIClient
+
+	// cachedUserID is the bot's DORA user ID, fetched from GetUserSelf
+	// on first use and cached for the lifetime of the client.
+	// RWMutex: many concurrent readers, one writer (the first fetch).
+	userIDMu     sync.RWMutex
+	cachedUserID string
+
+	// orderBookByID caches the full OrderBook by ID so BaseAssetID
+	// and QuoteAssetID can both be served from a single DORA
+	// round-trip. Same RWMutex + double-checked pattern as the user
+	// ID cache above.
+	orderBookMu   sync.RWMutex
+	orderBookByID map[string]*doraclient.OrderBook
 }
 
 const (
@@ -52,40 +65,118 @@ func newDoraClient() *doraAPIClient {
 }
 
 func (c *doraAPIClient) BaseAssetID(ctx context.Context, orderBookID string) (string, error) {
-	return c.getOrderBookAssetID(ctx, orderBookID, "base asset",
-		func(data *doraclient.OrderBook) string { return data.BaseAssetId })
+	book, err := c.orderBook(ctx, orderBookID)
+	if err != nil {
+		return "", err
+	}
+	if book.BaseAssetId == "" {
+		return "", fmt.Errorf("get order book %s: missing base asset ID", orderBookID)
+	}
+	return book.BaseAssetId, nil
 }
 
 func (c *doraAPIClient) QuoteAssetID(ctx context.Context, orderBookID string) (string, error) {
-	return c.getOrderBookAssetID(ctx, orderBookID, "quote asset",
-		func(data *doraclient.OrderBook) string { return data.QuoteAssetId })
+	book, err := c.orderBook(ctx, orderBookID)
+	if err != nil {
+		return "", err
+	}
+	if book.QuoteAssetId == "" {
+		return "", fmt.Errorf("get order book %s: missing quote asset ID", orderBookID)
+	}
+	return book.QuoteAssetId, nil
 }
 
-func (c *doraAPIClient) getOrderBookAssetID(ctx context.Context, orderBookID, fieldName string, getID func(*doraclient.OrderBook) string) (string, error) { //nolint:lll
+// orderBook returns the cached OrderBook for the given ID, fetching
+// from DORA on first use. The mapping is stable for the lifetime of
+// the order book, so a single round-trip is enough.
+func (c *doraAPIClient) orderBook(ctx context.Context, orderBookID string) (*doraclient.OrderBook, error) {
 	if c == nil || c.client == nil {
-		return "", errors.New("DORA client is not configured")
+		return nil, errors.New("DORA client is not configured")
 	}
 	if c.apiKey == "" {
-		return "", errors.New("user API key is not configured")
+		return nil, errors.New("user API key is not configured")
 	}
+
+	// Fast path: read lock.
+	c.orderBookMu.RLock()
+	cached, ok := c.orderBookByID[orderBookID]
+	c.orderBookMu.RUnlock()
+	if ok {
+		return cached, nil
+	}
+
+	// Slow path: upgrade to write lock and re-check.
+	c.orderBookMu.Lock()
+	defer c.orderBookMu.Unlock()
+	if cached, ok := c.orderBookByID[orderBookID]; ok {
+		return cached, nil
+	}
+
 	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
 		"apiKey": {Key: c.apiKey},
 	})
 	resp, _, err := c.client.DefaultAPI.GetOrderbookById(authCtx, orderBookID).Execute() //nolint:bodyclose
 	if err != nil {
-		return "", fmt.Errorf("get order book %s: %w", orderBookID, err)
+		return nil, fmt.Errorf("get order book %s: %w", orderBookID, err)
 	}
 	if resp == nil || resp.Data == nil {
-		return "", fmt.Errorf("get order book %s: missing response data", orderBookID)
+		return nil, fmt.Errorf("get order book %s: missing response data", orderBookID)
 	}
-	id := getID(resp.Data)
-	if id == "" {
-		return "", fmt.Errorf("get order book %s: missing %s ID", orderBookID, fieldName)
+	if c.orderBookByID == nil {
+		c.orderBookByID = make(map[string]*doraclient.OrderBook)
 	}
-	return id, nil
+	c.orderBookByID[orderBookID] = resp.Data
+	return resp.Data, nil
 }
 
-func (c *doraAPIClient) AssetPosition(ctx context.Context, accountID, assetID string) (
+// userID returns the cached user ID, fetching it from DORA on first
+// use. The user ID is stable for the API key lifetime, so a single
+// round-trip is sufficient.
+func (c *doraAPIClient) userID(ctx context.Context) (string, error) {
+	c.userIDMu.RLock()
+	cached := c.cachedUserID
+	c.userIDMu.RUnlock()
+	if cached != "" {
+		return cached, nil
+	}
+	c.userIDMu.Lock()
+	defer c.userIDMu.Unlock()
+	// Re-check after taking the write lock; another goroutine may
+	// have populated the cache while we were upgrading.
+	if c.cachedUserID != "" {
+		return c.cachedUserID, nil
+	}
+	if c == nil || c.client == nil {
+		return "", errors.New("DORA client is not configured")
+	}
+	if c.apiKey == "" {
+		return "", errors.New("API_KEY is not configured")
+	}
+	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
+		"apiKeyAuthHeader": {
+			Key:    c.apiKey,
+			Prefix: apiKeyPrefix,
+		},
+	})
+	resp, _, err := c.client.DefaultAPI.GetUserSelf(authCtx).Execute() //nolint:bodyclose
+	if err != nil {
+		return "", fmt.Errorf("get user self: %w", err)
+	}
+	if resp == nil || resp.Data == nil {
+		return "", errors.New("get user self: missing response data")
+	}
+	if resp.Data.Id == "" {
+		return "", errors.New("get user self: missing user ID")
+	}
+	c.cachedUserID = resp.Data.Id
+	return c.cachedUserID, nil
+}
+
+// AssetPosition returns the (available, borrowed) position for the
+// given asset on the bot's DORA account, sourced from
+// GetLedgerPositionsSelf. Resolves the user ID once (cached for the
+// lifetime of the client) and looks up the position.
+func (c *doraAPIClient) AssetPosition(ctx context.Context, assetID string) (
 	decimal.Decimal, decimal.Decimal, error,
 ) {
 	if c == nil || c.client == nil {
@@ -93,6 +184,10 @@ func (c *doraAPIClient) AssetPosition(ctx context.Context, accountID, assetID st
 	}
 	if c.apiKey == "" {
 		return decimal.Zero, decimal.Zero, errors.New("API_KEY is not configured")
+	}
+	accountID, err := c.userID(ctx)
+	if err != nil {
+		return decimal.Zero, decimal.Zero, err
 	}
 	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
 		"apiKeyAuthHeader": {
@@ -133,32 +228,6 @@ func (c *doraAPIClient) AssetPosition(ctx context.Context, accountID, assetID st
 	}
 
 	return available, borrowed, nil
-}
-
-func (c *doraAPIClient) SelfUserID(ctx context.Context) (string, error) {
-	if c == nil || c.client == nil {
-		return "", errors.New("DORA client is not configured")
-	}
-	if c.apiKey == "" {
-		return "", errors.New("API_KEY is not configured")
-	}
-	authCtx := context.WithValue(ctx, doraclient.ContextAPIKeys, map[string]doraclient.APIKey{
-		"apiKeyAuthHeader": {
-			Key:    c.apiKey,
-			Prefix: apiKeyPrefix,
-		},
-	})
-	resp, _, err := c.client.DefaultAPI.GetUserSelf(authCtx).Execute() //nolint:bodyclose
-	if err != nil {
-		return "", fmt.Errorf("get user self: %w", err)
-	}
-	if resp == nil || resp.Data == nil {
-		return "", errors.New("get user self: missing response data")
-	}
-	if resp.Data.Id == "" {
-		return "", errors.New("get user self: missing user ID")
-	}
-	return resp.Data.Id, nil
 }
 
 func (c *doraAPIClient) GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error) {

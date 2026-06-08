@@ -255,15 +255,15 @@ func TestStrategy_ShouldExit_ProfitTake(t *testing.T) {
 
 	exit, reason := s.ShouldExit(types.SignalBuy, decimal.MustNew(3, 1))
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonTakeProfit, reason)
+	assert.Equal(t, meanreversion.ExitReasonTakeProfit, reason)
 
 	exit, reason = s.ShouldExit(types.SignalSell, decimal.MustNew(-2, 1))
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonTakeProfit, reason)
+	assert.Equal(t, meanreversion.ExitReasonTakeProfit, reason)
 
 	exit, reason = s.ShouldExit(types.SignalBuy, decimal.Zero)
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonTakeProfit, reason)
+	assert.Equal(t, meanreversion.ExitReasonTakeProfit, reason)
 }
 
 func TestStrategy_ShouldExit_StopLoss(t *testing.T) {
@@ -272,7 +272,7 @@ func TestStrategy_ShouldExit_StopLoss(t *testing.T) {
 
 	exit, reason := s.ShouldExit(types.SignalBuy, decimal.MustNew(36, 1))
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonStopLoss, reason)
+	assert.Equal(t, meanreversion.ExitReasonStopLoss, reason)
 
 	exit, reason = s.ShouldExit(types.SignalBuy, decimal.MustNew(34, 1))
 	assert.False(t, exit)
@@ -280,7 +280,7 @@ func TestStrategy_ShouldExit_StopLoss(t *testing.T) {
 
 	exit, reason = s.ShouldExit(types.SignalSell, decimal.MustNew(-36, 1))
 	assert.True(t, exit)
-	assert.Equal(t, types.ExitReasonStopLoss, reason)
+	assert.Equal(t, meanreversion.ExitReasonStopLoss, reason)
 
 	exit, reason = s.ShouldExit(types.SignalSell, decimal.MustNew(-34, 1))
 	assert.False(t, exit)
@@ -303,7 +303,7 @@ func TestStrategy_ShouldExit_StopLossDisabled(t *testing.T) {
 
 func TestBacktester_NoTradesBeforeWindowFull(t *testing.T) {
 	s := meanreversion.New(defaultConfig(), nil)
-	bt := meanreversion.NewBacktester(s)
+	bt := meanreversion.NewBacktester(s, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -320,7 +320,7 @@ func TestBacktester_ProfitableReversion(t *testing.T) {
 	cfg.MinStdDev = decimal.MustNew(1, 4)
 	cfg.InitialBalance = decimal.MustNew(10000, 0)
 	s := meanreversion.New(cfg, nil)
-	bt := meanreversion.NewBacktester(s)
+	bt := meanreversion.NewBacktester(s, nil)
 
 	var observations []types.YieldObservation
 	t0 := epoch
@@ -378,7 +378,7 @@ func TestBacktester_LossingTradeForceClosedAtEnd(t *testing.T) {
 	cfg.MinStdDev = decimal.MustNew(1, 4)
 	cfg.InitialBalance = decimal.MustNew(10000, 0)
 	s := meanreversion.New(cfg, nil)
-	bt := meanreversion.NewBacktester(s)
+	bt := meanreversion.NewBacktester(s, nil)
 
 	var observations []types.YieldObservation
 	t0 := epoch
@@ -425,7 +425,7 @@ func TestBacktestResult_MaxDrawdown(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.InitialBalance = decimal.MustNew(10000, 0)
 	s := meanreversion.New(cfg, nil)
-	bt := meanreversion.NewBacktester(s)
+	bt := meanreversion.NewBacktester(s, nil)
 
 	observations := makeObs(50, decimal.MustNew(1, 2))
 
@@ -470,9 +470,8 @@ func TestInitializeBalances_SetsOpenSignalFromDORAPosition(t *testing.T) {
 			s := meanreversion.New(cfg, nil)
 			client := &meanreversionfakes.FakeMarketAPIClient{}
 			client.QuoteAssetIDReturns("usd-id", nil)
-			client.SelfUserIDReturns("user-1", nil)
 			// AssetPosition is called twice: once for the bond, once for USD.
-			client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+			client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 				if assetID == "bond-id" {
 					return tc.held, tc.borrowed, nil
 				}
@@ -508,9 +507,8 @@ func TestRunLoop_NoNewEntryWhenPositionOpen(t *testing.T) {
 	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
-	client.SelfUserIDReturns("user-1", nil)
 	// Simulate an existing long position fetched from DORA on startup.
-	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 		if assetID == "bond-id" {
 			return decimal.MustNew(5, 0), decimal.Zero, nil
 		}
@@ -588,9 +586,8 @@ func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
 	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
-	client.SelfUserIDReturns("user-1", nil)
 	// Existing long position (5 bonds) from a prior run.
-	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 		if assetID == "bond-id" {
 			return decimal.MustNew(5, 0), decimal.Zero, nil
 		}
@@ -671,9 +668,8 @@ func TestRunLoop_NoNewEntryWhenQuantityZero(t *testing.T) {
 	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
-	client.SelfUserIDReturns("user-1", nil)
 	// Balance has no existing position, and tracking initialised
-	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 		return decimal.Zero, decimal.Zero, nil
 	}
 	meanreversion.SetLookupClient(s, client)
@@ -746,12 +742,11 @@ func TestRunLoop_SelfHealsWhenPositionDoesNotExistOnExchange(t *testing.T) {
 	client := &meanreversionfakes.FakeMarketAPIClient{}
 	client.BaseAssetIDReturns("bond-id", nil)
 	client.QuoteAssetIDReturns("usd-id", nil)
-	client.SelfUserIDReturns("user-1", nil)
 
 	// Simulate initialization with an existing position of 5 bonds
 	var count int
 	var mu sync.Mutex
-	client.AssetPositionStub = func(_ context.Context, _, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if assetID == "bond-id" {

@@ -65,6 +65,50 @@ type strategyCancelBacktestArgs struct {
 	ID string `json:"id"`
 }
 
+// configProperties returns the JSON Schema property map for the strategy
+// `config` object. It lists fields from both supported strategies so MCP
+// clients (e.g. opencode) get explicit type information and do not fall
+// back to stringifying numeric/array values. The strategy-server validates
+// which fields apply to a given strategy_type.
+func configProperties() map[string]any {
+	num := func(desc string) map[string]any {
+		return map[string]any{"type": "number", "description": desc}
+	}
+	posNum := func(desc string) map[string]any {
+		return map[string]any{"type": "number", "description": desc, "minimum": 0, "exclusiveMinimum": true}
+	}
+	fraction := func(desc string) map[string]any {
+		return map[string]any{"type": "number", "description": desc, "minimum": 0, "exclusiveMinimum": true, "maximum": 1}
+	}
+	nonNegInt := func(desc string) map[string]any {
+		return map[string]any{"type": "integer", "description": desc, "minimum": 0}
+	}
+	return map[string]any{
+		// copytrading
+		"followed_trader":         map[string]any{"type": "string", "format": "uuid", "description": "UUID of the trader to copy."},
+		"percentage_of_available": fraction("Fraction of available capital to allocate per trade, in (0,1]."),
+		"leverage":                posNum("Leverage multiplier. Must be greater than 0."),
+		"min_order_size":          nonNegInt("Minimum copied order size."),
+		"max_order_size":          nonNegInt("Maximum copied order size."),
+		"disallowed_bonds": map[string]any{
+			"type":        "array",
+			"description": "Bond UUIDs to skip.",
+			"items":       map[string]any{"type": "string", "format": "uuid"},
+		},
+		// mean_reversion
+		"lookback_window":   map[string]any{"type": "integer", "description": "Rolling observation window. Must be at least 2.", "minimum": 2},
+		"entry_z_score":     posNum("Entry z-score threshold. Must be greater than 0."),
+		"exit_z_score":      num("Exit z-score threshold. Must be non-negative."),
+		"stop_loss_z_score": num("Stop-loss z-score threshold. Must be non-negative."),
+		"min_std_dev":       num("Minimum spread volatility required before trading. Must be non-negative."),
+		"max_position_size": fraction("Maximum fraction of capital allocated per trade, in (0,1]."),
+		"order_book_id":     map[string]any{"type": "string", "format": "uuid", "description": "DORA order book UUID."},
+		"tenor":             map[string]any{"type": "string", "description": "Benchmark tenor code (e.g. 10Y)."},
+		//nolint:lll // description spans two strategies' rules
+		"initial_balance": num("Starting capital allocated to the strategy. Omit or 0 uses the default (10000 for copytrading); must be > 0 for mean_reversion."),
+	}
+}
+
 func jsonText(v any) (*mcp.CallToolResult, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -117,6 +161,19 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
+		mcp.NewTool("strategy_copy_traders_list",
+			mcp.WithDescription("List available copy traders. Placeholder that filters DORA users whose names start with TRADER_ or MM_ until DORA exposes a dedicated endpoint."), //nolint:lll
+		),
+		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			result, err := client.listCopyTraders(ctx)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return jsonText(result)
+		},
+	)
+
+	s.AddTool(
 		mcp.NewTool("strategy_tenors",
 			mcp.WithDescription("List available benchmark tenors exposed by strategy-server."),
 		),
@@ -133,7 +190,10 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 		mcp.NewTool("strategy_run_create",
 			mcp.WithDescription("Create a strategy run via strategy-server."),
 			mcp.WithString("strategy_type", mcp.Required(), mcp.Description("Strategy type, e.g. mean_reversion or copytrading.")),
-			mcp.WithObject("config", mcp.Required(), mcp.Description("Strategy config object accepted by strategy-server.")),
+			mcp.WithObject("config", mcp.Required(),
+				mcp.Description("Strategy config object accepted by strategy-server. Field types below correspond to strategy-server's typed payload."),
+				mcp.Properties(configProperties()),
+			),
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args strategyCreateRunArgs) (*mcp.CallToolResult, error) {
 			result, err := client.createRun(ctx, map[string]any{
@@ -252,7 +312,10 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 		mcp.NewTool("strategy_backtest_create",
 			mcp.WithDescription("Create an asynchronous strategy backtest via strategy-server."),
 			mcp.WithString("strategy_type", mcp.Required(), mcp.Description("Strategy type, e.g. mean_reversion or copytrading.")),
-			mcp.WithObject("config", mcp.Required(), mcp.Description("Strategy config object accepted by strategy-server.")),
+			mcp.WithObject("config", mcp.Required(),
+				mcp.Description("Strategy config object accepted by strategy-server. Field types below correspond to strategy-server's typed payload."),
+				mcp.Properties(configProperties()),
+			),
 			mcp.WithString("start", mcp.Required(), mcp.Description("Backtest start timestamp in RFC3339 format.")),
 			mcp.WithString("end", mcp.Required(), mcp.Description("Backtest end timestamp in RFC3339 format.")),
 		),

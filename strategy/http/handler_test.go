@@ -8,12 +8,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
+	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/google/uuid"
@@ -22,12 +26,116 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHandlerListsCopyTraders(t *testing.T) {
+	t.Parallel()
+
+	trader1 := "11111111-1111-1111-1111-111111111111"
+	trader2 := "22222222-2222-2222-2222-222222222222"
+
+	fake := doraClientFunc{
+		listBotUsers: func(_ context.Context) ([]strategyhttp.DORABotUser, error) {
+			return []strategyhttp.DORABotUser{
+				{ID: trader1, FirstName: "TRADER_01", LastName: "Smith"},
+				{ID: trader2, FirstName: "MM", LastName: "Alice"},
+			}, nil
+		},
+	}
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(fake),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Items []strategyhttp.CopyTraderSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Items, 2)
+	assert.Equal(t, trader1, body.Items[0].ID)
+	assert.Equal(t, "TRADER_01 Smith", body.Items[0].DisplayName)
+	assert.Equal(t, trader2, body.Items[1].ID)
+	assert.Equal(t, "MM Alice", body.Items[1].DisplayName)
+}
+
+func TestHandlerListsCopyTradersRequiresAuth(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestHandlerListsCopyTradersEmpty(t *testing.T) {
+	t.Parallel()
+
+	fake := doraClientFunc{
+		listBotUsers: func(_ context.Context) ([]strategyhttp.DORABotUser, error) {
+			return nil, nil
+		},
+	}
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(fake),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Items []strategyhttp.CopyTraderSummary `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.Items)
+	require.Empty(t, body.Items)
+}
+
+func TestHandlerListsCopyTradersDORAError(t *testing.T) {
+	t.Parallel()
+
+	fake := doraClientFunc{
+		listBotUsers: func(_ context.Context) ([]strategyhttp.DORABotUser, error) {
+			return nil, assert.AnError
+		},
+	}
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(fake),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 func TestHandlerListsStrategies(t *testing.T) {
 	t.Parallel()
 
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
@@ -41,11 +149,25 @@ func TestHandlerListsStrategies(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp.Items, 2)
 	assert.Equal(t, "copytrading", resp.Items[0].Type)
-	assert.Equal(t, "not_implemented", resp.Items[0].Status)
-	require.Len(t, resp.Items[0].ConfigFields, 4)
+	assert.Equal(t, "available", resp.Items[0].Status)
+	require.Len(t, resp.Items[0].ConfigFields, 7)
 	assert.Equal(t, "followed_trader", resp.Items[0].ConfigFields[0].Name)
+	assert.Equal(t, "initial_balance", resp.Items[0].ConfigFields[6].Name)
+	assert.Equal(t, "number", resp.Items[0].ConfigFields[6].Type)
+	assert.False(t, resp.Items[0].ConfigFields[6].Required)
 	assert.True(t, resp.Items[0].ConfigFields[0].Required)
-	assert.Equal(t, "array[string(uuid)]", resp.Items[0].ConfigFields[3].Type)
+	assert.Equal(t, "percentage_of_available", resp.Items[0].ConfigFields[1].Name)
+	assert.Equal(t, "number", resp.Items[0].ConfigFields[1].Type)
+	assert.True(t, resp.Items[0].ConfigFields[1].Required)
+	assert.Equal(t, "leverage", resp.Items[0].ConfigFields[2].Name)
+	assert.Equal(t, "number", resp.Items[0].ConfigFields[2].Type)
+	assert.True(t, resp.Items[0].ConfigFields[2].Required)
+	assert.Equal(t, "min_order_size", resp.Items[0].ConfigFields[3].Name)
+	assert.False(t, resp.Items[0].ConfigFields[3].Required)
+	assert.Equal(t, "max_order_size", resp.Items[0].ConfigFields[4].Name)
+	assert.False(t, resp.Items[0].ConfigFields[4].Required)
+	assert.Equal(t, "disallowed_bonds", resp.Items[0].ConfigFields[5].Name)
+	assert.False(t, resp.Items[0].ConfigFields[5].Required)
 	assert.Equal(t, "mean_reversion", resp.Items[1].Type)
 	assert.Equal(t, "available", resp.Items[1].Status)
 	require.Len(t, resp.Items[1].ConfigFields, 10)
@@ -63,6 +185,7 @@ func TestHandlerListsTenors(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/tenors", nil)
@@ -105,6 +228,7 @@ func TestHandlerListsDORAOrderBooks(t *testing.T) {
 				}}, nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := httptest.NewRecorder()
@@ -141,6 +265,7 @@ func TestHandlerReturnsDORAOrderBookError(t *testing.T) {
 				return nil, fmt.Errorf("boom")
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := httptest.NewRecorder()
@@ -162,6 +287,7 @@ func TestHandlerGetsDORAUser(t *testing.T) {
 				return "user-123", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := httptest.NewRecorder()
@@ -191,6 +317,7 @@ func TestHandlerReturnsDORAUserError(t *testing.T) {
 				return "", fmt.Errorf("boom")
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := httptest.NewRecorder()
@@ -207,10 +334,9 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	resultCh := make(chan types.BacktestResult, 1)
-	backtestID := uuid.Must(uuid.NewV7())
 	svc := &strategyfakes.FakeService{
-		RunBacktestStub: func(ctx context.Context, strat strategycore.Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
-			return backtestID, resultCh, nil
+		RunBacktestStub: func(ctx context.Context, _ uuid.UUID, strat strategycore.Strategy, start, end time.Time) (<-chan types.BacktestResult, error) {
+			return resultCh, nil
 		},
 	}
 	handler := strategyhttp.NewHandler(svc,
@@ -220,6 +346,7 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -244,9 +371,10 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
 	assert.JSONEq(t, `{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`, string(accepted.Config))
 	assert.Equal(t, "user-test-1", accepted.DORAUserID)
+	backtestID := accepted.ID
 
-	resultCh <- types.BacktestResult{
-		ClosedTrades: []types.ClosedTrade{{
+	resultCh <- meanreversion.BacktestResult{
+		ClosedTrades: []meanreversion.ClosedTrade{{
 			BondID:       "BOND-1",
 			OpenTime:     now.Add(-2 * time.Hour),
 			CloseTime:    now.Add(-time.Hour),
@@ -290,10 +418,9 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	resultCh := make(chan types.BacktestResult, 1)
-	backtestID := uuid.Must(uuid.NewV7())
 	svc := &strategyfakes.FakeService{
-		RunBacktestStub: func(ctx context.Context, strat strategycore.Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
-			return backtestID, resultCh, nil
+		RunBacktestStub: func(ctx context.Context, _ uuid.UUID, strat strategycore.Strategy, start, end time.Time) (<-chan types.BacktestResult, error) {
+			return resultCh, nil
 		},
 	}
 	handler := strategyhttp.NewHandler(svc,
@@ -303,6 +430,7 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -321,8 +449,11 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 
 	rec := performJSONRequest(t, handler, "/v1/backtests", body)
 	require.Equal(t, http.StatusAccepted, rec.Code)
+	var accepted strategyhttp.BacktestDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+	backtestID := accepted.ID
 
-	resultCh <- types.BacktestResult{Err: fmt.Errorf("observation load failed")}
+	resultCh <- types.ErrorResult{Err: fmt.Errorf("observation load failed")}
 
 	// Full GET endpoint should include the error.
 	require.Eventually(t, func() bool {
@@ -366,34 +497,174 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 	assert.Equal(t, "observation load failed", listResp.Items[0].Error)
 }
 
-func TestHandlerRejectsNotImplementedBacktest(t *testing.T) {
+func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	openTradeID := uuid.Must(uuid.NewV7())
+	closeTradeID := uuid.Must(uuid.NewV7())
+	resultCh := make(chan types.BacktestResult, 1)
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(ctx context.Context, _ uuid.UUID, strat strategycore.Strategy, start, end time.Time) (<-chan types.BacktestResult, error) {
+			return resultCh, nil
+		},
+	}
+	store := &memoryBacktestStore{}
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithNow(func() time.Time { return now }),
+		strategyhttp.WithBacktestStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-test-1", nil
+			},
+		}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	followed := uuid.Must(uuid.NewV7())
+	body := map[string]any{
+		"strategy_type": "copytrading",
+		"config": map[string]any{
+			"followed_trader":         followed.String(),
+			"percentage_of_available": 0.5,
+			"leverage":                1.0,
+			"min_order_size":          0,
+			"max_order_size":          0,
+			"disallowed_bonds":        []string{},
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	}
+	rec := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var accepted strategyhttp.BacktestDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+	backtestID := accepted.ID
+
+	// Per-trade rows now flow through the writer interface, not the
+	// result channel. Push them onto the in-memory store directly so
+	// the /trades endpoint has data to return.
+	require.NoError(t, store.WriteTradeRecord(context.Background(), stats.TradeRecordInsert{
+		BacktestID:   backtestID,
+		Time:         now.Add(-2 * time.Hour),
+		BondID:       "BOND-1",
+		Signal:       "BUY",
+		Price:        decimal.MustNew(100, 0),
+		Quantity:     decimal.MustNew(10, 0),
+		OrderSize:    decimal.MustNew(1000, 0),
+		Cash:         decimal.MustNew(0, 0),
+		OpenPosition: decimal.MustNew(10, 0),
+		TradeID:      openTradeID,
+	}))
+	require.NoError(t, store.WriteClosedTrade(context.Background(), stats.ClosedTradeInsert{
+		BacktestID:   backtestID,
+		OpenTime:     now.Add(-2 * time.Hour),
+		CloseTime:    now.Add(-time.Hour),
+		BondID:       "BOND-1",
+		OpenSignal:   "BUY",
+		CloseSignal:  "SELL",
+		Quantity:     decimal.MustNew(10, 0),
+		EntryPrice:   decimal.MustNew(100, 0),
+		ExitPrice:    decimal.MustNew(120, 0),
+		PnL:          decimal.MustNew(200, 0),
+		EntryBalance: decimal.MustNew(9000, 0),
+		OpenTradeID:  openTradeID,
+		CloseTradeID: closeTradeID,
+	}))
+
+	resultCh <- copytrading.BacktestResult{
+		TotalPnL:    decimal.MustNew(200, 0),
+		WinCount:    1,
+		LossCount:   0,
+		MaxDrawdown: decimal.Zero,
+		SharpeRatio: decimal.MustNew(11, 1),
+	}
+
+	var bodyBytes []byte
+	require.Eventually(t, func() bool {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return false
+		}
+		bodyBytes = rec.Body.Bytes()
+		var summary strategyhttp.BacktestResultSummary
+		if err := json.Unmarshal(bodyBytes, &summary); err != nil {
+			return false
+		}
+		return summary.Status == "completed" && summary.SharpeRatio != ""
+	}, time.Second, 10*time.Millisecond)
+
+	var summary strategyhttp.BacktestResultSummary
+	require.NoError(t, json.Unmarshal(bodyBytes, &summary))
+	assert.Equal(t, "completed", summary.Status)
+	assert.Equal(t, "copytrading", summary.StrategyType)
+	assert.Equal(t, "200", summary.TotalPnL)
+	assert.Equal(t, 1, summary.WinCount)
+	assert.Equal(t, 0, summary.LossCount)
+	assert.Equal(t, "1.1", summary.SharpeRatio)
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/trades?limit=10", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var tradesResp struct {
+		Items []strategyhttp.CopyTradingTradeRecord `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tradesResp))
+	require.Len(t, tradesResp.Items, 1)
+	assert.Equal(t, "BOND-1", tradesResp.Items[0].BondID)
+	assert.Equal(t, "10", tradesResp.Items[0].Quantity)
+	assert.Equal(t, "1000", tradesResp.Items[0].OrderSize)
+	assert.Equal(t, "10", tradesResp.Items[0].OpenPosition)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/closed-trades?limit=10", nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var closedResp struct {
+		Items []strategyhttp.CopyTradingClosedTrade `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &closedResp))
+	require.Len(t, closedResp.Items, 1)
+	assert.Equal(t, "BOND-1", closedResp.Items[0].BondID)
+	assert.Equal(t, "10", closedResp.Items[0].Quantity)
+	assert.Equal(t, "200", closedResp.Items[0].PnL)
+	assert.Equal(t, "BUY", closedResp.Items[0].OpenSignal)
+	assert.Equal(t, "SELL", closedResp.Items[0].CloseSignal)
+}
+
+func TestHandlerRejectsCopyTradingBacktestMissingRequiredFields(t *testing.T) {
 	t.Parallel()
 
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := performJSONRequest(t, handler, "/v1/backtests", map[string]any{
 		"strategy_type": "copytrading",
 		"config": map[string]any{
 			"followed_trader": uuid.Must(uuid.NewV7()).String(),
-			"min_order_size":  1,
-			"max_order_size":  2,
 		},
 		"start": time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 		"end":   time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 	})
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "percentage_of_available")
 }
 
 func TestHandlerCancelBacktest(t *testing.T) {
 	t.Parallel()
 
-	backtestID := uuid.Must(uuid.NewV7())
 	resultCh := make(chan types.BacktestResult)
 	svc := &strategyfakes.FakeService{
-		RunBacktestStub: func(ctx context.Context, strat strategycore.Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
-			return backtestID, resultCh, nil
+		RunBacktestStub: func(ctx context.Context, _ uuid.UUID, strat strategycore.Strategy, start, end time.Time) (<-chan types.BacktestResult, error) {
+			return resultCh, nil
 		},
 	}
 	handler := strategyhttp.NewHandler(svc,
@@ -402,6 +673,7 @@ func TestHandlerCancelBacktest(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -417,7 +689,11 @@ func TestHandlerCancelBacktest(t *testing.T) {
 		"start": time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 		"end":   time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 	}
-	performJSONRequest(t, handler, "/v1/backtests", body)
+	rec2 := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusAccepted, rec2.Code)
+	var accepted strategyhttp.BacktestDetail
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &accepted))
+	backtestID := accepted.ID
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/backtests/"+backtestID.String(), nil)
@@ -434,18 +710,16 @@ func TestHandlerCancelBacktest(t *testing.T) {
 func TestHandlerListBacktests(t *testing.T) {
 	t.Parallel()
 
-	firstID := uuid.Must(uuid.NewV7())
-	secondID := uuid.Must(uuid.NewV7())
 	resultCh1 := make(chan types.BacktestResult)
 	resultCh2 := make(chan types.BacktestResult)
 	call := 0
 	svc := &strategyfakes.FakeService{
-		RunBacktestStub: func(ctx context.Context, strat strategycore.Strategy, start, end time.Time) (uuid.UUID, <-chan types.BacktestResult, error) {
+		RunBacktestStub: func(ctx context.Context, _ uuid.UUID, strat strategycore.Strategy, start, end time.Time) (<-chan types.BacktestResult, error) {
 			call++
 			if call == 1 {
-				return firstID, resultCh1, nil
+				return resultCh1, nil
 			}
-			return secondID, resultCh2, nil
+			return resultCh2, nil
 		},
 	}
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
@@ -459,6 +733,7 @@ func TestHandlerListBacktests(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -471,8 +746,13 @@ func TestHandlerListBacktests(t *testing.T) {
 		"start": time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 		"end":   time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 	}
-	performJSONRequest(t, handler, "/v1/backtests", body)
-	performJSONRequest(t, handler, "/v1/backtests", body)
+	firstRec := performJSONRequest(t, handler, "/v1/backtests", body)
+	secondRec := performJSONRequest(t, handler, "/v1/backtests", body)
+	var firstAccepted, secondAccepted strategyhttp.BacktestDetail
+	require.NoError(t, json.Unmarshal(firstRec.Body.Bytes(), &firstAccepted))
+	require.NoError(t, json.Unmarshal(secondRec.Body.Bytes(), &secondAccepted))
+	firstID := firstAccepted.ID
+	secondID := secondAccepted.ID
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests", nil)
@@ -509,6 +789,7 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -563,22 +844,22 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 	assert.NotNil(t, detail.StoppedAt)
 }
 
-func TestHandlerRejectsNotImplementedRun(t *testing.T) {
+func TestHandlerRejectsCopyTradingRunMissingRequiredFields(t *testing.T) {
 	t.Parallel()
 
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
 		"strategy_type": "copytrading",
 		"config": map[string]any{
 			"followed_trader": uuid.Must(uuid.NewV7()).String(),
-			"min_order_size":  1,
-			"max_order_size":  2,
 		},
 	})
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "percentage_of_available")
 }
 
 func TestHandlerListRuns(t *testing.T) {
@@ -603,6 +884,7 @@ func TestHandlerListRuns(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -649,6 +931,7 @@ func TestHandlerRejectsDuplicateOrderBookRun(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	// First run should succeed.
@@ -699,6 +982,7 @@ func TestHandlerAllowsDifferentOrderBookRun(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	// First run with order book A.
@@ -752,6 +1036,7 @@ func TestHandlerAllowsRunAfterPreviousStopped(t *testing.T) {
 			return now
 		}),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	body := map[string]any{
@@ -822,6 +1107,7 @@ func TestHandlerRestoreRuns(t *testing.T) {
 		strategyhttp.WithRunStore(store),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handlerAny.(interface{ RestoreRuns(context.Context) error })
 	require.True(t, ok)
@@ -878,13 +1164,13 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 				},
 				Start: now.Add(-time.Hour),
 				End:   now,
-				Result: &strategyhttp.BacktestResult{
+				Result: mustMarshalResult(t, strategyhttp.MeanReversionBacktestResult{
 					TotalPnL:    "0.05",
 					WinCount:    3,
 					LossCount:   1,
 					MaxDrawdown: "0.01",
 					SharpeRatio: "1.5",
-				},
+				}),
 			},
 			failedID: {
 				BacktestSummary: strategyhttp.BacktestSummary{
@@ -927,6 +1213,7 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 				return "user-test-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handlerAny.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
@@ -1014,6 +1301,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 				return "user-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handler.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
@@ -1251,6 +1539,7 @@ func TestHandlerBacktestOwnership(t *testing.T) {
 				return "user-bob", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handlerAny.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
@@ -1282,6 +1571,7 @@ func TestHandlerValidationErrors(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
@@ -1355,6 +1645,7 @@ type doraClientFunc struct {
 	listOrderBooks func(context.Context) ([]strategyhttp.DORAOrderBookSummary, error)
 	getUserID      func(context.Context) (string, error)
 	getAssetByID   func(context.Context, string) (*strategyhttp.AssetInfo, error)
+	listBotUsers   func(context.Context) ([]strategyhttp.DORABotUser, error)
 }
 
 func (f doraClientFunc) ListOrderBooks(ctx context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
@@ -1376,6 +1667,13 @@ func (f doraClientFunc) GetUserID(ctx context.Context) (string, error) {
 		return "test-user", nil
 	}
 	return f.getUserID(ctx)
+}
+
+func (f doraClientFunc) ListBotUsers(ctx context.Context) ([]strategyhttp.DORABotUser, error) {
+	if f.listBotUsers == nil {
+		return nil, fmt.Errorf("not implemented")
+	}
+	return f.listBotUsers(ctx)
 }
 
 func (s *memoryRunStore) LoadRuns(ctx context.Context) ([]*strategyhttp.RunDetail, error) {
@@ -1403,10 +1701,15 @@ func (s *memoryRunStore) String() string {
 }
 
 type memoryBacktestStore struct {
-	backtests map[uuid.UUID]*strategyhttp.BacktestDetail
+	mu           sync.Mutex
+	backtests    map[uuid.UUID]*strategyhttp.BacktestDetail
+	trades       map[uuid.UUID][]stats.TradeRecordInsert
+	closedTrades map[uuid.UUID][]stats.ClosedTradeInsert
 }
 
 func (s *memoryBacktestStore) LoadBacktests(ctx context.Context) ([]*strategyhttp.BacktestDetail, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]*strategyhttp.BacktestDetail, 0, len(s.backtests))
 	for _, bt := range s.backtests {
 		copyBT := *bt
@@ -1417,7 +1720,9 @@ func (s *memoryBacktestStore) LoadBacktests(ctx context.Context) ([]*strategyhtt
 	return out, nil
 }
 
-func (s *memoryBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UUID) (*strategyhttp.BacktestResult, error) {
+func (s *memoryBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UUID) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	bt, ok := s.backtests[id]
 	if !ok {
 		return nil, fmt.Errorf("backtest not found")
@@ -1426,6 +1731,8 @@ func (s *memoryBacktestStore) LoadBacktestResult(ctx context.Context, id uuid.UU
 }
 
 func (s *memoryBacktestStore) SaveBacktest(ctx context.Context, detail *strategyhttp.BacktestDetail) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.backtests == nil {
 		s.backtests = make(map[uuid.UUID]*strategyhttp.BacktestDetail)
 	}
@@ -1435,29 +1742,75 @@ func (s *memoryBacktestStore) SaveBacktest(ctx context.Context, detail *strategy
 	return nil
 }
 
-func (s *memoryBacktestStore) GetBacktestTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]strategyhttp.TradeRecord, error) {
-	result, err := s.LoadBacktestResult(ctx, id)
-	if err != nil {
-		return nil, err
+func (s *memoryBacktestStore) GetBacktestTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := s.trades[id]
+	pageItems := paginateInserts(rows, page, limit)
+	items := make([]json.RawMessage, 0, len(pageItems))
+	for i := range pageItems {
+		b, err := tradeRecordInsertToResponse(strategyType, pageItems[i])
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, b)
 	}
-	if result == nil {
-		return []strategyhttp.TradeRecord{}, nil
-	}
-	return paginateHelper(result.TradeRecords, page, limit), nil
+	return marshalItems(items)
 }
 
-func (s *memoryBacktestStore) GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, page, limit int) ([]strategyhttp.ClosedTrade, error) {
-	result, err := s.LoadBacktestResult(ctx, id)
-	if err != nil {
-		return nil, err
+func (s *memoryBacktestStore) WriteTradeRecord(_ context.Context, rec stats.TradeRecordInsert) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trades == nil {
+		s.trades = make(map[uuid.UUID][]stats.TradeRecordInsert)
 	}
-	if result == nil {
-		return []strategyhttp.ClosedTrade{}, nil
-	}
-	return paginateHelper(result.ClosedTrades, page, limit), nil
+	s.trades[rec.BacktestID] = append(s.trades[rec.BacktestID], rec)
+	return nil
 }
 
-func paginateHelper[T any](items []T, page, limit int) []T {
+func (s *memoryBacktestStore) WriteClosedTrade(_ context.Context, trade stats.ClosedTradeInsert) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closedTrades == nil {
+		s.closedTrades = make(map[uuid.UUID][]stats.ClosedTradeInsert)
+	}
+	s.closedTrades[trade.BacktestID] = append(s.closedTrades[trade.BacktestID], trade)
+	return nil
+}
+
+func (s *memoryBacktestStore) WriteTradeRecordsBatch(_ context.Context, recs []stats.TradeRecordInsert) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trades == nil {
+		s.trades = make(map[uuid.UUID][]stats.TradeRecordInsert)
+	}
+	for _, r := range recs {
+		s.trades[r.BacktestID] = append(s.trades[r.BacktestID], r)
+	}
+	return nil
+}
+
+func (s *memoryBacktestStore) WriteClosedTradesBatch(_ context.Context, trades []stats.ClosedTradeInsert) error {
+	if len(trades) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closedTrades == nil {
+		s.closedTrades = make(map[uuid.UUID][]stats.ClosedTradeInsert)
+	}
+	for _, t := range trades {
+		s.closedTrades[t.BacktestID] = append(s.closedTrades[t.BacktestID], t)
+	}
+	return nil
+}
+
+func (s *memoryBacktestStore) Flush(_ context.Context) error { return nil }
+
+func paginateInserts[T any](items []T, page, limit int) []T {
 	if page < 1 {
 		page = 1
 	}
@@ -1467,18 +1820,128 @@ func paginateHelper[T any](items []T, page, limit int) []T {
 	if limit > 50 {
 		limit = 50
 	}
-
 	start := (page - 1) * limit
 	if start >= len(items) {
 		return []T{}
 	}
-
 	end := start + limit
 	if end > len(items) {
 		end = len(items)
 	}
-
 	return items[start:end]
+}
+
+func tradeRecordInsertToResponse(strategyType string, r stats.TradeRecordInsert) (json.RawMessage, error) {
+	bondID := r.BondID
+	switch strategyType {
+	case "copytrading":
+		rec := strategyhttp.CopyTradingTradeRecord{
+			Time:         r.Time,
+			BondID:       bondID,
+			Signal:       r.Signal,
+			Price:        r.Price.String(),
+			Quantity:     r.Quantity.String(),
+			OrderSize:    r.OrderSize.String(),
+			Cash:         r.Cash.String(),
+			OpenPosition: r.OpenPosition.String(),
+		}
+		if r.TradeID != uuid.Nil {
+			rec.TradeID = r.TradeID.String()
+		}
+		return json.Marshal(rec)
+	default:
+		rec := strategyhttp.MeanReversionTradeRecord{
+			Time:         r.Time,
+			BondID:       bondID,
+			Signal:       r.Signal,
+			Spread:       r.Spread.String(),
+			PositionSize: r.PositionSize.String(),
+			ZScore:       r.ZScore.String(),
+			Price:        r.Price.String(),
+			Quantity:     r.Quantity.String(),
+			EntryBalance: r.EntryBalance.String(),
+		}
+		return json.Marshal(rec)
+	}
+}
+
+func closedTradeInsertToResponse(strategyType string, r stats.ClosedTradeInsert) (json.RawMessage, error) {
+	bondID := r.BondID
+	switch strategyType {
+	case "copytrading":
+		ct := strategyhttp.CopyTradingClosedTrade{
+			OpenTime:     r.OpenTime,
+			CloseTime:    r.CloseTime,
+			BondID:       bondID,
+			OpenSignal:   r.OpenSignal,
+			CloseSignal:  r.CloseSignal,
+			Quantity:     r.Quantity.String(),
+			EntryPrice:   r.EntryPrice.String(),
+			ExitPrice:    r.ExitPrice.String(),
+			PnL:          r.PnL.String(),
+			EntryBalance: r.EntryBalance.String(),
+		}
+		if r.OpenTradeID != uuid.Nil {
+			ct.OpenTradeID = r.OpenTradeID.String()
+		}
+		if r.CloseTradeID != uuid.Nil {
+			ct.CloseTradeID = r.CloseTradeID.String()
+		}
+		return json.Marshal(ct)
+	default:
+		ct := strategyhttp.MeanReversionClosedTrade{
+			BondID:       bondID,
+			OpenTime:     r.OpenTime,
+			CloseTime:    r.CloseTime,
+			Signal:       r.OpenSignal,
+			ExitSignal:   r.CloseSignal,
+			EntrySpread:  r.EntrySpread.String(),
+			ExitSpread:   r.ExitSpread.String(),
+			EntryZScore:  r.EntryZScore.String(),
+			ExitZScore:   r.ExitZScore.String(),
+			PositionSize: r.PositionSize.String(),
+			PnL:          r.PnL.String(),
+			ExitReason:   r.ExitReason,
+			EntryPrice:   r.EntryPrice.String(),
+			ExitPrice:    r.ExitPrice.String(),
+			Quantity:     r.Quantity.String(),
+			EntryBalance: r.EntryBalance.String(),
+		}
+		return json.Marshal(ct)
+	}
+}
+
+func (s *memoryBacktestStore) GetBacktestClosedTrades(ctx context.Context, id uuid.UUID, strategyType string, page, limit int) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := s.closedTrades[id]
+	pageItems := paginateInserts(rows, page, limit)
+	items := make([]json.RawMessage, 0, len(pageItems))
+	for i := range pageItems {
+		b, err := closedTradeInsertToResponse(strategyType, pageItems[i])
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, b)
+	}
+	return marshalItems(items)
+}
+
+func marshalItems(items []json.RawMessage) (json.RawMessage, error) {
+	b, err := json.Marshal(map[string]any{"items": items})
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func mustMarshalResult(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	return b
 }
 
 func TestHandlerRunOwnership(t *testing.T) {
@@ -1513,6 +1976,7 @@ func TestHandlerRunOwnership(t *testing.T) {
 				return "user-bob", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handlerAny.(interface{ RestoreRuns(context.Context) error })
 	require.True(t, ok)
@@ -1562,8 +2026,8 @@ func TestHandlerRunOwnership(t *testing.T) {
 func TestHandlerBacktestSummary(t *testing.T) {
 	t.Parallel()
 
-	backtestID := uuid.Must(uuid.NewV7())
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	backtestID := uuid.Must(uuid.NewV7())
 
 	store := &memoryBacktestStore{
 		backtests: map[uuid.UUID]*strategyhttp.BacktestDetail{
@@ -1578,13 +2042,13 @@ func TestHandlerBacktestSummary(t *testing.T) {
 				},
 				Start: now.Add(-time.Hour),
 				End:   now,
-				Result: &strategyhttp.BacktestResult{
+				Result: mustMarshalResult(t, strategyhttp.MeanReversionBacktestResult{
 					TotalPnL:    "100.0",
 					WinCount:    5,
 					LossCount:   2,
 					MaxDrawdown: "0.1",
 					SharpeRatio: "1.5",
-				},
+				}),
 			},
 		},
 	}
@@ -1597,6 +2061,7 @@ func TestHandlerBacktestSummary(t *testing.T) {
 				return "user-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handler.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
@@ -1648,6 +2113,7 @@ func TestHandlerRequiresAuth(t *testing.T) {
 				return "user-x", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 
 	v1Endpoints := []struct {
@@ -1722,23 +2188,8 @@ func TestHandlerRequiresAuth(t *testing.T) {
 func TestHandlerBacktestSubResources(t *testing.T) {
 	t.Parallel()
 
-	backtestID := uuid.Must(uuid.NewV7())
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
-
-	// Create 15 trade records and 15 closed trades
-	tradeRecords := make([]strategyhttp.TradeRecord, 15)
-	closedTrades := make([]strategyhttp.ClosedTrade, 15)
-	for i := 0; i < 15; i++ {
-		tradeRecords[i] = strategyhttp.TradeRecord{
-			BondID: fmt.Sprintf("bond-%d", i),
-			Signal: "BUY",
-		}
-		closedTrades[i] = strategyhttp.ClosedTrade{
-			BondID:     fmt.Sprintf("bond-%d", i),
-			Signal:     "BUY",
-			ExitSignal: "SELL",
-		}
-	}
+	backtestID := uuid.Must(uuid.NewV7())
 
 	store := &memoryBacktestStore{
 		backtests: map[uuid.UUID]*strategyhttp.BacktestDetail{
@@ -1750,13 +2201,27 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 					Status:       "completed",
 					CreatedAt:    now,
 				},
-				Result: &strategyhttp.BacktestResult{
-					TradeRecords: tradeRecords,
-					ClosedTrades: closedTrades,
-					TotalPnL:     "100.0",
-				},
+				Result: mustMarshalResult(t, strategyhttp.MeanReversionBacktestResult{
+					TotalPnL: "100.0",
+				}),
 			},
 		},
+	}
+	// Trade records and closed trades are now persisted via the writer
+	// interface, not embedded in the result JSON. Add 15 of each so the
+	// pagination assertions below have something to page through.
+	for i := 0; i < 15; i++ {
+		require.NoError(t, store.WriteTradeRecord(context.Background(), stats.TradeRecordInsert{
+			BacktestID: backtestID,
+			BondID:     fmt.Sprintf("bond-%d", i),
+			Signal:     "BUY",
+		}))
+		require.NoError(t, store.WriteClosedTrade(context.Background(), stats.ClosedTradeInsert{
+			BacktestID:  backtestID,
+			BondID:      fmt.Sprintf("bond-%d", i),
+			OpenSignal:  "BUY",
+			CloseSignal: "SELL",
+		}))
 	}
 
 	handler := strategyhttp.NewHandler(
@@ -1767,6 +2232,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 				return "user-1", nil
 			},
 		}),
+		strategyhttp.WithTradesHistoryStore(nil),
 	)
 	restorer, ok := handler.(interface{ RestoreBacktests(context.Context) error })
 	require.True(t, ok)
@@ -1780,7 +2246,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp struct {
-			Items []strategyhttp.TradeRecord `json:"items"`
+			Items []strategyhttp.MeanReversionTradeRecord `json:"items"`
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		assert.Len(t, resp.Items, 10)
@@ -1796,7 +2262,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp struct {
-			Items []strategyhttp.TradeRecord `json:"items"`
+			Items []strategyhttp.MeanReversionTradeRecord `json:"items"`
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		assert.Len(t, resp.Items, 5)
@@ -1812,7 +2278,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp struct {
-			Items []strategyhttp.ClosedTrade `json:"items"`
+			Items []strategyhttp.MeanReversionClosedTrade `json:"items"`
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		// Our sample has 15, so it should return all 15 if limit is clamped to 50
@@ -1827,4 +2293,82 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
+}
+
+func TestHandlerCopyTradingBacktestInitialBalance(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	newHandler := func() http.Handler {
+		return strategyhttp.NewHandler(
+			&strategyfakes.FakeService{},
+			strategyhttp.WithNow(func() time.Time { return now }),
+			strategyhttp.WithDORAClient(doraClientFunc{
+				getUserID: func(context.Context) (string, error) { return "user-1", nil },
+			}),
+			strategyhttp.WithTradesHistoryStore(nil),
+		)
+	}
+
+	// omit returns the map unchanged so we can leave initial_balance out.
+	buildBody := func(initial any) map[string]any {
+		cfg := map[string]any{
+			"followed_trader":         uuid.NewString(),
+			"percentage_of_available": 0.5,
+			"leverage":                1.0,
+			"min_order_size":          0,
+			"max_order_size":          0,
+			"disallowed_bonds":        []string{},
+		}
+		if initial != "omit" {
+			cfg["initial_balance"] = initial
+		}
+		return map[string]any{
+			"strategy_type": "copytrading",
+			"config":        cfg,
+			"start":         now.Add(-24 * time.Hour).Format(time.RFC3339),
+			"end":           now.Format(time.RFC3339),
+		}
+	}
+
+	cases := []struct {
+		name     string
+		initial  any
+		wantCode int
+		wantBody string
+	}{
+		{
+			name:     "absent falls through to default",
+			initial:  "omit",
+			wantCode: http.StatusAccepted,
+		},
+		{
+			name:     "explicit zero falls through to default",
+			initial:  0.0,
+			wantCode: http.StatusAccepted,
+		},
+		{
+			name:     "positive is accepted",
+			initial:  25000.0,
+			wantCode: http.StatusAccepted,
+		},
+		{
+			name:     "negative is rejected",
+			initial:  -1.0,
+			wantCode: http.StatusBadRequest,
+			wantBody: "config.initial_balance must be non-negative",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := performJSONRequest(t, newHandler(), "/v1/backtests", buildBody(tc.initial))
+			require.Equal(t, tc.wantCode, rec.Code)
+			if tc.wantBody != "" {
+				assert.Contains(t, rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
 }

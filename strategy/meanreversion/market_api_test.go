@@ -67,7 +67,6 @@ func TestStrategyCurrentPosition(t *testing.T) {
 	t.Run("loads account asset position", func(t *testing.T) {
 		s := meanreversion.New(defaultConfig(), nil)
 		lookup := &meanreversionfakes.FakeMarketAPIClient{}
-		lookup.SelfUserIDReturns("user-123", nil)
 		lookup.AssetPositionReturns(decimal.MustNew(3, 1), decimal.Zero, nil)
 		meanreversion.SetLookupClient(s, lookup)
 
@@ -75,24 +74,21 @@ func TestStrategyCurrentPosition(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.True(t, position.Equal(decimal.MustNew(3, 1)))
-		assert.Equal(t, 1, lookup.SelfUserIDCallCount())
 		assert.Equal(t, 1, lookup.AssetPositionCallCount())
-		_, actualAccountID, actualAssetID := lookup.AssetPositionArgsForCall(0)
-		assert.Equal(t, "user-123", actualAccountID)
+		_, actualAssetID := lookup.AssetPositionArgsForCall(0)
 		assert.Equal(t, "asset-123", actualAssetID)
 	})
 
-	t.Run("requires self user id", func(t *testing.T) {
+	t.Run("propagates asset position error", func(t *testing.T) {
 		s := meanreversion.New(defaultConfig(), nil)
 		lookup := &meanreversionfakes.FakeMarketAPIClient{}
-		lookup.SelfUserIDReturns("", errors.New("user unavailable"))
+		lookup.AssetPositionReturns(decimal.Zero, decimal.Zero, errors.New("user unavailable"))
 		meanreversion.SetLookupClient(s, lookup)
 
 		_, err := meanreversion.CurrentPosition(s, context.Background(), "asset-123")
 
 		require.ErrorContains(t, err, "user unavailable")
-		assert.Equal(t, 1, lookup.SelfUserIDCallCount())
-		assert.Zero(t, lookup.AssetPositionCallCount())
+		assert.Equal(t, 1, lookup.AssetPositionCallCount())
 	})
 }
 
