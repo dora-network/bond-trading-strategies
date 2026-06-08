@@ -79,6 +79,32 @@
         }
       }
     },
+    "/v1/copy-traders": {
+      "get": {
+        "operationId": "listCopyTraders",
+        "summary": "List traders available to be followed by a copy-trading run",
+        "security": [{ "ApiKeyAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Available copy traders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/CopyTraderSummary" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
     "/v1/tenors": {
       "get": {
         "operationId": "listTenors",
@@ -545,6 +571,15 @@
         },
         "required": ["id"]
       },
+      "CopyTraderSummary": {
+        "type": "object",
+        "description": "A single entry in the list-copy-traders response. The `id` is the DORA user id and matches the `followed_trader` field accepted by CopyTradingConfig.",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "display_name": { "type": "string" }
+        },
+        "required": ["id", "display_name"]
+      },
       "TenorSummary": {
         "type": "object",
         "properties": {
@@ -638,15 +673,39 @@
       "CopyTradingConfig": {
         "type": "object",
         "properties": {
-          "followed_trader": { "type": "string", "format": "uuid" },
-          "min_order_size": { "type": "integer", "minimum": 0 },
-          "max_order_size": { "type": "integer", "minimum": 0 },
-          "allowed_bonds": {
+          "followed_trader": {
+            "type": "string", "format": "uuid",
+            "description": "DORA user id of the trader whose trades will be copied."
+          },
+          "percentage_of_available": {
+            "type": "number",
+            "exclusiveMinimum": 0, "maximum": 1,
+            "description": "Fraction of available balance to allocate per copied trade. Must be in (0, 1]."
+          },
+          "leverage": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Leverage multiplier applied to copied orders. Must be greater than 0."
+          },
+          "min_order_size": {
+            "type": "integer", "minimum": 0,
+            "description": "Minimum order size; orders below this threshold are skipped. Defaults to 0."
+          },
+          "max_order_size": {
+            "type": "integer", "minimum": 0,
+            "description": "Maximum order size; orders above this threshold are clipped. Must be >= min_order_size. Defaults to 0 (no cap)."
+          },
+          "disallowed_bonds": {
             "type": "array",
-            "items": { "type": "string", "format": "uuid" }
+            "items": { "type": "string", "format": "uuid" },
+            "description": "Bond UUIDs to exclude from copying. If absent or empty, all bonds are eligible."
+          },
+          "initial_balance": {
+            "type": "number", "minimum": 0, "default": 10000,
+            "description": "Starting cash for backtests. Omit or set to 0 to use the package default (10000). Omitted for live runs — obtained from DORA positions."
           }
         },
-        "required": ["followed_trader"]
+        "required": ["followed_trader", "percentage_of_available", "leverage"]
       },
       "BacktestSummary": {
         "type": "object",
