@@ -43,6 +43,30 @@ func (b *Backtester) startingBalance() decimal.Decimal {
 	return decimal.MustNew(initialBacktestBalance, 0)
 }
 
+// freeCash returns the cash available for new positions, excluding the
+// amount reserved to cover existing short positions. Without this
+// reservation, short sale proceeds inflate the available balance and
+// allow ever-larger short positions (exponential growth). The reserved
+// amount for each open short is the buyback cost at the current price
+// (abs(qty) * currentPrice). The reserved cash is released when the
+// short is closed (the close deducts buyback cost and removes the
+// position from the map).
+func (b *Backtester) freeCash(cash decimal.Decimal, positions map[string]*position, currentPrice decimal.Decimal) decimal.Decimal {
+	reserved := decimal.Zero
+	for _, p := range positions {
+		if p.qty.IsNeg() {
+			// Reserve the buyback cost for this short position
+			buyback, _ := p.qty.Abs().Mul(currentPrice)
+			reserved, _ = reserved.Add(buyback)
+		}
+	}
+	free, _ := cash.Sub(reserved)
+	if free.IsNeg() {
+		return decimal.Zero
+	}
+	return free
+}
+
 func (b *Backtester) Run(ctx context.Context, start, end time.Time) (BacktestResult, error) {
 	followedTrader := b.strategy.cfg.FollowedTrader.String()
 
@@ -133,13 +157,16 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 		}
 
 		if !isClose {
-			// Open or extend: compute order size based on current cash.
-			// After a close, cash increases by the proceeds, so the next
-			// position can be larger. After an extend, cash is already
-			// reduced by the current position's cost, so the extend is
-			// sized based on remaining capital.
+			// Open or extend: compute order size based on FREE cash.
+			// Free cash = total cash minus the amount reserved to cover
+			// existing short positions. Without this subtraction, short
+			// sale proceeds get added to the available balance and allow
+			// us to take on ever-larger short positions (exponential
+			// growth). By reserving the proceeds, the available balance
+			// for new shorts only grows by actual PnL from closes.
+			availableBalance := b.freeCash(cash, positions, trade.Price)
 			ourQty = calculateOrderSize(
-				cash,
+				availableBalance,
 				b.strategy.cfg.PercentageOfAvailable,
 				b.strategy.cfg.Leverage,
 				b.strategy.cfg.MinOrderSize,
@@ -149,9 +176,9 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 			if !trade.Price.IsZero() {
 				ourQty, _ = ourQty.Quo(trade.Price)
 			}
-			// Check if we have enough cash to cover the order
+			// Check if we have enough free cash to cover the order
 			orderCost, _ := ourQty.Mul(trade.Price)
-			if orderCost.Cmp(cash) > 0 {
+			if orderCost.Cmp(availableBalance) > 0 {
 				// Not enough cash, skip this trade
 				continue
 			}
