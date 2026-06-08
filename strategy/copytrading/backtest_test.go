@@ -116,9 +116,11 @@ func TestSimulate_BuyOpensLong(t *testing.T) {
 	// Backtest computes order size based on current cash
 	// Initial balance: 10000, percentage: 1.0, leverage: 1.0, price: 100
 	// Order size = 10000, quantity = 10000 / 100 = 100
+	// Trade record reports pre-trade cash (the balance at the time the
+	// order was sized), not the post-trade cash.
 	require.Equal(t, "100", rec.Quantity.String())
 	require.Equal(t, "10000", rec.OrderSize.String())
-	require.Equal(t, "0", rec.Cash.String())
+	require.Equal(t, "10000", rec.Cash.String())
 	require.Equal(t, "100", rec.OpenPosition.String())
 
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
@@ -362,8 +364,10 @@ func TestSimulate_SellOpensShort(t *testing.T) {
 	// Backtest computes order size based on current cash
 	// sell at 100, order size = 10000, qty = 10000/100 = 100
 	require.Equal(t, "100", rec.Quantity.String())
-	// Short sale: receive 10000 proceeds
-	require.Equal(t, "20000", rec.Cash.String())
+	// Short sale proceeds: receive 10000, total cash becomes 20000.
+	// Trade record reports pre-trade cash (the balance at the time the
+	// order was sized), not the post-trade cash.
+	require.Equal(t, "10000", rec.Cash.String())
 	require.Equal(t, "-100", rec.OpenPosition.String())
 
 	require.True(t, res.GetTotalPnL().IsZero())
@@ -583,4 +587,66 @@ func TestBacktesterRun_ContextCancelled(t *testing.T) {
 	end := t0.Add(30 * time.Minute)
 	_, err := b.Run(ctx, start, end)
 	require.Error(t, err)
+}
+
+// TestSimulate_TradeRecordCashIsPreTrade verifies that the Cash field on
+// each trade record is the balance at the time the order was sized, not
+// the balance after the trade settles. Without this, the first SELL's
+// cash would show initial_balance + proceeds, which makes it look like
+// the order was sized from a balance that already includes its own
+// proceeds (compounding illusion).
+func TestSimulate_TradeRecordCashIsPreTrade(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	trades := []Trade{
+		makeTrade("tx-sell-1", asset.String(), "sell", "100", "1", t0),
+		makeTrade("tx-buy-1", asset.String(), "buy", "100", "1", t0.Add(time.Minute)),
+	}
+
+	cfg := Config{
+		FollowedTrader:        followed,
+		InitialBalance:        decimal.MustNew(1000, 0),
+		PercentageOfAvailable: decimal.MustNew(1, 0),
+		Leverage:              decimal.MustNew(1, 0),
+	}
+	s := New(cfg)
+	b := &Backtester{strategy: s}
+
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t0.Add(time.Hour))
+	require.NoError(t, err)
+
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok)
+	require.Len(t, records, 3)
+
+	// First record: SELL that opens a short. Order size = 100% of
+	// pre-trade cash (1000), qty = 10, proceeds = 1000, post-trade
+	// cash = 2000. The record must report 1000 (pre-trade), not 2000.
+	require.Equal(t, types.SignalSell, records[0].Signal)
+	require.Equal(t, "1000", records[0].OrderSize.String())
+	require.Equal(t, "10", records[0].Quantity.String())
+	require.Equal(t, "1000", records[0].Cash.String(),
+		"first SELL record should report pre-trade cash (initial balance), not post-trade cash")
+
+	// Second record: BUY that closes the short (mirrors the live
+	// strategy which always closes the full position on reversal).
+	// Pre-close cash = 2000 (post-open), buyback cost = 10*100 = 1000,
+	// post-close cash = 1000. The record must report 2000 (pre-close,
+	// the balance at the time the close order was sized), not 1000.
+	require.Equal(t, types.SignalBuy, records[1].Signal)
+	require.Equal(t, "10", records[1].Quantity.String())
+	require.Equal(t, "2000", records[1].Cash.String(),
+		"close-short record should report pre-close cash, not post-close cash")
+
+	// Third record: BUY that opens a new long from the freed cash.
+	// Pre-open cash = 1000, order size = 1000, qty = 10, post-open
+	// cash = 0. The record must report 1000 (pre-open), not 0.
+	require.Equal(t, types.SignalBuy, records[2].Signal)
+	require.Equal(t, "1000", records[2].OrderSize.String())
+	require.Equal(t, "10", records[2].Quantity.String())
+	require.Equal(t, "1000", records[2].Cash.String(),
+		"open-long record should report pre-open cash, not post-open cash")
 }

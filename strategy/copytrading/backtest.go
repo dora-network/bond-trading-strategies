@@ -330,11 +330,17 @@ func buyClosesShort(
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	absQty := pos.qty.Abs()
 
+	// Pre-close cash: the balance before the buyback is deducted. This
+	// is the value the trade record reports so the recorded Cash field
+	// reflects the portfolio state at the moment the order was sized,
+	// not after the cash flow has settled.
+	preCloseCash := cash
+
 	// Close the full short position, then open a new long — mirroring
 	// the live strategy which always closes the entire position on a
 	// direction reversal.
 	cash, pos.qty, closedTrades = closeShortPosition(trade, tradeID, pos, absQty, price, cash, closedTrades)
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, absQty, price, cash, pos.qty, tradeRecords)
+	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, absQty, price, preCloseCash, pos.qty, tradeRecords)
 
 	// Compute new order size based on cash AFTER the close (includes proceeds from closing).
 	// The cash now reflects the proceeds from buying back the short.
@@ -371,7 +377,10 @@ func buyClosesShort(
 		return cash, tradeRecords, closedTrades
 	}
 
-	// Open new long position: pay cash to buy bonds
+	// Open new long position: pay cash to buy bonds. Capture the
+	// pre-open cash so the trade record reflects the balance at the
+	// time the new order was sized, not after the cost is deducted.
+	preOpenCash := cash
 	cash, _ = cash.Sub(cost)
 	pos = &position{
 		qty:         newQty,
@@ -380,7 +389,7 @@ func buyClosesShort(
 		openTradeID: tradeID,
 	}
 	positions[trade.Asset] = pos
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, newQty, price, cash, pos.qty, tradeRecords)
+	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, newQty, price, preOpenCash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
 
@@ -395,6 +404,9 @@ func buyOpensOrAddsLong(
 	closedTrades []ClosedTrade,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	// When opening/extending a long, we pay cash to buy bonds.
+	// Capture pre-trade cash so the trade record reflects the balance
+	// at the time the order was sized, not after the cost is deducted.
+	preTradeCash := cash
 	cost, _ := ourQty.Mul(price)
 	cash, _ = cash.Sub(cost)
 
@@ -415,7 +427,7 @@ func buyOpensOrAddsLong(
 		pos.avgEntry = avg
 	}
 	positions[trade.Asset] = pos
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, ourQty, price, cash, pos.qty, tradeRecords)
+	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, ourQty, price, preTradeCash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
 
@@ -454,10 +466,13 @@ func sellClosesLong(
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	// Close the full long position, then open a new short — mirroring
 	// the live strategy which always closes the entire position on a
-	// direction reversal.
+	// direction reversal. Pre-close cash is captured so the close
+	// record reflects the balance at the time the close order was
+	// sized, not after the proceeds are added.
+	preCloseCash := cash
 	origQty := pos.qty
 	cash, pos.qty, closedTrades = closeLongPosition(trade, tradeID, pos, origQty, price, cash, closedTrades)
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, origQty, price, cash, pos.qty, tradeRecords)
+	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, origQty, price, preCloseCash, pos.qty, tradeRecords)
 
 	// Compute new order size based on cash AFTER the close (includes proceeds from closing).
 	// The cash now reflects the proceeds from selling the long position.
@@ -479,7 +494,11 @@ func sellClosesLong(
 		return cash, tradeRecords, closedTrades
 	}
 
-	// Open new short position: receive cash from selling borrowed bonds
+	// Open new short position: receive cash from selling borrowed bonds.
+	// Capture pre-open cash so the open-short record reflects the
+	// balance at the time the new order was sized, not after the
+	// proceeds are added.
+	preOpenCash := cash
 	proceeds, _ := newQty.Mul(price)
 	cash, _ = cash.Add(proceeds)
 	pos = &position{
@@ -489,7 +508,7 @@ func sellClosesLong(
 		openTradeID: tradeID,
 	}
 	positions[trade.Asset] = pos
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, newQty, price, cash, pos.qty, tradeRecords)
+	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, newQty, price, preOpenCash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
 
@@ -504,7 +523,10 @@ func sellOpensOrAddsShort(
 	closedTrades []ClosedTrade,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	// When opening/extending a short, we receive cash from selling borrowed bonds.
-	// Margin is collateral, not a cash outflow.
+	// Margin is collateral, not a cash outflow. Capture pre-trade cash
+	// so the trade record reflects the balance at the time the order
+	// was sized, not after the proceeds are added.
+	preTradeCash := cash
 	proceeds, _ := ourQty.Mul(price)
 	cash, _ = cash.Add(proceeds)
 
@@ -526,7 +548,7 @@ func sellOpensOrAddsShort(
 		pos.avgEntry = avg
 	}
 	positions[trade.Asset] = pos
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, ourQty, price, cash, pos.qty, tradeRecords)
+	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, ourQty, price, preTradeCash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
 
