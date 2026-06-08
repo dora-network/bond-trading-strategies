@@ -599,7 +599,11 @@ func closeShortPosition(
 	cash decimal.Decimal,
 	closedTrades []ClosedTrade,
 ) (decimal.Decimal, decimal.Decimal, []ClosedTrade) {
-	pnl, _ := pos.avgEntry.Sub(price)
+	// Short PnL: (exitPrice - entryPrice) * qty. A short loses money
+	// when exit > entry (we have to buy back at a higher price), so
+	// the sign naturally reflects profit vs loss — same shape as
+	// closeLongPosition. Mirrors the convention used for long closes.
+	pnl, _ := price.Sub(pos.avgEntry)
 	pnl, _ = pnl.Mul(closeQty)
 	closedTrades = append(closedTrades, ClosedTrade{
 		OpenTime:     pos.openTime,

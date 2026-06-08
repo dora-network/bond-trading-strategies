@@ -290,12 +290,14 @@ func TestSimulate_BuyClosesShort(t *testing.T) {
 	require.Len(t, closed, 1)
 	// Backtest computes order size based on current cash
 	// t0: sell at 100, order size = 10000, qty = 100, cash = 20000 (short proceeds)
-	// t1: buy at 80, close 100 short, buyback = 8000, cash = 12000, PnL = 2000
+	// t1: buy at 80, close 100 short, buyback = 8000, cash = 12000, PnL = -2000
 	require.Equal(t, "100", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "80", closed[0].ExitPrice.String())
-	// PnL = (100 - 80) * 100 = 2000
-	require.Equal(t, "2000", closed[0].PnL.String())
+	// PnL = (exitPrice - entryPrice) * qty = (80 - 100) * 100 = -2000
+	// (we sold high and bought back low only if exit < entry, so the
+	// sign reflects the actual loss when exit > entry)
+	require.Equal(t, "-2000", closed[0].PnL.String())
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
@@ -326,12 +328,12 @@ func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
 	require.Len(t, closed, 1)
 	// Backtest computes order size based on current cash
 	// t0: sell at 100, order size = 10000, qty = 100, cash = 20000
-	// t1: buy at 90, close 100 short, buyback = 9000, cash = 11000, PnL = 1000
+	// t1: buy at 90, close 100 short, buyback = 9000, cash = 11000, PnL = -1000
 	require.Equal(t, "100", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "90", closed[0].ExitPrice.String())
-	// PnL = (100 - 90) * 100 = 1000
-	require.Equal(t, "1000", closed[0].PnL.String())
+	// PnL = (exitPrice - entryPrice) * qty = (90 - 100) * 100 = -1000
+	require.Equal(t, "-1000", closed[0].PnL.String())
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
@@ -396,15 +398,18 @@ func TestSimulate_WinLossCount(t *testing.T) {
 	// Backtest computes order size based on current cash
 	// initialBalance = 10000, percentage = 1.0, leverage = 1.0
 	// t0: buy at 100, order size = 10000, qty = 100, cost = 10000, cash = 0
-	// t1: sell at 150, close 100 long, proceeds = 15000, cash = 15000, PnL = 5000
+	// t1: sell at 150, close 100 long, proceeds = 15000, cash = 15000,
+	//        PnL = (150-100)*100 = 5000 (win)
 	//        open short: order size = 15000, qty = 100, cash = 30000
-	// t2: buy at 100, close 100 short, buyback = 10000, cash = 20000, PnL = 5000
+	// t2: buy at 100, close 100 short, buyback = 10000, cash = 20000,
+	//        PnL = (100-150)*100 = -5000 (loss)
 	//        open long: order size = 20000, qty = 200, cost = 20000, cash = 0
-	// t3: sell at 80, close 200 long, proceeds = 16000, cash = 16000, PnL = -4000
-	// Total PnL = 5000 + 5000 - 4000 = 6000
-	require.Equal(t, 2, res.GetWinCount())
-	require.Equal(t, 1, res.GetLossCount())
-	require.Equal(t, "6000", res.GetTotalPnL().String())
+	// t3: sell at 80, close 200 long, proceeds = 16000, cash = 16000,
+	//        PnL = (80-100)*200 = -4000 (loss)
+	// Total PnL = 5000 - 5000 - 4000 = -4000
+	require.Equal(t, 1, res.GetWinCount())
+	require.Equal(t, 2, res.GetLossCount())
+	require.Equal(t, "-4000", res.GetTotalPnL().String())
 }
 
 func TestSimulate_MaxDrawdownNonNegative(t *testing.T) {
