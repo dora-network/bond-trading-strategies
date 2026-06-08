@@ -109,11 +109,6 @@ type position struct {
 	avgEntry    decimal.Decimal
 	openTime    time.Time
 	openTradeID uuid.UUID
-	// openBalance is the cash balance at the time the position was
-	// opened, before any cash flow for the opening trade. Recorded so
-	// the ClosedTrade that closes this position can report the balance
-	// that was actually deployed, not the balance at close time.
-	openBalance decimal.Decimal
 }
 
 func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end time.Time) (BacktestResult, error) {
@@ -124,6 +119,16 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 
 	cash := b.startingBalance()
 	positions := make(map[string]*position)
+	// runningBalance is the compounding equity that drives each
+	// ClosedTrade's EntryBalance. It starts at the initial balance
+	// and advances by the PnL of every previously closed trade, so
+	// the entry balance reported on the next closed trade reflects
+	// the realised equity at the time the position was opened — not
+	// the cash on hand, which is depleted by the cost of the opening
+	// trade itself. (e.g. after a 1000-balance backtest opens a 500
+	// long and closes it for -0.03 PnL, the next closed trade's
+	// EntryBalance is 999.97, not 500.)
+	runningBalance := b.startingBalance()
 
 	for trade := range ch {
 		select {
@@ -207,6 +212,14 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 			b.strategy.cfg.MinOrderSize,
 			b.strategy.cfg.MaxOrderSize,
 		)
+
+		// Replace each newly added closed trade's EntryBalance with the
+		// running compounding balance, then advance it by the trade's
+		// PnL so the next closed trade inherits the post-close equity.
+		for i := prevClosedCount; i < len(closedTrades); i++ {
+			closedTrades[i].EntryBalance = runningBalance
+			runningBalance, _ = runningBalance.Add(closedTrades[i].PnL)
+		}
 
 		// Write new trades incrementally if writer is configured
 		if b.writer != nil {
@@ -392,7 +405,6 @@ func buyClosesShort(
 		avgEntry:    price,
 		openTime:    trade.CreatedAt,
 		openTradeID: tradeID,
-		openBalance: preOpenCash,
 	}
 	positions[trade.Asset] = pos
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, newQty, price, preOpenCash, pos.qty, tradeRecords)
@@ -422,7 +434,6 @@ func buyOpensOrAddsLong(
 			avgEntry:    price,
 			openTime:    trade.CreatedAt,
 			openTradeID: tradeID,
-			openBalance: preTradeCash,
 		}
 	} else {
 		oldCost, _ := pos.qty.Mul(pos.avgEntry)
@@ -513,7 +524,6 @@ func sellClosesLong(
 		avgEntry:    price,
 		openTime:    trade.CreatedAt,
 		openTradeID: tradeID,
-		openBalance: preOpenCash,
 	}
 	positions[trade.Asset] = pos
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, newQty, price, preOpenCash, pos.qty, tradeRecords)
@@ -544,7 +554,6 @@ func sellOpensOrAddsShort(
 			avgEntry:    price,
 			openTime:    trade.CreatedAt,
 			openTradeID: tradeID,
-			openBalance: preTradeCash,
 		}
 	} else {
 		absQty := pos.qty.Abs()
@@ -572,16 +581,18 @@ func closeLongPosition(
 	pnl, _ := price.Sub(pos.avgEntry)
 	pnl, _ = pnl.Mul(closeQty)
 	closedTrades = append(closedTrades, ClosedTrade{
-		OpenTime:     pos.openTime,
-		CloseTime:    trade.CreatedAt,
-		BondID:       trade.Asset,
-		OpenSignal:   types.SignalBuy,
-		CloseSignal:  types.SignalSell,
-		Quantity:     closeQty,
-		EntryPrice:   pos.avgEntry,
-		ExitPrice:    price,
-		PnL:          pnl,
-		EntryBalance: pos.openBalance,
+		OpenTime:    pos.openTime,
+		CloseTime:   trade.CreatedAt,
+		BondID:      trade.Asset,
+		OpenSignal:  types.SignalBuy,
+		CloseSignal: types.SignalSell,
+		Quantity:    closeQty,
+		EntryPrice:  pos.avgEntry,
+		ExitPrice:   price,
+		PnL:         pnl,
+		// EntryBalance is set by simulate's running-balance pass
+		// (compounding equity across closed trades).
+		EntryBalance: decimal.Zero,
 		OpenTradeID:  pos.openTradeID,
 		CloseTradeID: tradeID,
 	})
@@ -606,16 +617,18 @@ func closeShortPosition(
 	pnl, _ := price.Sub(pos.avgEntry)
 	pnl, _ = pnl.Mul(closeQty)
 	closedTrades = append(closedTrades, ClosedTrade{
-		OpenTime:     pos.openTime,
-		CloseTime:    trade.CreatedAt,
-		BondID:       trade.Asset,
-		OpenSignal:   types.SignalSell,
-		CloseSignal:  types.SignalBuy,
-		Quantity:     closeQty,
-		EntryPrice:   pos.avgEntry,
-		ExitPrice:    price,
-		PnL:          pnl,
-		EntryBalance: pos.openBalance,
+		OpenTime:    pos.openTime,
+		CloseTime:   trade.CreatedAt,
+		BondID:      trade.Asset,
+		OpenSignal:  types.SignalSell,
+		CloseSignal: types.SignalBuy,
+		Quantity:    closeQty,
+		EntryPrice:  pos.avgEntry,
+		ExitPrice:   price,
+		PnL:         pnl,
+		// EntryBalance is set by simulate's running-balance pass
+		// (compounding equity across closed trades).
+		EntryBalance: decimal.Zero,
 		OpenTradeID:  pos.openTradeID,
 		CloseTradeID: tradeID,
 	})

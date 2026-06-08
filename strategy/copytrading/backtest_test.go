@@ -656,20 +656,20 @@ func TestSimulate_TradeRecordCashIsPreTrade(t *testing.T) {
 		"open-long record should report pre-open cash, not post-open cash")
 
 	// The first closed trade is the BUY that closed the short opened
-	// by records[0]. It must report the balance that was deployed to
-	// open the short (1000, the cash at the time of records[0]), not
-	// the cash at the moment the close was executed.
+	// by records[0]. With the running-balance model, the first closed
+	// trade's EntryBalance is the initial balance (1000), since no
+	// prior PnL exists to compound. Subsequent closed trades would
+	// inherit runningBalance = EntryBalance + PnL.
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok)
 	require.NotEmpty(t, closed)
 	require.Equal(t, "1000", closed[0].EntryBalance.String(),
-		"closed trade EntryBalance should reflect balance at position open, not at close")
+		"first closed trade EntryBalance should be the initial balance")
 }
 
 // TestSimulate_ClosedTradeEntryBalance_LongRoundTrip verifies that
-// when a long position is opened and later closed, the ClosedTrade
-// reports the cash balance at the time of OPENING (when the position
-// was deployed), not the cash balance at the time of closing.
+// a single round-trip's ClosedTrade reports the initial balance as
+// its EntryBalance (the running balance before any PnL is realised).
 func TestSimulate_ClosedTradeEntryBalance_LongRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -690,11 +690,68 @@ func TestSimulate_ClosedTradeEntryBalance_LongRoundTrip(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, closed, 1)
 	ct := closed[0]
-	// The long was opened against 10000 (initial balance) and closed
-	// later when the cash was 10000 (still — the BUY spent it down to
-	// 0, then the close added the proceeds back to 12000). The
-	// EntryBalance must be 10000, the balance at open, not 10000 (pre-
-	// close cash) — both happen to be the same in this case.
+	// Initial balance is 10000, no prior closed trades, so the
+	// running balance is 10000.
 	require.Equal(t, "10000", ct.EntryBalance.String(),
-		"long-closed EntryBalance should reflect balance at position open")
+		"single closed trade EntryBalance should be the initial balance")
+}
+
+// TestSimulate_ClosedTradeEntryBalance_CompoundsAcrossCloses verifies
+// that each ClosedTrade's EntryBalance equals the previous closed
+// trade's EntryBalance plus its PnL, i.e. the running compounding
+// equity, not the cash snapshot at the moment the position was opened.
+//
+// Trade sequence (initial balance 10000, percentage 1.0, leverage 1.0):
+//   - Trade 1: BUY  @ 100. Opens long 100 @ 100, cash 0.
+//   - Trade 2: SELL @ 120. Closes long, pnl = (120-100)*100 = +2000,
+//     then opens short from post-close cash 12000.
+//     Sizing: 12000 * 1.0 / 120 = 100, so short = -100.
+//   - Trade 3: BUY  @ 100. Closes short, pnl = (100-120)*100 = -2000,
+//     then opens long from post-close cash 20000.
+//     Sizing: 20000 * 1.0 / 100 = 200, so long = +200.
+//   - Trade 4: SELL @ 100. Closes long, pnl = (100-100)*200 = 0.
+//
+// Expected running balances:
+//   - closed[0].EntryBalance = 10000 (initial)
+//   - closed[1].EntryBalance = 10000 + 2000 = 12000
+//   - closed[2].EntryBalance = 12000 - 2000 = 10000
+func TestSimulate_ClosedTradeEntryBalance_CompoundsAcrossCloses(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+	trades := []Trade{
+		makeTrade("tx-1", asset.String(), "buy", "100", "1", t0),
+		makeTrade("tx-2", asset.String(), "sell", "120", "1", t1),
+		makeTrade("tx-3", asset.String(), "buy", "100", "1", t2),
+		makeTrade("tx-4", asset.String(), "sell", "100", "1", t3),
+	}
+
+	b := newBacktesterForSimulation(followed)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t3.Add(time.Hour))
+	require.NoError(t, err)
+
+	closed, ok := res.GetClosedTrades().([]ClosedTrade)
+	require.True(t, ok)
+	require.Len(t, closed, 3)
+
+	// First round-trip: long +2000 PnL, entry balance is the initial.
+	require.Equal(t, "10000", closed[0].EntryBalance.String())
+	require.Equal(t, "2000", closed[0].PnL.String())
+
+	// Second round-trip: short -2000 PnL, entry balance is the
+	// running balance (10000 + 2000), NOT the cash snapshot at the
+	// moment the short was opened (which would be 12000 minus the
+	// short's reserved buyback, or some other mid-flight value).
+	require.Equal(t, "12000", closed[1].EntryBalance.String(),
+		"second closed trade EntryBalance should be prior EntryBalance + prior PnL, not cash snapshot")
+	require.Equal(t, "-2000", closed[1].PnL.String())
+
+	// Third round-trip: long 0 PnL, entry balance compounds again.
+	require.Equal(t, "10000", closed[2].EntryBalance.String())
+	require.Equal(t, "0", closed[2].PnL.String())
 }
