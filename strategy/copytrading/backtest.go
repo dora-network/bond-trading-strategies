@@ -91,11 +91,6 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 	)
 
 	cash := b.startingBalance()
-	// Use initial balance (not current cash) for order sizing to prevent
-	// position sizes from compounding as closes return proceeds. The
-	// live strategy doesn't have this issue because it doesn't auto-open
-	// a new position after closing — each trade is an independent event.
-	initialBalance := b.startingBalance()
 	positions := make(map[string]*position)
 
 	for trade := range ch {
@@ -120,7 +115,9 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 
 		// Determine order size based on current position and signal.
 		// For closes: use full position size (like live strategy).
-		// For opens/extends: use calculateOrderSize based on initial balance.
+		// For opens/extends: use calculateOrderSize based on current cash.
+		// The current cash naturally limits position sizes because it
+		// reflects the capital already deployed in open positions.
 		pos := positions[trade.Asset]
 		var ourQty decimal.Decimal
 		isClose := false
@@ -136,9 +133,13 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 		}
 
 		if !isClose {
-			// Open or extend: compute order size based on initial balance
+			// Open or extend: compute order size based on current cash.
+			// After a close, cash increases by the proceeds, so the next
+			// position can be larger. After an extend, cash is already
+			// reduced by the current position's cost, so the extend is
+			// sized based on remaining capital.
 			ourQty = calculateOrderSize(
-				initialBalance,
+				cash,
 				b.strategy.cfg.PercentageOfAvailable,
 				b.strategy.cfg.Leverage,
 				b.strategy.cfg.MinOrderSize,
@@ -166,7 +167,6 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 		cash, tradeRecords, closedTrades = applyTrade(
 			trade, tradeID, ourSignal, ourQty, trade.Price, cash, positions,
 			tradeRecords, closedTrades,
-			initialBalance,
 			b.strategy.cfg.PercentageOfAvailable,
 			b.strategy.cfg.Leverage,
 			b.strategy.cfg.MinOrderSize,
@@ -248,7 +248,7 @@ func applyTrade(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	initialBalance, percentage, leverage decimal.Decimal,
+	percentage, leverage decimal.Decimal,
 	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	pos := positions[trade.Asset]
@@ -256,12 +256,12 @@ func applyTrade(
 	if ourSignal == types.SignalBuy {
 		return applyBuy(
 			trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades,
-			initialBalance, percentage, leverage, minOrderSize, maxOrderSize,
+			percentage, leverage, minOrderSize, maxOrderSize,
 		)
 	}
 	return applySell(
 		trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades,
-		initialBalance, percentage, leverage, minOrderSize, maxOrderSize,
+		percentage, leverage, minOrderSize, maxOrderSize,
 	)
 }
 
@@ -274,13 +274,13 @@ func applyBuy(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	initialBalance, percentage, leverage decimal.Decimal,
+	percentage, leverage decimal.Decimal,
 	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	if pos != nil && pos.qty.IsNeg() {
 		return buyClosesShort(
 			trade, tradeID, price, cash, pos, positions, tradeRecords, closedTrades,
-			initialBalance, percentage, leverage, minOrderSize, maxOrderSize,
+			percentage, leverage, minOrderSize, maxOrderSize,
 		)
 	}
 	return buyOpensOrAddsLong(trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades)
@@ -295,7 +295,7 @@ func buyClosesShort(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	initialBalance, percentage, leverage decimal.Decimal,
+	percentage, leverage decimal.Decimal,
 	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	absQty := pos.qty.Abs()
@@ -306,10 +306,10 @@ func buyClosesShort(
 	cash, pos.qty, closedTrades = closeShortPosition(trade, tradeID, pos, absQty, price, cash, closedTrades)
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, absQty, price, cash, pos.qty, tradeRecords)
 
-	// Compute new order size based on initial balance (not current cash)
-	// to prevent position sizes from compounding.
+	// Compute new order size based on cash AFTER the close (includes proceeds from closing).
+	// The cash now reflects the proceeds from buying back the short.
 	newOrderSize := calculateOrderSize(
-		initialBalance,
+		cash,
 		percentage,
 		leverage,
 		minOrderSize,
@@ -398,13 +398,13 @@ func applySell(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	initialBalance, percentage, leverage decimal.Decimal,
+	percentage, leverage decimal.Decimal,
 	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	if pos != nil && pos.qty.IsPos() {
 		return sellClosesLong(
 			trade, tradeID, price, cash, pos, positions, tradeRecords, closedTrades,
-			initialBalance, percentage, leverage, minOrderSize, maxOrderSize,
+			percentage, leverage, minOrderSize, maxOrderSize,
 		)
 	}
 	return sellOpensOrAddsShort(trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades)
@@ -419,7 +419,7 @@ func sellClosesLong(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	initialBalance, percentage, leverage decimal.Decimal,
+	percentage, leverage decimal.Decimal,
 	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	// Close the full long position, then open a new short — mirroring
@@ -429,10 +429,10 @@ func sellClosesLong(
 	cash, pos.qty, closedTrades = closeLongPosition(trade, tradeID, pos, origQty, price, cash, closedTrades)
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, origQty, price, cash, pos.qty, tradeRecords)
 
-	// Compute new order size based on initial balance (not current cash)
-	// to prevent position sizes from compounding.
+	// Compute new order size based on cash AFTER the close (includes proceeds from closing).
+	// The cash now reflects the proceeds from selling the long position.
 	newOrderSize := calculateOrderSize(
-		initialBalance,
+		cash,
 		percentage,
 		leverage,
 		minOrderSize,

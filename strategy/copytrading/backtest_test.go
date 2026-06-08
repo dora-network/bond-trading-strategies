@@ -113,7 +113,7 @@ func TestSimulate_BuyOpensLong(t *testing.T) {
 	require.Len(t, records, 1)
 	rec := records[0]
 	require.Equal(t, types.SignalBuy, rec.Signal)
-	// Backtest now computes order size based on available cash (like live strategy)
+	// Backtest computes order size based on current cash
 	// Initial balance: 10000, percentage: 1.0, leverage: 1.0, price: 100
 	// Order size = 10000, quantity = 10000 / 100 = 100
 	require.Equal(t, "100", rec.Quantity.String())
@@ -150,7 +150,9 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
 	ct := closed[0]
-	// Backtest now uses computed order size: 100 units
+	// Backtest computes order size based on current cash
+	// t0: buy at 100, order size = 10000, qty = 100, cost = 10000, cash = 0
+	// t1: sell at 120, close 100 long, proceeds = 12000, cash = 12000, PnL = 2000
 	require.Equal(t, "100", ct.Quantity.String())
 	require.Equal(t, "100", ct.EntryPrice.String())
 	require.Equal(t, "120", ct.ExitPrice.String())
@@ -164,7 +166,9 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 3)
-	require.Equal(t, "-83.33333333333333333", records[2].OpenPosition.String())
+	// After closing 100 long at 120, cash = 12000
+	// Then open short: order size = 12000, qty = 12000/120 = 100
+	require.Equal(t, "-100", records[2].OpenPosition.String())
 }
 
 func TestSimulate_ReverseLongToShort_CloseRecordHasOriginalQuantity(t *testing.T) {
@@ -217,7 +221,9 @@ func TestSimulate_BuyThenPartialSell(t *testing.T) {
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
-	// Backtest now uses computed order size: 100 units
+	// Backtest computes order size based on current cash
+	// t0: buy at 100, order size = 10000, qty = 100, cost = 10000, cash = 0
+	// t1: sell at 150, close 100 long, proceeds = 15000, cash = 15000, PnL = 5000
 	require.Equal(t, "100", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "150", closed[0].ExitPrice.String())
@@ -227,9 +233,9 @@ func TestSimulate_BuyThenPartialSell(t *testing.T) {
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 3)
-	// After closing 100 long, new short is based on initialBalance
-	// Order size = 5000, new short = 5000 / 150 = 33.33... units
-	require.Equal(t, "-66.66666666666666667", records[2].OpenPosition.String())
+	// After closing 100 long at 150, cash = 15000
+	// Then open short: order size = 15000, qty = 15000/150 = 100
+	require.Equal(t, "-100", records[2].OpenPosition.String())
 }
 
 func TestSimulate_MultipleBuysWeightedAvg(t *testing.T) {
@@ -280,7 +286,9 @@ func TestSimulate_BuyClosesShort(t *testing.T) {
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
-	// Backtest now uses computed order size: 100 units
+	// Backtest computes order size based on current cash
+	// t0: sell at 100, order size = 10000, qty = 100, cash = 20000 (short proceeds)
+	// t1: buy at 80, close 100 short, buyback = 8000, cash = 12000, PnL = 2000
 	require.Equal(t, "100", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "80", closed[0].ExitPrice.String())
@@ -290,9 +298,9 @@ func TestSimulate_BuyClosesShort(t *testing.T) {
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 3)
-	// After closing 100 short, new long is based on initialBalance
-	// Order size = 5000, new long = 5000 / 80 = 62.5 units
-	require.Equal(t, "125", records[2].OpenPosition.String())
+	// After closing 100 short at 80, cash = 12000
+	// Then open long: order size = 12000, qty = 12000/80 = 150
+	require.Equal(t, "150", records[2].OpenPosition.String())
 }
 
 func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
@@ -314,7 +322,9 @@ func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok, "ClosedTrades must be []copytrading.ClosedTrade")
 	require.Len(t, closed, 1)
-	// Backtest now uses computed order size: 100 units
+	// Backtest computes order size based on current cash
+	// t0: sell at 100, order size = 10000, qty = 100, cash = 20000
+	// t1: buy at 90, close 100 short, buyback = 9000, cash = 11000, PnL = 1000
 	require.Equal(t, "100", closed[0].Quantity.String())
 	require.Equal(t, "100", closed[0].EntryPrice.String())
 	require.Equal(t, "90", closed[0].ExitPrice.String())
@@ -325,10 +335,9 @@ func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
 	require.Len(t, records, 3)
 	last := records[len(records)-1]
-	// After closing short, new long is based on initialBalance (not current cash)
-	// initialBalance = 10000, percentage = 0.5, leverage = 1.0
-	// Order size = 5000, new long = 5000 / 90 = 55.55...
-	require.Equal(t, "111.1111111111111111", last.OpenPosition.String())
+	// After closing 100 short at 90, cash = 11000
+	// Then open long: order size = 11000, qty = 11000/90 = 122.22
+	require.Equal(t, "122.2222222222222222", last.OpenPosition.String())
 }
 
 func TestSimulate_SellOpensShort(t *testing.T) {
@@ -350,7 +359,8 @@ func TestSimulate_SellOpensShort(t *testing.T) {
 	require.Len(t, records, 1)
 	rec := records[0]
 	require.Equal(t, types.SignalSell, rec.Signal)
-	// Backtest now uses computed order size: 100 units
+	// Backtest computes order size based on current cash
+	// sell at 100, order size = 10000, qty = 10000/100 = 100
 	require.Equal(t, "100", rec.Quantity.String())
 	// Short sale: receive 10000 proceeds
 	require.Equal(t, "20000", rec.Cash.String())
@@ -379,19 +389,18 @@ func TestSimulate_WinLossCount(t *testing.T) {
 	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t3)
 	require.NoError(t, err)
 
-	// Backtest now uses computed order size based on initialBalance
-	// initialBalance = 10000, percentage = 0.5, leverage = 1.0
-	// Order size = 5000, at price 100: quantity = 50 units
-	// t0: buy 50@100, cost=5000, cash=5000
-	// t1: sell 50@150, proceeds=7500, PnL=(150-100)*50=2500, cash=12500
-	//        open short 50@150, proceeds=7500, cash=20000
-	// t2: buy 50@100, buyback=5000, PnL=(150-100)*50=2500, cash=15000
-	//        open long 50@100, cost=5000, cash=10000
-	// t3: sell 50@80, proceeds=4000, PnL=(80-100)*50=-1000, cash=14000
-	// Total PnL = 2500 + 2500 - 1000 = 4000
+	// Backtest computes order size based on current cash
+	// initialBalance = 10000, percentage = 1.0, leverage = 1.0
+	// t0: buy at 100, order size = 10000, qty = 100, cost = 10000, cash = 0
+	// t1: sell at 150, close 100 long, proceeds = 15000, cash = 15000, PnL = 5000
+	//        open short: order size = 15000, qty = 100, cash = 30000
+	// t2: buy at 100, close 100 short, buyback = 10000, cash = 20000, PnL = 5000
+	//        open long: order size = 20000, qty = 200, cost = 20000, cash = 0
+	// t3: sell at 80, close 200 long, proceeds = 16000, cash = 16000, PnL = -4000
+	// Total PnL = 5000 + 5000 - 4000 = 6000
 	require.Equal(t, 2, res.GetWinCount())
 	require.Equal(t, 1, res.GetLossCount())
-	require.Equal(t, "6333.333333333333334", res.GetTotalPnL().String())
+	require.Equal(t, "6000", res.GetTotalPnL().String())
 }
 
 func TestSimulate_MaxDrawdownNonNegative(t *testing.T) {
