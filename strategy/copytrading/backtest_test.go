@@ -167,10 +167,12 @@ func TestSimulate_BuyThenFullSellClosesLong(t *testing.T) {
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 3)
-	// After closing 100 long at 120, cash = 12000
-	// Then open short: order size = 12000, qty = 12000/120 = 100
-	require.Equal(t, "-100", records[2].OpenPosition.String())
+	require.Len(t, records, 2)
+	// t0: BUY opens long 100 @ 100 (qty=100, pos=+100)
+	// t1: SELL closes the long. The reversal does NOT auto-open a new
+	// short — the next source trade in the new direction would do that.
+	require.Equal(t, "100", records[0].OpenPosition.String())
+	require.Equal(t, "0", records[1].OpenPosition.String())
 }
 
 func TestSimulate_ReverseLongToShort_CloseRecordHasOriginalQuantity(t *testing.T) {
@@ -191,13 +193,14 @@ func TestSimulate_ReverseLongToShort_CloseRecordHasOriginalQuantity(t *testing.T
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 3)
+	require.Len(t, records, 2)
 
 	// The close record (index 1) must show the original long
-	// quantity and a zero open position — not zero quantity.
+	// quantity and a zero open position — not zero quantity. We do
+	// NOT auto-open a new short on reversal; the close record is the
+	// only record emitted for the t1 source trade.
 	closeRec := records[1]
 	require.Equal(t, types.SignalSell, closeRec.Signal)
-	// Backtest now uses computed order size: 100 units
 	require.Equal(t, "100", closeRec.Quantity.String(),
 		"close record must show original long quantity, not zero")
 	require.Equal(t, "0", closeRec.OpenPosition.String(),
@@ -234,10 +237,11 @@ func TestSimulate_BuyThenPartialSell(t *testing.T) {
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 3)
-	// After closing 100 long at 150, cash = 15000
-	// Then open short: order size = 15000, qty = 15000/150 = 100
-	require.Equal(t, "-100", records[2].OpenPosition.String())
+	require.Len(t, records, 2)
+	// t0: BUY opens long 100 @ 100
+	// t1: SELL closes the long. No auto-open on reversal.
+	require.Equal(t, "100", records[0].OpenPosition.String())
+	require.Equal(t, "0", records[1].OpenPosition.String())
 }
 
 func TestSimulate_MultipleBuysWeightedAvg(t *testing.T) {
@@ -301,10 +305,11 @@ func TestSimulate_BuyClosesShort(t *testing.T) {
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 3)
-	// After closing 100 short at 80, cash = 12000
-	// Then open long: order size = 12000, qty = 12000/80 = 150
-	require.Equal(t, "150", records[2].OpenPosition.String())
+	require.Len(t, records, 2)
+	// t0: SELL opens short 100 @ 100
+	// t1: BUY closes the short. No auto-open on reversal.
+	require.Equal(t, "-100", records[0].OpenPosition.String())
+	require.Equal(t, "0", records[1].OpenPosition.String())
 }
 
 func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
@@ -337,11 +342,11 @@ func TestSimulate_BuyClosesShortAndFlipsLong(t *testing.T) {
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 3)
-	last := records[len(records)-1]
-	// After closing 100 short at 90, cash = 11000
-	// Then open long: order size = 11000, qty = 11000/90 = 122.22
-	require.Equal(t, "122.2222222222222222", last.OpenPosition.String())
+	require.Len(t, records, 2)
+	// t0: SELL opens short 100 @ 100
+	// t1: BUY closes the short. No auto-open on reversal.
+	require.Equal(t, "-100", records[0].OpenPosition.String())
+	require.Equal(t, "0", records[1].OpenPosition.String())
 }
 
 func TestSimulate_SellOpensShort(t *testing.T) {
@@ -395,21 +400,23 @@ func TestSimulate_WinLossCount(t *testing.T) {
 	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t3)
 	require.NoError(t, err)
 
-	// Backtest computes order size based on current cash
+	// Backtest computes order size based on current cash. With the
+	// no-auto-open-on-reversal model, each source trade is mirrored
+	// as at most one copy trade.
 	// initialBalance = 10000, percentage = 1.0, leverage = 1.0
-	// t0: buy at 100, order size = 10000, qty = 100, cost = 10000, cash = 0
-	// t1: sell at 150, close 100 long, proceeds = 15000, cash = 15000,
-	//        PnL = (150-100)*100 = 5000 (win)
-	//        open short: order size = 15000, qty = 100, cash = 30000
-	// t2: buy at 100, close 100 short, buyback = 10000, cash = 20000,
-	//        PnL = (100-150)*100 = -5000 (loss)
-	//        open long: order size = 20000, qty = 200, cost = 20000, cash = 0
-	// t3: sell at 80, close 200 long, proceeds = 16000, cash = 16000,
-	//        PnL = (80-100)*200 = -4000 (loss)
-	// Total PnL = 5000 - 5000 - 4000 = -4000
+	// t0: buy at 100, headroom = 10000*1 - 0 = 10000, qty = 100, cost = 10000, cash = 0
+	// t1: sell at 150, close 100 long, proceeds = 15000,
+	//        PnL = (150-100)*100 = 5000 (win). No auto-open. cash = 15000.
+	//        runningBalance advances: 10000 + 5000 = 15000.
+	// t2: buy at 100, flat. headroom = 15000*1 - 0 = 15000, qty = 150,
+	//        cost = 15000, cash = 0.
+	// t3: sell at 80, close 150 long, proceeds = 12000,
+	//        PnL = (80-100)*150 = -3000 (loss). cash = 12000.
+	//        runningBalance: 15000 - 3000 = 12000.
+	// Total PnL = 5000 - 3000 = 2000
 	require.Equal(t, 1, res.GetWinCount())
-	require.Equal(t, 2, res.GetLossCount())
-	require.Equal(t, "-4000", res.GetTotalPnL().String())
+	require.Equal(t, 1, res.GetLossCount())
+	require.Equal(t, "2000", res.GetTotalPnL().String())
 }
 
 func TestSimulate_MaxDrawdownNonNegative(t *testing.T) {
@@ -457,11 +464,11 @@ func TestSimulate_MultiPageStream(t *testing.T) {
 	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 
 	// 300 trades = 3 pages of 100. Even-indexed trades are BUYs,
-	// odd-indexed are SELLs. With full-close-on-reversal behaviour
-	// each trade after the first produces two records (close + open),
-	// so we expect 1 + 299*2 = 599 records. The simulation must
-	// process all 300 trades across the page boundary without
-	// dropping or reordering.
+	// odd-indexed are SELLs. Without auto-open-on-reversal each source
+	// trade produces exactly one record (an open, extend, or close —
+	// never both). We expect 300 records. The simulation must process
+	// all 300 trades across the page boundary without dropping or
+	// reordering.
 	var trades []Trade
 	for i := 0; i < 300; i++ {
 		side := "buy"
@@ -484,7 +491,7 @@ func TestSimulate_MultiPageStream(t *testing.T) {
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok, "TradeRecords must be []copytrading.TradeRecord")
-	require.Len(t, records, 599, "every trade across all 3 pages must be processed")
+	require.Len(t, records, 300, "every trade across all 3 pages must be processed as one record each")
 
 	// First and last trade IDs must match the input order.
 	require.Equal(t, trades[0].TransactionID, records[0].TradeID.String())
@@ -625,7 +632,7 @@ func TestSimulate_TradeRecordCashIsPreTrade(t *testing.T) {
 
 	records, ok := res.GetTradeRecords().([]TradeRecord)
 	require.True(t, ok)
-	require.Len(t, records, 3)
+	require.Len(t, records, 2)
 
 	// First record: SELL that opens a short. Order size = 100% of
 	// pre-trade cash (1000), qty = 10, proceeds = 1000, post-trade
@@ -636,24 +643,15 @@ func TestSimulate_TradeRecordCashIsPreTrade(t *testing.T) {
 	require.Equal(t, "1000", records[0].Cash.String(),
 		"first SELL record should report pre-trade cash (initial balance), not post-trade cash")
 
-	// Second record: BUY that closes the short (mirrors the live
-	// strategy which always closes the full position on reversal).
-	// Pre-close cash = 2000 (post-open), buyback cost = 10*100 = 1000,
-	// post-close cash = 1000. The record must report 2000 (pre-close,
-	// the balance at the time the close order was sized), not 1000.
+	// Second record: BUY that closes the short. Pre-close cash = 2000
+	// (post-open), buyback cost = 10*100 = 1000, post-close cash = 1000.
+	// The record must report 2000 (pre-close, the balance at the time
+	// the close order was sized), not 1000. There is no third record:
+	// reversal does not auto-open a new long.
 	require.Equal(t, types.SignalBuy, records[1].Signal)
 	require.Equal(t, "10", records[1].Quantity.String())
 	require.Equal(t, "2000", records[1].Cash.String(),
 		"close-short record should report pre-close cash, not post-close cash")
-
-	// Third record: BUY that opens a new long from the freed cash.
-	// Pre-open cash = 1000, order size = 1000, qty = 10, post-open
-	// cash = 0. The record must report 1000 (pre-open), not 0.
-	require.Equal(t, types.SignalBuy, records[2].Signal)
-	require.Equal(t, "1000", records[2].OrderSize.String())
-	require.Equal(t, "10", records[2].Quantity.String())
-	require.Equal(t, "1000", records[2].Cash.String(),
-		"open-long record should report pre-open cash, not post-open cash")
 
 	// The first closed trade is the BUY that closed the short opened
 	// by records[0]. With the running-balance model, the first closed
@@ -737,23 +735,20 @@ func TestSimulate_ClosedTradeEntryBalance_CompoundsAcrossCloses(t *testing.T) {
 
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok)
-	require.Len(t, closed, 3)
+	require.Len(t, closed, 2)
 
-	// First round-trip: long +2000 PnL, entry balance is the initial.
+	// First round-trip: BUY @ 100 opens long, SELL @ 120 closes it
+	// for +2000 PnL. entry_balance is the initial 10000.
 	require.Equal(t, "10000", closed[0].EntryBalance.String())
 	require.Equal(t, "2000", closed[0].PnL.String())
 
-	// Second round-trip: short -2000 PnL, entry balance is the
-	// running balance (10000 + 2000), NOT the cash snapshot at the
-	// moment the short was opened (which would be 12000 minus the
-	// short's reserved buyback, or some other mid-flight value).
+	// Second round-trip: BUY @ 100 opens a new long, SELL @ 100
+	// closes it for 0 PnL. entry_balance = prior EntryBalance + PnL
+	// = 10000 + 2000 = 12000. (The reversal on t1 does NOT auto-open
+	// a short; trade 3 opens the new long from flat.)
 	require.Equal(t, "12000", closed[1].EntryBalance.String(),
 		"second closed trade EntryBalance should be prior EntryBalance + prior PnL, not cash snapshot")
-	require.Equal(t, "-2000", closed[1].PnL.String())
-
-	// Third round-trip: long 0 PnL, entry balance compounds again.
-	require.Equal(t, "10000", closed[2].EntryBalance.String())
-	require.Equal(t, "0", closed[2].PnL.String())
+	require.Equal(t, "0", closed[1].PnL.String())
 }
 
 // TestSimulate_ExtendsAreCappedByRunningBalanceNotional verifies that
@@ -792,4 +787,46 @@ func TestSimulate_ExtendsAreCappedByRunningBalanceNotional(t *testing.T) {
 	closed, ok := res.GetClosedTrades().([]ClosedTrade)
 	require.True(t, ok)
 	require.Empty(t, closed, "no round-trip should have completed")
+}
+
+// TestSimulate_ReversalDoesNotAutoOpen verifies that when a source
+// trade reverses our position direction (e.g. SELL while we are
+// long), the reversal closes the full position but does NOT open a
+// new one in the opposite direction. The next source trade in the
+// new direction triggers the open at the configured size, sized
+// from the actual available notional at that point — not from the
+// proceeds of the just-closed position.
+func TestSimulate_ReversalDoesNotAutoOpen(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC)
+	trades := []Trade{
+		makeTrade("tx-open", asset.String(), "buy", "100", "1", t0),
+		makeTrade("tx-reverse", asset.String(), "sell", "120", "1", t1),
+	}
+
+	b := newBacktesterForSimulation(followed)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t1)
+	require.NoError(t, err)
+
+	// Two source trades produce exactly two trade records (one
+	// open, one close) — no auto-open on reversal.
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok)
+	require.Len(t, records, 2, "reversal must NOT auto-open a new position")
+
+	require.Equal(t, types.SignalBuy, records[0].Signal)
+	require.Equal(t, "100", records[0].OpenPosition.String())
+	require.Equal(t, types.SignalSell, records[1].Signal)
+	require.Equal(t, "0", records[1].OpenPosition.String(),
+		"close record should leave position at zero; no auto-open should fill it")
+
+	// One closed trade from the round-trip.
+	closed, ok := res.GetClosedTrades().([]ClosedTrade)
+	require.True(t, ok)
+	require.Len(t, closed, 1)
+	require.Equal(t, "2000", closed[0].PnL.String())
 }

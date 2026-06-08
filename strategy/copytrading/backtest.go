@@ -227,10 +227,6 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 		cash, tradeRecords, closedTrades = applyTrade(
 			trade, tradeID, ourSignal, ourQty, trade.Price, cash, positions,
 			tradeRecords, closedTrades,
-			b.strategy.cfg.PercentageOfAvailable,
-			b.strategy.cfg.Leverage,
-			b.strategy.cfg.MinOrderSize,
-			b.strategy.cfg.MaxOrderSize,
 		)
 
 		// Replace each newly added closed trade's EntryBalance with the
@@ -316,21 +312,15 @@ func applyTrade(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	percentage, leverage decimal.Decimal,
-	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	pos := positions[trade.Asset]
 
 	if ourSignal == types.SignalBuy {
 		return applyBuy(
 			trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades,
-			percentage, leverage, minOrderSize, maxOrderSize,
 		)
 	}
-	return applySell(
-		trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades,
-		percentage, leverage, minOrderSize, maxOrderSize,
-	)
+	return applySell(trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades)
 }
 
 func applyBuy(
@@ -342,13 +332,10 @@ func applyBuy(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	percentage, leverage decimal.Decimal,
-	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	if pos != nil && pos.qty.IsNeg() {
 		return buyClosesShort(
 			trade, tradeID, price, cash, pos, positions, tradeRecords, closedTrades,
-			percentage, leverage, minOrderSize, maxOrderSize,
 		)
 	}
 	return buyOpensOrAddsLong(trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades)
@@ -363,8 +350,6 @@ func buyClosesShort(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	percentage, leverage decimal.Decimal,
-	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	absQty := pos.qty.Abs()
 
@@ -374,60 +359,16 @@ func buyClosesShort(
 	// not after the cash flow has settled.
 	preCloseCash := cash
 
-	// Close the full short position, then open a new long — mirroring
-	// the live strategy which always closes the entire position on a
-	// direction reversal.
+	// Close the full short position. We do NOT auto-open a new long
+	// here: each source trade is mirrored as at most one copy trade,
+	// and the proceeds from this close belong to the realised equity,
+	// not the deployable budget for a new open. If the source trader's
+	// next signal is a BUY (in the new direction), the following
+	// source trade triggers the open at the configured size, sized
+	// from the actual available notional at that point.
 	cash, pos.qty, closedTrades = closeShortPosition(trade, tradeID, pos, absQty, price, cash, closedTrades)
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, absQty, price, preCloseCash, pos.qty, tradeRecords)
-
-	// Compute new order size based on cash AFTER the close (includes proceeds from closing).
-	// The cash now reflects the proceeds from buying back the short.
-	newOrderSize := calculateOrderSize(
-		cash,
-		percentage,
-		leverage,
-		minOrderSize,
-		maxOrderSize,
-	)
-	newQty := decimal.Zero
-	if !price.IsZero() {
-		newQty, _ = newOrderSize.Quo(price)
-	}
-
-	if newQty.IsZero() || newQty.IsNeg() {
-		// No cash to open new position
-		delete(positions, trade.Asset)
-		return cash, tradeRecords, closedTrades
-	}
-
-	// Check if we have enough cash for the new position
-	cost, _ := newQty.Mul(price)
-	if cost.Cmp(cash) > 0 {
-		// Not enough cash, reduce quantity to what we can afford
-		if price.IsPos() {
-			newQty, _ = cash.Quo(price)
-			cost, _ = newQty.Mul(price)
-		}
-	}
-
-	if newQty.IsZero() || newQty.IsNeg() {
-		delete(positions, trade.Asset)
-		return cash, tradeRecords, closedTrades
-	}
-
-	// Open new long position: pay cash to buy bonds. Capture the
-	// pre-open cash so the trade record reflects the balance at the
-	// time the new order was sized, not after the cost is deducted.
-	preOpenCash := cash
-	cash, _ = cash.Sub(cost)
-	pos = &position{
-		qty:         newQty,
-		avgEntry:    price,
-		openTime:    trade.CreatedAt,
-		openTradeID: tradeID,
-	}
-	positions[trade.Asset] = pos
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, newQty, price, preOpenCash, pos.qty, tradeRecords)
+	delete(positions, trade.Asset)
 	return cash, tradeRecords, closedTrades
 }
 
@@ -478,13 +419,10 @@ func applySell(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	percentage, leverage decimal.Decimal,
-	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	if pos != nil && pos.qty.IsPos() {
 		return sellClosesLong(
 			trade, tradeID, price, cash, pos, positions, tradeRecords, closedTrades,
-			percentage, leverage, minOrderSize, maxOrderSize,
 		)
 	}
 	return sellOpensOrAddsShort(trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades)
@@ -499,54 +437,19 @@ func sellClosesLong(
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
-	percentage, leverage decimal.Decimal,
-	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
-	// Close the full long position, then open a new short — mirroring
-	// the live strategy which always closes the entire position on a
-	// direction reversal. Pre-close cash is captured so the close
-	// record reflects the balance at the time the close order was
-	// sized, not after the proceeds are added.
+	// Close the full long position. We do NOT auto-open a new short
+	// here: each source trade is mirrored as at most one copy trade,
+	// and the proceeds from this close belong to the realised equity,
+	// not the deployable budget for a new open. If the source trader's
+	// next signal is a SELL (in the new direction), the following
+	// source trade triggers the open at the configured size, sized
+	// from the actual available notional at that point.
 	preCloseCash := cash
 	origQty := pos.qty
 	cash, pos.qty, closedTrades = closeLongPosition(trade, tradeID, pos, origQty, price, cash, closedTrades)
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, origQty, price, preCloseCash, pos.qty, tradeRecords)
-
-	// Compute new order size based on cash AFTER the close (includes proceeds from closing).
-	// The cash now reflects the proceeds from selling the long position.
-	newOrderSize := calculateOrderSize(
-		cash,
-		percentage,
-		leverage,
-		minOrderSize,
-		maxOrderSize,
-	)
-	newQty := decimal.Zero
-	if !price.IsZero() {
-		newQty, _ = newOrderSize.Quo(price)
-	}
-
-	if newQty.IsZero() || newQty.IsNeg() {
-		// No cash to open new position
-		delete(positions, trade.Asset)
-		return cash, tradeRecords, closedTrades
-	}
-
-	// Open new short position: receive cash from selling borrowed bonds.
-	// Capture pre-open cash so the open-short record reflects the
-	// balance at the time the new order was sized, not after the
-	// proceeds are added.
-	preOpenCash := cash
-	proceeds, _ := newQty.Mul(price)
-	cash, _ = cash.Add(proceeds)
-	pos = &position{
-		qty:         newQty.Neg(),
-		avgEntry:    price,
-		openTime:    trade.CreatedAt,
-		openTradeID: tradeID,
-	}
-	positions[trade.Asset] = pos
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, newQty, price, preOpenCash, pos.qty, tradeRecords)
+	delete(positions, trade.Asset)
 	return cash, tradeRecords, closedTrades
 }
 
