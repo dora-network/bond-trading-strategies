@@ -328,8 +328,9 @@ func sellClosesLong(
 	// Close the full long position, then open a new short — mirroring
 	// the live strategy which always closes the entire position on a
 	// direction reversal.
-	cash, pos.qty, closedTrades = closeLongPosition(trade, tradeID, pos, pos.qty, price, cash, closedTrades)
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, pos.qty, price, cash, pos.qty, tradeRecords)
+	origQty := pos.qty
+	cash, pos.qty, closedTrades = closeLongPosition(trade, tradeID, pos, origQty, price, cash, closedTrades)
+	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, origQty, price, cash, pos.qty, tradeRecords)
 
 	cash, _ = cash.Sub(margin)
 	pos = &position{
