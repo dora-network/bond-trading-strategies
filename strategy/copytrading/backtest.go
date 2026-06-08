@@ -43,31 +43,45 @@ func (b *Backtester) startingBalance() decimal.Decimal {
 	return decimal.MustNew(initialBacktestBalance, 0)
 }
 
-// freeCash returns the cash available for new positions, excluding the
-// amount reserved to cover existing short positions. Without this
-// reservation, short sale proceeds inflate the available balance and
-// allow ever-larger short positions (exponential growth). The reserved
-// amount for each open short is the buyback cost at the current price
-// (abs(qty) * currentPrice). The reserved cash is released when the
-// short is closed (the close deducts buyback cost and removes the
-// position from the map).
-func (b *Backtester) freeCash(cash decimal.Decimal, positions map[string]*position, currentPrice decimal.Decimal) decimal.Decimal {
-	reserved := decimal.Zero
+// availableForNewPos returns the notional that can still be deployed
+// into new or extended positions, given the realised equity
+// (runningBalance), the leverage, and the notional already committed
+// to open positions. The result is in the same units as the asset
+// price (i.e., USD for a bond priced in USD), so it can be divided by
+// trade.Price to obtain a quantity.
+//
+// The model is:
+//
+//	availableForNewPos = runningBalance × Leverage − totalDeployedNotional
+//
+// where totalDeployedNotional = Σ |pos.qty| × pos.avgEntry across
+// all open positions (longs pay this in cash; shorts are reserved
+// against it to cover the buyback). Without this cap, short sale
+// proceeds inflate the available balance and the position grows past
+// what the realised equity can fund — extends compound on top of
+// each other instead of being bounded by the deployed capital.
+func (b *Backtester) availableForNewPos(
+	runningBalance decimal.Decimal,
+	positions map[string]*position,
+	leverage decimal.Decimal,
+) decimal.Decimal {
+	maxNotional, _ := runningBalance.Mul(leverage)
+	deployed := decimal.Zero
 	for _, p := range positions {
 		if p == nil {
 			continue
 		}
-		if p.qty.IsNeg() {
-			// Reserve the buyback cost for this short position
-			buyback, _ := p.qty.Abs().Mul(currentPrice)
-			reserved, _ = reserved.Add(buyback)
-		}
+		// Use pos.avgEntry (not the current price) so the cap is
+		// stable across the lifetime of a position — extending at
+		// a worse price still consumes the same notional budget.
+		notional, _ := p.qty.Abs().Mul(p.avgEntry)
+		deployed, _ = deployed.Add(notional)
 	}
-	free, _ := cash.Sub(reserved)
-	if free.IsNeg() {
+	avail, _ := maxNotional.Sub(deployed)
+	if avail.IsNeg() {
 		return decimal.Zero
 	}
-	return free
+	return avail
 }
 
 func (b *Backtester) Run(ctx context.Context, start, end time.Time) (BacktestResult, error) {
@@ -170,29 +184,35 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 		}
 
 		if !isClose {
-			// Open or extend: compute order size based on FREE cash.
-			// Free cash = total cash minus the amount reserved to cover
-			// existing short positions. Without this subtraction, short
-			// sale proceeds get added to the available balance and allow
-			// us to take on ever-larger short positions (exponential
-			// growth). By reserving the proceeds, the available balance
-			// for new shorts only grows by actual PnL from closes.
-			availableBalance := b.freeCash(cash, positions, trade.Price)
+			// Open or extend: size the new notional against the
+			// remaining headroom under the runningBalance × leverage
+			// ceiling. Without this cap, the position accumulates
+			// extends indefinitely because each short's proceeds are
+			// implicitly recycled into the next open — the live DORA
+			// margin model instead ties deployable capital to the
+			// realised equity, not the cash in hand.
+			headroom := b.availableForNewPos(runningBalance, positions, b.strategy.cfg.Leverage)
+			if headroom.IsZero() {
+				continue
+			}
 			ourQty = calculateOrderSize(
-				availableBalance,
+				headroom,
 				b.strategy.cfg.PercentageOfAvailable,
 				b.strategy.cfg.Leverage,
 				b.strategy.cfg.MinOrderSize,
 				b.strategy.cfg.MaxOrderSize,
 			)
-			// Convert cash-based order size to quantity
+			// Convert notional-based order size to quantity
 			if !trade.Price.IsZero() {
 				ourQty, _ = ourQty.Quo(trade.Price)
 			}
-			// Check if we have enough free cash to cover the order
+			// Cap the order at the remaining headroom (the percentage
+			// of headroom × leverage is bounded by headroom itself for
+			// leverage ≤ 1, but with higher leverage a single extend
+			// can exceed it).
 			orderCost, _ := ourQty.Mul(trade.Price)
-			if orderCost.Cmp(availableBalance) > 0 {
-				// Not enough cash, skip this trade
+			if orderCost.Cmp(headroom) > 0 {
+				// Not enough headroom; skip this trade
 				continue
 			}
 		}

@@ -755,3 +755,41 @@ func TestSimulate_ClosedTradeEntryBalance_CompoundsAcrossCloses(t *testing.T) {
 	require.Equal(t, "10000", closed[2].EntryBalance.String())
 	require.Equal(t, "0", closed[2].PnL.String())
 }
+
+// TestSimulate_ExtendsAreCappedByRunningBalanceNotional verifies that
+// when the source trader fires a sequence of signals in the same
+// direction, extends are bounded by the realised equity ceiling
+// (runningBalance * leverage) minus the notional already deployed.
+// Extends past that cap are skipped, not silently over-sized.
+func TestSimulate_ExtendsAreCappedByRunningBalanceNotional(t *testing.T) {
+	t.Parallel()
+
+	followed := uuid.New()
+	asset := uuid.New()
+	t0 := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	trades := []Trade{
+		// Open long at 100. Order size = runningBalance (10000) *
+		// 1.0 (percentage) * 1 (leverage) = 10000. Deployed notional
+		// after this = 10000, leaving 0 headroom.
+		makeTrade("tx-1", asset.String(), "buy", "100", "1", t0),
+		// Attempt to extend long. With 0 headroom, this is skipped
+		// (no more notional available), and a close record should not
+		// be created.
+		makeTrade("tx-2", asset.String(), "buy", "100", "1", t0.Add(time.Minute)),
+	}
+
+	b := newBacktesterForSimulation(followed)
+	res, err := b.simulate(t.Context(), feedChannel(t, trades), t0, t0.Add(time.Hour))
+	require.NoError(t, err)
+
+	records, ok := res.GetTradeRecords().([]TradeRecord)
+	require.True(t, ok)
+	require.Len(t, records, 1, "second extend should be skipped (no headroom)")
+	require.Equal(t, types.SignalBuy, records[0].Signal)
+	require.Equal(t, "10000", records[0].OrderSize.String())
+	require.Equal(t, "100", records[0].Quantity.String())
+
+	closed, ok := res.GetClosedTrades().([]ClosedTrade)
+	require.True(t, ok)
+	require.Empty(t, closed, "no round-trip should have completed")
+}
