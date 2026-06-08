@@ -54,6 +54,9 @@ func (b *Backtester) startingBalance() decimal.Decimal {
 func (b *Backtester) freeCash(cash decimal.Decimal, positions map[string]*position, currentPrice decimal.Decimal) decimal.Decimal {
 	reserved := decimal.Zero
 	for _, p := range positions {
+		if p == nil {
+			continue
+		}
 		if p.qty.IsNeg() {
 			// Reserve the buyback cost for this short position
 			buyback, _ := p.qty.Abs().Mul(currentPrice)
@@ -349,7 +352,7 @@ func buyClosesShort(
 
 	if newQty.IsZero() || newQty.IsNeg() {
 		// No cash to open new position
-		positions[trade.Asset] = nil
+		delete(positions, trade.Asset)
 		return cash, tradeRecords, closedTrades
 	}
 
@@ -364,7 +367,7 @@ func buyClosesShort(
 	}
 
 	if newQty.IsZero() || newQty.IsNeg() {
-		positions[trade.Asset] = nil
+		delete(positions, trade.Asset)
 		return cash, tradeRecords, closedTrades
 	}
 
@@ -472,7 +475,7 @@ func sellClosesLong(
 
 	if newQty.IsZero() || newQty.IsNeg() {
 		// No cash to open new position
-		positions[trade.Asset] = nil
+		delete(positions, trade.Asset)
 		return cash, tradeRecords, closedTrades
 	}
 
