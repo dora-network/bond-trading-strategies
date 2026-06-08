@@ -616,3 +616,60 @@ func (f *fakeMarketAPI) createMarketOrderCount() int {
 func boolPtr(b bool) *bool {
 	return &b
 }
+
+func TestProperty_PositionLogic(t *testing.T) {
+	t.Parallel()
+
+	// Test invariants for position direction logic
+	t.Run("positionForAsset_invariants", func(t *testing.T) {
+		// If available > borrowed, position is long
+		require.Equal(t, positionLong, positionForAsset(decimal.MustParse("100"), decimal.MustParse("50")))
+		// If available < borrowed, position is short
+		require.Equal(t, positionShort, positionForAsset(decimal.MustParse("50"), decimal.MustParse("100")))
+		// If available == borrowed, position is flat
+		require.Equal(t, positionFlat, positionForAsset(decimal.MustParse("100"), decimal.MustParse("100")))
+		// If both zero, position is flat
+		require.Equal(t, positionFlat, positionForAsset(decimal.Zero, decimal.Zero))
+	})
+
+	t.Run("isClose_invariants", func(t *testing.T) {
+		// Long + sell = close
+		require.True(t, isClose(doraclient.SIDE_SELL, positionLong))
+		// Short + buy = close
+		require.True(t, isClose(doraclient.SIDE_BUY, positionShort))
+		// Long + buy = not close (extend)
+		require.False(t, isClose(doraclient.SIDE_BUY, positionLong))
+		// Short + sell = not close (extend)
+		require.False(t, isClose(doraclient.SIDE_SELL, positionShort))
+		// Flat + any = not close
+		require.False(t, isClose(doraclient.SIDE_BUY, positionFlat))
+		require.False(t, isClose(doraclient.SIDE_SELL, positionFlat))
+	})
+
+	t.Run("fromGlobalPosition_close_invariants", func(t *testing.T) {
+		// For closes, fromGlobal always matches positionOnGlobal
+		// Long + sell (close)
+		require.True(t, fromGlobalPosition(doraclient.SIDE_SELL, positionLong, decimal.MustParse("1.0"), true))
+		require.False(t, fromGlobalPosition(doraclient.SIDE_SELL, positionLong, decimal.MustParse("1.0"), false))
+		require.True(t, fromGlobalPosition(doraclient.SIDE_SELL, positionLong, decimal.MustParse("2.0"), true))
+		require.False(t, fromGlobalPosition(doraclient.SIDE_SELL, positionLong, decimal.MustParse("2.0"), false))
+		// Short + buy (close)
+		require.True(t, fromGlobalPosition(doraclient.SIDE_BUY, positionShort, decimal.MustParse("1.0"), true))
+		require.False(t, fromGlobalPosition(doraclient.SIDE_BUY, positionShort, decimal.MustParse("1.0"), false))
+		require.True(t, fromGlobalPosition(doraclient.SIDE_BUY, positionShort, decimal.MustParse("2.0"), true))
+		require.False(t, fromGlobalPosition(doraclient.SIDE_BUY, positionShort, decimal.MustParse("2.0"), false))
+	})
+
+	t.Run("fromGlobalPosition_open_invariants", func(t *testing.T) {
+		// For opens/extends:
+		// Long with leverage <= 1 = global
+		require.True(t, fromGlobalPosition(doraclient.SIDE_BUY, positionFlat, decimal.MustParse("1.0"), false))
+		require.True(t, fromGlobalPosition(doraclient.SIDE_BUY, positionFlat, decimal.MustParse("0.5"), false))
+		// Long with leverage > 1 = isolated
+		require.False(t, fromGlobalPosition(doraclient.SIDE_BUY, positionFlat, decimal.MustParse("2.0"), false))
+		require.False(t, fromGlobalPosition(doraclient.SIDE_BUY, positionFlat, decimal.MustParse("3.0"), false))
+		// Short always = isolated (regardless of leverage)
+		require.False(t, fromGlobalPosition(doraclient.SIDE_SELL, positionFlat, decimal.MustParse("1.0"), false))
+		require.False(t, fromGlobalPosition(doraclient.SIDE_SELL, positionFlat, decimal.MustParse("2.0"), false))
+	})
+}

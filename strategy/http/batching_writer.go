@@ -68,28 +68,24 @@ func NewBatchingBacktestWriter(
 	return b
 }
 
-func (b *BatchingBacktestWriter) WriteTradeRecord(_ context.Context, rec stats.TradeRecordInsert) error {
-	b.flushMu.Lock()
+func (b *BatchingBacktestWriter) WriteTradeRecord(ctx context.Context, rec stats.TradeRecordInsert) error {
 	b.mu.Lock()
 	b.trades = append(b.trades, rec)
 	shouldFlush := len(b.trades) >= b.batchSize
 	b.mu.Unlock()
-	b.flushMu.Unlock()
 	if shouldFlush {
-		return b.Flush(context.Background())
+		return b.Flush(ctx)
 	}
 	return nil
 }
 
-func (b *BatchingBacktestWriter) WriteClosedTrade(_ context.Context, trade stats.ClosedTradeInsert) error {
-	b.flushMu.Lock()
+func (b *BatchingBacktestWriter) WriteClosedTrade(ctx context.Context, trade stats.ClosedTradeInsert) error {
 	b.mu.Lock()
 	b.closedTrades = append(b.closedTrades, trade)
 	shouldFlush := len(b.closedTrades) >= b.batchSize
 	b.mu.Unlock()
-	b.flushMu.Unlock()
 	if shouldFlush {
-		return b.Flush(context.Background())
+		return b.Flush(ctx)
 	}
 	return nil
 }

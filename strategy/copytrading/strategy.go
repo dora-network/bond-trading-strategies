@@ -352,9 +352,8 @@ const (
 
 // positionForAsset returns the net position direction for an asset. A
 // positive net (Available > Borrowed) is a long, a negative net is a
-// short, zero is flat. Sourced from GetLedgerPositionsSelf so the value
-// is consistent with the meanreversion strategy's view of "the bot's
-// position on this asset".
+// short, zero is flat. Computed from the full portfolio across all
+// accounts (global and isolated).
 func positionForAsset(available, borrowed decimal.Decimal) positionDirection {
 	net, _ := available.Sub(borrowed)
 	if net.IsPos() {

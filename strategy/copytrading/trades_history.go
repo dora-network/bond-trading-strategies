@@ -83,6 +83,14 @@ func (n *pgtypeNullTime) Scan(src any) error {
 		n.Time = v
 		n.Valid = true
 		return nil
+	case string:
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return fmt.Errorf("pgtypeNullTime: parse %q: %w", v, err)
+		}
+		n.Time = t
+		n.Valid = true
+		return nil
 	default:
 		return fmt.Errorf("pgtypeNullTime: cannot scan %T", src)
 	}

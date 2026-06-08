@@ -15,7 +15,8 @@ import (
 
 const (
 	// initialBacktestBalance is the default starting cash for a backtest
-	// when the caller doesn't specify initial_balance. A configurable
+	// when the caller doesn't specify initial_balance. Set to $10,000 USD
+	// as a representative small retail account size. A configurable
 	// value overrides this at runtime; the constant exists so existing
 	// tests and zero-value Config literals continue to behave
 	// sensibly.
@@ -90,23 +91,13 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 	)
 
 	cash := b.startingBalance()
+	// Use initial balance (not current cash) for order sizing to prevent
+	// position sizes from compounding as closes return proceeds. The
+	// live strategy doesn't have this issue because it doesn't auto-open
+	// a new position after closing — each trade is an independent event.
+	initialBalance := b.startingBalance()
 	positions := make(map[string]*position)
 
-	margin, _ := cash.Mul(b.strategy.cfg.PercentageOfAvailable)
-	margin, _ = margin.Mul(b.strategy.cfg.Leverage)
-	margin = margin.Round(0)
-	if b.strategy.cfg.MinOrderSize > 0 {
-		minSize := decimal.MustNew(int64(b.strategy.cfg.MinOrderSize), 0)
-		if margin.Cmp(minSize) < 0 {
-			margin = minSize
-		}
-	}
-	if b.strategy.cfg.MaxOrderSize > 0 {
-		maxSize := decimal.MustNew(int64(b.strategy.cfg.MaxOrderSize), 0)
-		if margin.Cmp(maxSize) > 0 {
-			margin = maxSize
-		}
-	}
 	for trade := range ch {
 		select {
 		case <-ctx.Done():
@@ -114,15 +105,10 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 		default:
 		}
 
-		if margin.IsZero() || margin.IsNeg() {
-			continue
-		}
-
 		if trade.Price.IsZero() {
 			continue
 		}
 
-		ourQty := trade.Quantity
 		tradeID, _ := uuid.Parse(trade.TransactionID)
 
 		var ourSignal types.Signal
@@ -132,22 +118,71 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 			ourSignal = types.SignalSell
 		}
 
+		// Determine order size based on current position and signal.
+		// For closes: use full position size (like live strategy).
+		// For opens/extends: use calculateOrderSize based on initial balance.
+		pos := positions[trade.Asset]
+		var ourQty decimal.Decimal
+		isClose := false
+
+		if ourSignal == types.SignalBuy && pos != nil && pos.qty.IsNeg() {
+			// Buy while short = close short
+			isClose = true
+			ourQty = pos.qty.Abs()
+		} else if ourSignal == types.SignalSell && pos != nil && pos.qty.IsPos() {
+			// Sell while long = close long
+			isClose = true
+			ourQty = pos.qty
+		}
+
+		if !isClose {
+			// Open or extend: compute order size based on initial balance
+			ourQty = calculateOrderSize(
+				initialBalance,
+				b.strategy.cfg.PercentageOfAvailable,
+				b.strategy.cfg.Leverage,
+				b.strategy.cfg.MinOrderSize,
+				b.strategy.cfg.MaxOrderSize,
+			)
+			// Convert cash-based order size to quantity
+			if !trade.Price.IsZero() {
+				ourQty, _ = ourQty.Quo(trade.Price)
+			}
+			// Check if we have enough cash to cover the order
+			orderCost, _ := ourQty.Mul(trade.Price)
+			if orderCost.Cmp(cash) > 0 {
+				// Not enough cash, skip this trade
+				continue
+			}
+		}
+
+		if ourQty.IsZero() || ourQty.IsNeg() {
+			continue
+		}
+
+		prevTradeCount := len(tradeRecords)
+		prevClosedCount := len(closedTrades)
+
 		cash, tradeRecords, closedTrades = applyTrade(
-			trade, tradeID, ourSignal, ourQty, trade.Price, margin, cash, positions,
+			trade, tradeID, ourSignal, ourQty, trade.Price, cash, positions,
 			tradeRecords, closedTrades,
+			initialBalance,
+			b.strategy.cfg.PercentageOfAvailable,
+			b.strategy.cfg.Leverage,
+			b.strategy.cfg.MinOrderSize,
+			b.strategy.cfg.MaxOrderSize,
 		)
+
+		// Write new trades incrementally if writer is configured
+		if b.writer != nil {
+			b.writeNewTrades(ctx, tradeRecords, closedTrades, prevTradeCount, prevClosedCount)
+		}
 	}
 
-	// Stream accumulated trade rows to the writer. Failure here is
-	// non-fatal: the summary still returns, just without persisted trade
-	// records. The summary endpoint reads summary metrics which are
-	// already computed; the /trades endpoint is the only consumer of
-	// these rows.
+	// Flush drains any rows still buffered by a batching writer.
+	// The summarise below returns the summary synchronously; without
+	// Flush the /trades endpoint could read an empty buffer.
 	if b.writer != nil {
-		streamTrades(ctx, b.writer, tradeRecords, closedTrades)
-		// Flush drains any rows still buffered by a batching writer.
-		// The summarise below returns the summary synchronously; without
-		// Flush the /trades endpoint could read an empty buffer.
 		if err := b.writer.Flush(ctx); err != nil {
 			slog.Error("flush backtest writer", "err", err)
 		}
@@ -156,15 +191,16 @@ func (b *Backtester) simulate(ctx context.Context, ch <-chan Trade, start, end t
 	return summarise(tradeRecords, closedTrades, start, end)
 }
 
-func streamTrades(
+func (b *Backtester) writeNewTrades(
 	ctx context.Context,
-	w stats.BacktestTradeWriter,
-	records []TradeRecord,
-	closed []ClosedTrade,
+	tradeRecords []TradeRecord,
+	closedTrades []ClosedTrade,
+	prevTradeCount, prevClosedCount int,
 ) {
-	for _, r := range records {
+	for i := prevTradeCount; i < len(tradeRecords); i++ {
+		r := tradeRecords[i]
 		rec := stats.TradeRecordInsert{
-			BacktestID:   uuid.Nil, // backtest_id is set per-write by the writer in production; tests inject one
+			BacktestID:   uuid.Nil,
 			Time:         r.Time,
 			BondID:       r.BondID,
 			Signal:       r.Signal.String(),
@@ -176,11 +212,12 @@ func streamTrades(
 			OpenPosition: r.OpenPosition,
 			TradeID:      r.TradeID,
 		}
-		if err := w.WriteTradeRecord(ctx, rec); err != nil {
+		if err := b.writer.WriteTradeRecord(ctx, rec); err != nil {
 			slog.Error("write trade record", "err", err)
 		}
 	}
-	for _, c := range closed {
+	for i := prevClosedCount; i < len(closedTrades); i++ {
+		c := closedTrades[i]
 		rec := stats.ClosedTradeInsert{
 			BacktestID:   uuid.Nil,
 			OpenTime:     c.OpenTime,
@@ -196,7 +233,7 @@ func streamTrades(
 			OpenTradeID:  c.OpenTradeID,
 			CloseTradeID: c.CloseTradeID,
 		}
-		if err := w.WriteClosedTrade(ctx, rec); err != nil {
+		if err := b.writer.WriteClosedTrade(ctx, rec); err != nil {
 			slog.Error("write closed trade", "err", err)
 		}
 	}
@@ -206,45 +243,60 @@ func applyTrade(
 	trade Trade,
 	tradeID uuid.UUID,
 	ourSignal types.Signal,
-	ourQty, price, margin decimal.Decimal,
+	ourQty, price decimal.Decimal,
 	cash decimal.Decimal,
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
+	initialBalance, percentage, leverage decimal.Decimal,
+	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	pos := positions[trade.Asset]
 
 	if ourSignal == types.SignalBuy {
-		return applyBuy(trade, tradeID, ourQty, price, margin, cash, pos, positions, tradeRecords, closedTrades)
+		return applyBuy(
+			trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades,
+			initialBalance, percentage, leverage, minOrderSize, maxOrderSize,
+		)
 	}
-	return applySell(trade, tradeID, ourQty, price, margin, cash, pos, positions, tradeRecords, closedTrades)
+	return applySell(
+		trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades,
+		initialBalance, percentage, leverage, minOrderSize, maxOrderSize,
+	)
 }
 
 func applyBuy(
 	trade Trade,
 	tradeID uuid.UUID,
-	ourQty, price, margin decimal.Decimal,
+	ourQty, price decimal.Decimal,
 	cash decimal.Decimal,
 	pos *position,
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
+	initialBalance, percentage, leverage decimal.Decimal,
+	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	if pos != nil && pos.qty.IsNeg() {
-		return buyClosesShort(trade, tradeID, ourQty, price, margin, cash, pos, positions, tradeRecords, closedTrades)
+		return buyClosesShort(
+			trade, tradeID, price, cash, pos, positions, tradeRecords, closedTrades,
+			initialBalance, percentage, leverage, minOrderSize, maxOrderSize,
+		)
 	}
-	return buyOpensOrAddsLong(trade, tradeID, ourQty, price, margin, cash, pos, positions, tradeRecords, closedTrades)
+	return buyOpensOrAddsLong(trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades)
 }
 
 func buyClosesShort(
 	trade Trade,
 	tradeID uuid.UUID,
-	ourQty, price, margin decimal.Decimal,
+	price decimal.Decimal,
 	cash decimal.Decimal,
 	pos *position,
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
+	initialBalance, percentage, leverage decimal.Decimal,
+	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	absQty := pos.qty.Abs()
 
@@ -254,29 +306,67 @@ func buyClosesShort(
 	cash, pos.qty, closedTrades = closeShortPosition(trade, tradeID, pos, absQty, price, cash, closedTrades)
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, absQty, price, cash, pos.qty, tradeRecords)
 
-	cash, _ = cash.Sub(margin)
+	// Compute new order size based on initial balance (not current cash)
+	// to prevent position sizes from compounding.
+	newOrderSize := calculateOrderSize(
+		initialBalance,
+		percentage,
+		leverage,
+		minOrderSize,
+		maxOrderSize,
+	)
+	newQty := decimal.Zero
+	if !price.IsZero() {
+		newQty, _ = newOrderSize.Quo(price)
+	}
+
+	if newQty.IsZero() || newQty.IsNeg() {
+		// No cash to open new position
+		positions[trade.Asset] = nil
+		return cash, tradeRecords, closedTrades
+	}
+
+	// Check if we have enough cash for the new position
+	cost, _ := newQty.Mul(price)
+	if cost.Cmp(cash) > 0 {
+		// Not enough cash, reduce quantity to what we can afford
+		if price.IsPos() {
+			newQty, _ = cash.Quo(price)
+			cost, _ = newQty.Mul(price)
+		}
+	}
+
+	if newQty.IsZero() || newQty.IsNeg() {
+		positions[trade.Asset] = nil
+		return cash, tradeRecords, closedTrades
+	}
+
+	// Open new long position: pay cash to buy bonds
+	cash, _ = cash.Sub(cost)
 	pos = &position{
-		qty:         ourQty,
+		qty:         newQty,
 		avgEntry:    price,
 		openTime:    trade.CreatedAt,
 		openTradeID: tradeID,
 	}
 	positions[trade.Asset] = pos
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, ourQty, price, cash, pos.qty, tradeRecords)
+	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalBuy, newQty, price, cash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
 
 func buyOpensOrAddsLong(
 	trade Trade,
 	tradeID uuid.UUID,
-	ourQty, price, margin decimal.Decimal,
+	ourQty, price decimal.Decimal,
 	cash decimal.Decimal,
 	pos *position,
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
-	cash, _ = cash.Sub(margin)
+	// When opening/extending a long, we pay cash to buy bonds.
+	cost, _ := ourQty.Mul(price)
+	cash, _ = cash.Sub(cost)
 
 	if pos == nil || pos.qty.IsZero() {
 		pos = &position{
@@ -302,28 +392,35 @@ func buyOpensOrAddsLong(
 func applySell(
 	trade Trade,
 	tradeID uuid.UUID,
-	ourQty, price, margin decimal.Decimal,
+	ourQty, price decimal.Decimal,
 	cash decimal.Decimal,
 	pos *position,
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
+	initialBalance, percentage, leverage decimal.Decimal,
+	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	if pos != nil && pos.qty.IsPos() {
-		return sellClosesLong(trade, tradeID, ourQty, price, margin, cash, pos, positions, tradeRecords, closedTrades)
+		return sellClosesLong(
+			trade, tradeID, price, cash, pos, positions, tradeRecords, closedTrades,
+			initialBalance, percentage, leverage, minOrderSize, maxOrderSize,
+		)
 	}
-	return sellOpensOrAddsShort(trade, tradeID, ourQty, price, margin, cash, pos, positions, tradeRecords, closedTrades)
+	return sellOpensOrAddsShort(trade, tradeID, ourQty, price, cash, pos, positions, tradeRecords, closedTrades)
 }
 
 func sellClosesLong(
 	trade Trade,
 	tradeID uuid.UUID,
-	ourQty, price, margin decimal.Decimal,
+	price decimal.Decimal,
 	cash decimal.Decimal,
 	pos *position,
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
+	initialBalance, percentage, leverage decimal.Decimal,
+	minOrderSize, maxOrderSize int,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
 	// Close the full long position, then open a new short — mirroring
 	// the live strategy which always closes the entire position on a
@@ -332,29 +429,54 @@ func sellClosesLong(
 	cash, pos.qty, closedTrades = closeLongPosition(trade, tradeID, pos, origQty, price, cash, closedTrades)
 	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, origQty, price, cash, pos.qty, tradeRecords)
 
-	cash, _ = cash.Sub(margin)
+	// Compute new order size based on initial balance (not current cash)
+	// to prevent position sizes from compounding.
+	newOrderSize := calculateOrderSize(
+		initialBalance,
+		percentage,
+		leverage,
+		minOrderSize,
+		maxOrderSize,
+	)
+	newQty := decimal.Zero
+	if !price.IsZero() {
+		newQty, _ = newOrderSize.Quo(price)
+	}
+
+	if newQty.IsZero() || newQty.IsNeg() {
+		// No cash to open new position
+		positions[trade.Asset] = nil
+		return cash, tradeRecords, closedTrades
+	}
+
+	// Open new short position: receive cash from selling borrowed bonds
+	proceeds, _ := newQty.Mul(price)
+	cash, _ = cash.Add(proceeds)
 	pos = &position{
-		qty:         ourQty.Neg(),
+		qty:         newQty.Neg(),
 		avgEntry:    price,
 		openTime:    trade.CreatedAt,
 		openTradeID: tradeID,
 	}
 	positions[trade.Asset] = pos
-	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, ourQty, price, cash, pos.qty, tradeRecords)
+	tradeRecords = emitTradeRecord(trade, tradeID, types.SignalSell, newQty, price, cash, pos.qty, tradeRecords)
 	return cash, tradeRecords, closedTrades
 }
 
 func sellOpensOrAddsShort(
 	trade Trade,
 	tradeID uuid.UUID,
-	ourQty, price, margin decimal.Decimal,
+	ourQty, price decimal.Decimal,
 	cash decimal.Decimal,
 	pos *position,
 	positions map[string]*position,
 	tradeRecords []TradeRecord,
 	closedTrades []ClosedTrade,
 ) (decimal.Decimal, []TradeRecord, []ClosedTrade) {
-	cash, _ = cash.Sub(margin)
+	// When opening/extending a short, we receive cash from selling borrowed bonds.
+	// Margin is collateral, not a cash outflow.
+	proceeds, _ := ourQty.Mul(price)
+	cash, _ = cash.Add(proceeds)
 
 	if pos == nil || pos.qty.IsZero() {
 		pos = &position{
@@ -432,7 +554,9 @@ func closeShortPosition(
 		OpenTradeID:  pos.openTradeID,
 		CloseTradeID: tradeID,
 	})
-	cash, _ = cash.Add(pnl)
+	// When closing a short, we buy back the bonds, so we pay cash.
+	buybackCost, _ := closeQty.Mul(price)
+	cash, _ = cash.Sub(buybackCost)
 	pos.qty, _ = pos.qty.Add(closeQty)
 	return cash, pos.qty, closedTrades
 }
