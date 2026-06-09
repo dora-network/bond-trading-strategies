@@ -843,10 +843,10 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 
 	// Inject the user's API key into the strategy so it can authenticate
 	// with DORA when resolving the asset ID for the order book.
-	authInfo, _ := authFromContext(r.Context())
-	if authInfo.APIKey != "" {
+	info, _ := authFromContext(r.Context())
+	if info.APIKey != "" {
 		if withClient, ok := strat.(*meanreversion.Strategy); ok {
-			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))
+			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))
 			withClientOpts(withClient)
 		}
 	}
@@ -1287,19 +1287,19 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inject the user's API key into the strategy so it can authenticate with DORA.
-	authInfo, _ := authFromContext(r.Context())
-	if authInfo.APIKey != "" {
+	info, _ := authFromContext(r.Context())
+	if info.APIKey != "" {
 		switch withClient := strat.(type) {
 		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))(withClient)
+			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))(withClient)
 		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(authInfo.APIKey))(withClient)
+			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(info.APIKey))(withClient)
 		}
 	}
 
 	var encryptedAPIKey []byte
-	if authInfo.APIKey != "" && len(h.encryptionKey) > 0 {
-		encryptedAPIKey, err = encryptAPIKey([]byte(authInfo.APIKey), h.encryptionKey)
+	if info.APIKey != "" && len(h.encryptionKey) > 0 {
+		encryptedAPIKey, err = encryptAPIKey([]byte(info.APIKey), h.encryptionKey)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("encrypt api key: %v", err))
 			return

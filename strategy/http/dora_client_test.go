@@ -195,7 +195,7 @@ func TestLiveDORAClient_ListBotUsers(t *testing.T) {
 			}
 			client := &liveDORAClient{client: doraclient.NewAPIClient(cfg)}
 
-			ctx := context.WithValue(context.Background(), authContextKey{}, authInfo{APIKey: "test-key"})
+			ctx := context.WithValue(context.Background(), authContextKey{}, AuthInfo{APIKey: "test-key"})
 
 			got, err := client.ListBotUsers(ctx)
 			require.NoError(t, err)
