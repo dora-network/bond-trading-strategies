@@ -6,6 +6,7 @@ package notifications
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -53,3 +54,73 @@ type Subscription interface {
 	Events() <-chan Event
 	Close() error
 }
+
+// Bus is the in-process Notifier. It writes every event to a Log and
+// broadcasts it to the Hub. A Log failure is logged but does not stop
+// live delivery; the in-memory replay cache covers the gap.
+type Bus struct {
+	log     Log
+	hub     *Hub
+	logf    func(string, ...any)
+	mu      sync.Mutex
+	replay  map[string][]Event // userID -> most recent events (newest last)
+	replayN int
+}
+
+// NewBus returns a Bus that writes to log and broadcasts through hub.
+// If hub is nil, NewHub() is used.
+func NewBus(log Log, hub *Hub, opts ...BusOption) *Bus {
+	if hub == nil {
+		hub = NewHub()
+	}
+	b := &Bus{log: log, hub: hub, logf: func(string, ...any) {}, replay: make(map[string][]Event), replayN: 1024}
+	for _, o := range opts {
+		o(b)
+	}
+	return b
+}
+
+// BusOption configures a Bus.
+type BusOption func(*Bus)
+
+// WithLogger routes internal errors through the supplied logger.
+func WithLogger(f func(string, ...any)) BusOption { return func(b *Bus) { b.logf = f } }
+
+// WithReplaySize overrides the in-memory replay cache size (default 1024).
+func WithReplaySize(n int) BusOption { return func(b *Bus) { b.replayN = n } }
+
+// Publish implements Notifier.
+func (b *Bus) Publish(ctx context.Context, evt Event) error {
+	if err := b.log.Insert(ctx, evt); err != nil {
+		b.logf("notifications: log insert failed: %v", err)
+	}
+	b.cacheForReplay(evt)
+	b.hub.Broadcast(evt)
+	return nil
+}
+
+// Subscribe implements Notifier.
+func (b *Bus) Subscribe(ctx context.Context, userID string) (Subscription, error) {
+	return b.hub.Subscribe(ctx, userID)
+}
+
+func (b *Bus) cacheForReplay(evt Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ring := b.replay[evt.UserID]
+	ring = append(ring, evt)
+	if len(ring) > b.replayN {
+		ring = ring[len(ring)-b.replayN:]
+	}
+	b.replay[evt.UserID] = ring
+}
+
+// FailingLog is a Log that always fails Insert. Used in tests to assert
+// Bus still delivers to live subscribers.
+type FailingLog struct{ Err error }
+
+func (f FailingLog) Insert(context.Context, Event) error { return f.Err }
+func (FailingLog) Replay(context.Context, string, string, int) ([]Event, error) {
+	return nil, nil
+}
+func (FailingLog) DeleteOlderThan(context.Context, time.Duration) (int64, error) { return 0, nil }
