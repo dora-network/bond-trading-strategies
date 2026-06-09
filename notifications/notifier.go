@@ -1,3 +1,5 @@
+//go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
+
 // Package notifications owns the per-DORA-user notification stream exposed by
 // the strategy-server WebSocket endpoint, plus the in-process bus that
 // producers call and the outbound client the mcp-server uses to relay
@@ -42,6 +44,8 @@ type Event struct {
 // Notifier is the producer-facing surface. Publish is called by the
 // strategy HTTP handler and strategy implementations at every lifecycle
 // transition. Subscribe is called by the WebSocket handler.
+//
+//counterfeiter:generate . Notifier
 type Notifier interface {
 	Publish(ctx context.Context, evt Event) error
 	Subscribe(ctx context.Context, userID string) (Subscription, error)
