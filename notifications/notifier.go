@@ -108,6 +108,14 @@ func (b *Bus) Subscribe(ctx context.Context, userID string) (Subscription, error
 	return b.hub.Subscribe(ctx, userID)
 }
 
+// Replay returns the events with id > afterID for the given user from
+// the underlying Log. It is exposed so the WebSocket handler can
+// implement Last-Event-ID replay without depending on the concrete
+// Log type.
+func (b *Bus) Replay(ctx context.Context, userID, afterID string, limit int) ([]Event, error) {
+	return b.log.Replay(ctx, userID, afterID, limit)
+}
+
 func (b *Bus) cacheForReplay(evt Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
