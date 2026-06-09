@@ -31,6 +31,11 @@ import (
 	"github.com/coder/websocket"
 )
 
+const (
+	exitCodeFailure = 1
+	exitCodeError   = 2
+)
+
 func main() {
 	apiKey := os.Getenv("DORA_API_KEY")
 	base := os.Getenv("WS_BASE_URL")
@@ -42,13 +47,13 @@ func main() {
 	d, err := time.ParseDuration(readFor)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bad WS_READ_FOR:", err)
-		os.Exit(2)
+		os.Exit(exitCodeError)
 	}
 
 	u, err := url.Parse(base + "/v1/notifications/ws")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bad base url:", err)
-		os.Exit(2)
+		os.Exit(exitCodeError)
 	}
 	if lastID != "" {
 		q := u.Query()
@@ -62,10 +67,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
 
+	//nolint:bodyclose // coder/websocket docs: caller never closes resp.Body
 	conn, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{HTTPHeader: header})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "dial error:", err)
-		os.Exit(1)
+		os.Exit(exitCodeFailure)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
@@ -81,6 +87,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "rx (invalid json):", string(data))
 			continue
 		}
-		fmt.Println(string(data))
+		fmt.Fprintln(os.Stderr, string(data))
 	}
 }

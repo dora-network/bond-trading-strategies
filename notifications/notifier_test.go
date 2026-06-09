@@ -16,12 +16,12 @@ import (
 func TestEvent_RoundTripJSON(t *testing.T) {
 	id := uuid.New().String()
 	evt := notifications.Event{
-		ID:         id,
-		Type:       notifications.EventRunStarted,
-		UserID:     "user-1",
-		RunID:      "run-1",
-		Timestamp:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
-		Payload:    map[string]any{"strategy_type": "mean_reversion"},
+		ID:        id,
+		Type:      notifications.EventRunStarted,
+		UserID:    "user-1",
+		RunID:     "run-1",
+		Timestamp: time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+		Payload:   map[string]any{"strategy_type": "mean_reversion"},
 	}
 	data, err := json.Marshal(evt)
 	require.NoError(t, err)
