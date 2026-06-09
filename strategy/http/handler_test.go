@@ -2412,3 +2412,58 @@ func TestHandler_EmitsRunStartedEvent(t *testing.T) {
 	assert.Equal(t, "test-user", evt.UserID)
 	assert.Equal(t, runID.String(), evt.RunID)
 }
+
+func TestHandler_EmitsRunStopLossEvent(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.Must(uuid.NewV7())
+	var capturedStrat strategycore.Strategy
+	svc := &strategyfakes.FakeService{
+		RunStrategyStub: func(_ context.Context, s strategycore.Strategy) (uuid.UUID, error) {
+			capturedStrat = s
+			return runID, nil
+		},
+	}
+	notifier := &notificationsfakes.FakeNotifier{}
+	handler := strategyhttp.NewHandler(svc,
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+		strategyhttp.WithNotifier(notifier),
+		strategyhttp.WithStopLossObserverInterval(10*time.Millisecond),
+	)
+
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window": 20,
+			"entry_z_score":   2.0,
+			"exit_z_score":    0.5,
+			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+			"tenor":           "10Y",
+			"initial_balance": 5.5,
+			"leverage":        2.0,
+		},
+	}
+	rec := performJSONRequest(t, handler, "/v1/runs", body)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	mrStrat, ok := capturedStrat.(*meanreversion.Strategy)
+	require.True(t, ok, "expected meanreversion.Strategy, got %T", capturedStrat)
+	_, _, triggered := mrStrat.LastStopLossTrigger()
+	require.False(t, triggered)
+
+	exit, reason := mrStrat.ShouldExit(types.SignalBuy, decimal.MustNew(36, 1))
+	require.True(t, exit)
+	require.Equal(t, meanreversion.ExitReasonStopLoss, reason)
+
+	require.Eventually(t, func() bool {
+		for i := 0; i < notifier.PublishCallCount(); i++ {
+			_, evt := notifier.PublishArgsForCall(i)
+			if evt.Type == notifications.EventRunStopLoss {
+				assert.Equal(t, runID.String(), evt.RunID)
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "expected EventRunStopLoss to be published")
+}

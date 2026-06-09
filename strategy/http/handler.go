@@ -38,6 +38,11 @@ const (
 	// written, so a slow trickle of trades doesn't leave a tail of
 	// un-flushed rows in memory.
 	flushAfter = time.Second
+	// defaultStopLossObserverInterval is the polling cadence the
+	// handler uses to detect a stop-loss trigger on a running strategy.
+	// 1s is fine for human-facing notification latency and keeps the
+	// observer's per-run cost negligible.
+	defaultStopLossObserverInterval = time.Second
 )
 
 type Handler struct {
@@ -58,9 +63,30 @@ type Handler struct {
 	mu                 sync.RWMutex
 	backtests          map[uuid.UUID]*BacktestDetail
 	runs               map[uuid.UUID]*RunDetail
-	orderbookCache     map[string]DORAOrderBookSummary
-	assetCache         map[string]AssetInfo
-	cacheMu            sync.RWMutex
+	// runningStrategies maps a live run id to the strategy instance that
+	// was started for it, so the stop-loss observer can query the
+	// strategy's recorded trigger. Populated in createRun and
+	// resumePersistedRun; cleared in stopRun and by the observer itself
+	// when the run leaves the running state. Protected by mu.
+	runningStrategies map[uuid.UUID]strategycore.Strategy
+	// stopLossObservers cancels the per-run observer goroutine. Protected
+	// by mu.
+	stopLossObservers map[uuid.UUID]context.CancelFunc
+	// stopLossObserverInterval is the polling cadence for the stop-loss
+	// observer. Defaults to 1s; overridable for tests via
+	// WithStopLossObserverInterval.
+	stopLossObserverInterval time.Duration
+	orderbookCache           map[string]DORAOrderBookSummary
+	assetCache               map[string]AssetInfo
+	cacheMu                  sync.RWMutex
+}
+
+// stopLossObserver is the minimal surface the handler needs from a
+// running strategy to detect a stop-loss exit. *meanreversion.Strategy
+// implements it; copytrading does not yet (see the TODO in its
+// strategy.go).
+type stopLossObserver interface {
+	LastStopLossTrigger() (zScore, pnl decimal.Decimal, triggered bool)
 }
 
 type runStarter interface {
@@ -421,12 +447,15 @@ type MeanReversionTradeRecord struct {
 
 func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handler {
 	h := &Handler{
-		service:        service,
-		now:            time.Now,
-		backtests:      make(map[uuid.UUID]*BacktestDetail),
-		runs:           make(map[uuid.UUID]*RunDetail),
-		orderbookCache: make(map[string]DORAOrderBookSummary),
-		assetCache:     make(map[string]AssetInfo),
+		service:                  service,
+		now:                      time.Now,
+		backtests:                make(map[uuid.UUID]*BacktestDetail),
+		runs:                     make(map[uuid.UUID]*RunDetail),
+		runningStrategies:        make(map[uuid.UUID]strategycore.Strategy),
+		stopLossObservers:        make(map[uuid.UUID]context.CancelFunc),
+		stopLossObserverInterval: defaultStopLossObserverInterval,
+		orderbookCache:           make(map[string]DORAOrderBookSummary),
+		assetCache:               make(map[string]AssetInfo),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -524,6 +553,15 @@ func WithLogger(log *slog.Logger) func(*Handler) {
 func WithNotifier(n notifications.Notifier) func(*Handler) {
 	return func(h *Handler) {
 		h.notifier = n
+	}
+}
+
+// WithStopLossObserverInterval overrides the stop-loss observer poll
+// interval. The default is 1s; tests use a shorter interval to avoid
+// waiting.
+func WithStopLossObserverInterval(d time.Duration) func(*Handler) {
+	return func(h *Handler) {
+		h.stopLossObserverInterval = d
 	}
 }
 
@@ -1297,6 +1335,8 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	h.runs[id] = detail
 	h.mu.Unlock()
 
+	h.startStopLossObserver(detail, strat)
+
 	h.publishEvent(r.Context(), notifications.Event{
 		Type:      notifications.EventRunStarted,
 		UserID:    doraUserID,
@@ -1368,6 +1408,9 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 		detail.UpdatedAt = now
 		stoppedAt := now
 		detail.StoppedAt = &stoppedAt
+	}
+	if cancel, ok := h.stopLossObservers[id]; ok {
+		cancel()
 	}
 	h.mu.Unlock()
 
@@ -1579,6 +1622,7 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}
+	h.startStopLossObserver(detail, strat)
 	return nil
 }
 
@@ -1595,6 +1639,85 @@ func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strateg
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// startStopLossObserver records strat in runningStrategies and spawns a
+// per-run goroutine that polls LastStopLossTrigger until the trigger
+// fires (publishing EventRunStopLoss) or the run leaves the running
+// state. The goroutine is cancellable via the returned cancel func,
+// which is also stored in stopLossObservers so stopRun can cancel it.
+func (h *Handler) startStopLossObserver(detail *RunDetail, strat strategycore.Strategy) {
+	obs, ok := strat.(stopLossObserver)
+	if !ok {
+		return
+	}
+	// h.service.BaseContext() may be nil if a test set up a FakeService
+	// without a BaseContextReturns. Fall back to Background() so the
+	// observer still runs (graceful shutdown won't propagate, which is
+	// acceptable for tests). Production wires the real service whose
+	// BaseContext is the signal-cancelled context.
+	parent := h.service.BaseContext()
+	if parent == nil {
+		parent = context.Background()
+	}
+	obsCtx, cancel := context.WithCancel(parent)
+	h.mu.Lock()
+	h.runningStrategies[detail.ID] = strat
+	h.stopLossObservers[detail.ID] = cancel
+	h.mu.Unlock()
+	go h.runStopLossObserver(obsCtx, detail, obs, cancel)
+}
+
+func (h *Handler) runStopLossObserver(ctx context.Context, detail *RunDetail, obs stopLossObserver, cancel context.CancelFunc) {
+	defer cancel()
+	defer func() {
+		h.mu.Lock()
+		delete(h.stopLossObservers, detail.ID)
+		delete(h.runningStrategies, detail.ID)
+		h.mu.Unlock()
+	}()
+
+	interval := h.stopLossObserverInterval
+	if interval <= 0 {
+		interval = defaultStopLossObserverInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !h.runIsActive(detail.ID) {
+				return
+			}
+			z, pnl, triggered := obs.LastStopLossTrigger()
+			if !triggered {
+				continue
+			}
+			h.publishEvent(ctx, notifications.Event{
+				Type:    notifications.EventRunStopLoss,
+				UserID:  detail.DORAUserID,
+				RunID:   detail.ID.String(),
+				Payload: map[string]any{"z_score": z, "pnl": pnl},
+			})
+			return
+		}
+	}
+}
+
+// runIsActive reports whether the run is still tracked in h.runs with
+// status "running". The observer uses this to exit when the run was
+// stopped or completed by some other path.
+func (h *Handler) runIsActive(id uuid.UUID) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	detail, ok := h.runs[id]
+	if !ok {
+		return false
+	}
+	return detail.Status == "running"
 }
 
 func (h *Handler) resolveDORAUserID(ctx context.Context) (string, error) {
