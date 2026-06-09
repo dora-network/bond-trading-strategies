@@ -116,6 +116,13 @@ func (b *Bus) Replay(ctx context.Context, userID, afterID string, limit int) ([]
 	return b.log.Replay(ctx, userID, afterID, limit)
 }
 
+// DeleteOlderThan removes log rows older than age from the underlying
+// Log. It is exposed so the strategy-server can run periodic retention
+// without depending on the concrete Log type.
+func (b *Bus) DeleteOlderThan(ctx context.Context, age time.Duration) (int64, error) {
+	return b.log.DeleteOlderThan(ctx, age)
+}
+
 func (b *Bus) cacheForReplay(evt Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
