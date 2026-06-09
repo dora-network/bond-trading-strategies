@@ -36,6 +36,9 @@ func (h *Handler) publishEvent(ctx context.Context, evt notifications.Event) {
 	if h.notifier == nil {
 		return
 	}
+	if evt.UserID == "" {
+		return
+	}
 	if evt.ID == "" {
 		evt.ID = uuid.Must(uuid.NewV7()).String()
 	}

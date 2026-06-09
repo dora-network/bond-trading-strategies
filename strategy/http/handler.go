@@ -960,7 +960,7 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 		slog.Error("failed to save backtest result", "err", err, "backtest_id", id)
 	}
 
-	if evtType != "" && detail.DORAUserID != "" {
+	if evtType != "" {
 		evt := notifications.Event{
 			Type:       evtType,
 			UserID:     detail.DORAUserID,
