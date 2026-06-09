@@ -575,7 +575,7 @@ func TestStartNotificationsRelay_ForwardsEventToMCPClients(t *testing.T) {
 	mux.Handle("/", sseSrv)
 	sseTS := httptest.NewServer(mux)
 	defer sseTS.Close()
-	defer sseSrv.Shutdown(context.Background())
+	defer func() { _ = sseSrv.Shutdown(context.Background()) }()
 	sseURL := sseTS.URL
 
 	// 3. Connect a real MCP client to the SSE server. The client
@@ -595,7 +595,7 @@ func TestStartNotificationsRelay_ForwardsEventToMCPClients(t *testing.T) {
 	// 4. Capture the notification.
 	received := make(chan mcp.JSONRPCNotification, 1)
 	mcpClient.OnNotification(func(n mcp.JSONRPCNotification) {
-		if n.Notification.Method != "notifications/event" {
+		if n.Method != "notifications/event" {
 			return
 		}
 		select {
@@ -616,8 +616,8 @@ func TestStartNotificationsRelay_ForwardsEventToMCPClients(t *testing.T) {
 	// 6. Assert the notification arrived with the expected payload.
 	select {
 	case n := <-received:
-		assert.Equal(t, "notifications/event", n.Notification.Method)
-		params := n.Notification.Params.AdditionalFields
+		assert.Equal(t, "notifications/event", n.Method)
+		params := n.Params.AdditionalFields
 		assert.Equal(t, string(notifications.EventRunStarted), params["type"], "type field")
 		assert.Equal(t, runID, params["run_id"], "run_id field")
 		assert.Equal(t, "user-1", params["user_id"], "user_id field")

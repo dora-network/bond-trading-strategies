@@ -146,7 +146,7 @@ func eventToMap(evt notifications.Event) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]any, 6)
+	var out map[string]any
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}
