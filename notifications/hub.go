@@ -39,7 +39,7 @@ func (h *Hub) Subscribe(_ context.Context, userID string) (Subscription, error) 
 	if h.closed {
 		return nil, ErrHubClosed
 	}
-	sub := &subscription{ch: make(chan Event, h.buffer), hub: h, userID: userID, closed: make(chan struct{})}
+	sub := &subscription{ch: make(chan Event, h.buffer), hub: h, userID: userID}
 	if h.users[userID] == nil {
 		h.users[userID] = make(map[*subscription]struct{})
 	}
@@ -93,12 +93,11 @@ type subscription struct {
 	hub       *Hub
 	userID    string
 	closeOnce sync.Once
-	closed    chan struct{}
 }
 
 //nolint:unused // helper kept for symmetry with other constructors; used by future Bus
 func newSubscription(h *Hub, userID string, buf int) *subscription {
-	return &subscription{hub: h, userID: userID, ch: make(chan Event, buf), closed: make(chan struct{})}
+	return &subscription{hub: h, userID: userID, ch: make(chan Event, buf)}
 }
 
 func (s *subscription) Events() <-chan Event { return s.ch }
@@ -106,14 +105,6 @@ func (s *subscription) Events() <-chan Event { return s.ch }
 func (s *subscription) Close() error {
 	s.closeOnce.Do(func() {
 		s.hub.remove(s)
-		close(s.closed)
-		// Drain the channel so producers that beat Close can still
-		// put events onto a closed channel (they can't, so the
-		// non-blocking send below is the right guard).
-		go func() {
-			for range s.ch {
-			}
-		}()
 		close(s.ch)
 	})
 	return nil
