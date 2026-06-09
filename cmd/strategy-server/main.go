@@ -154,6 +154,12 @@ func main() {
 			notifications.WithLogger(func(format string, args ...any) { log.Info(format, args...) }),
 		)
 		notifier = bus
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			retentionLoop(ctx, bus, log)
+		}()
 	}
 
 	handlerImpl := strategyhttp.NewHandler(
@@ -251,6 +257,31 @@ func main() {
 		}
 	}
 	slog.Info("strategy server stopped")
+}
+
+// retentionLoop purges notification_log rows older than 24h, once on
+// startup and then every hour until ctx is cancelled.
+func retentionLoop(ctx context.Context, bus *notifications.Bus, log *slog.Logger) {
+	const age = 24 * time.Hour
+	if n, err := bus.DeleteOlderThan(ctx, age); err != nil {
+		log.Warn("notification log retention failed", "err", err)
+	} else if n > 0 {
+		log.Info("notification log retention purged rows on startup", "count", n)
+	}
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if n, err := bus.DeleteOlderThan(ctx, age); err != nil {
+				log.Warn("notification log retention failed", "err", err)
+			} else if n > 0 {
+				log.Info("notification log retention purged rows", "count", n)
+			}
+		}
+	}
 }
 
 // notificationsRouter dispatches /v1/notifications/ws to a sub-mux that
