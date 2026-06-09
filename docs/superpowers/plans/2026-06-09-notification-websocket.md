@@ -20,7 +20,7 @@
 - `notifications/log.go` — `Log` interface + `PGLog` (insert, replay by `Last-Event-ID`, retention delete)
 - `notifications/handler.go` — `Handler` with `ServeHTTP`, `Accept` upgrade, replay+live forwarding
 - `notifications/client.go` — outbound WS client used by `mcp-server` (dial + reconnect + read loop)
-- `notifications/notifierfakes/fake_notifier.go` — counterfeiter-generated fake
+- `notifications/notificationsfakes/fake_notifier.go` — counterfeiter-generated fake (default name; matches `strategyfakes`, `candlefakes` etc.)
 - `notifications/notifier_test.go`, `notifications/hub_test.go`, `notifications/log_test.go`, `notifications/handler_test.go`, `notifications/client_test.go` — unit tests
 - `notifications/export_test.go` — white-box helpers
 - `migrations/009_create_notification_log.sql` — PG schema
@@ -900,7 +900,7 @@ and on the line directly above the `Notifier` interface declaration:
 ```bash
 cd notifications && go generate ./...
 ```
-Expected: `notifications/notifierfakes/fake_notifier.go` is created.
+Expected: `notifications/notificationsfakes/fake_notifier.go` is created (counterfeiter's default directory name matches the source package name; consistent with `strategy/strategyfakes/`, `candles/candlefakes/`, `strategy/copytrading/copytradingfakes/`).
 
 - [ ] **Step 3: Compile the package**
 
