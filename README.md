@@ -96,6 +96,7 @@ automatically restores persisted runs and backtests from Postgres.
 | `-l` / `--log-level`         | `LOG_LEVEL`              | `INFO`              | Log level (DEBUG, INFO, WARN, ERROR)       |
 | `-r` / `--reconnect-delay`   | —                        | `5s`                | Delay between WebSocket reconnect attempts |
 | `--cors-allowed-origins`     | `CORS_ALLOWED_ORIGINS`   | —                   | Comma-separated allowed CORS origins (`*` for any) |
+| `--notifications-enabled`    | `NOTIFICATIONS_ENABLED`  | `true`              | Enable `/v1/notifications/ws`              |
 
 #### HTTP Endpoints
 
@@ -116,6 +117,7 @@ automatically restores persisted runs and backtests from Postgres.
 | `DELETE` | `/v1/runs/{id}`        | Stop and delete a run                            |
 | `POST`   | `/v1/runs/{id}/pause`  | Pause a running strategy                         |
 | `POST`   | `/v1/runs/{id}/resume` | Resume a paused strategy                         |
+| `GET`    | `/v1/notifications/ws` | WebSocket: real-time lifecycle notifications     |
 
 #### Run locally
 
@@ -194,6 +196,83 @@ curl -X POST http://localhost:8081/v1/backtests \
 #### OpenAPI specification
 
 `docs/openapi/strategy-server.json`
+
+#### Notification WebSocket
+
+`GET /v1/notifications/ws` is a WebSocket endpoint that streams
+JSON-encoded `Event` objects for the authenticated DORA user. Event
+types: `backtest.started`, `backtest.completed`, `backtest.failed`,
+`run.started`, `run.paused`, `run.resumed`, `run.stopped`,
+`run.stop_loss`. The `dora.*` namespace is reserved for v2 events
+relayed from DORA (orders, trades) — clients should ignore unknown
+`type` values.
+
+Query parameters:
+- `Last-Event-ID` (UUIDv7): replay events with `id > Last-Event-ID` from the log, capped at 1000 events or 24h.
+- `types` (comma-separated): restrict the stream to a subset of event types.
+
+Auth is the same as the REST API: `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`.
+
+Example client (Go, using `github.com/coder/websocket`):
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+
+	"github.com/coder/websocket"
+	"github.com/dora-network/bond-trading-strategies/notifications"
+)
+
+func main() {
+	u, _ := url.Parse("http://localhost:8081")
+	u.Scheme = "ws"
+	u.Path = "/v1/notifications/ws"
+	header := http.Header{}
+	header.Set("Authorization", "ApiKey "+os.Getenv("DORA_API_KEY"))
+
+	ctx := context.Background()
+	conn, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	var lastID string
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+		var evt notifications.Event
+		if err := json.Unmarshal(data, &evt); err != nil {
+			log.Printf("malformed frame: %v", err)
+			continue
+		}
+		lastID = evt.ID
+		fmt.Printf("%s run=%s type=%s\n", evt.Timestamp, evt.RunID, evt.Type)
+	}
+}
+```
+
+For ad-hoc debugging, `websocat` is the simplest way to confirm the
+endpoint is live:
+
+```bash
+websocat -H "Authorization: ApiKey $DORA_API_KEY" \
+  ws://localhost:8081/v1/notifications/ws
+```
+
+MCP clients receive the same events as `notifications/event` MCP
+notifications and do not need to connect to the WebSocket directly —
+see `mcp-server` for details.
 
 ---
 
