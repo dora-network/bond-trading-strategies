@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/ratelimit"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
@@ -54,6 +55,9 @@ func main() {
 	rateLimitTrustProxy := flag.Bool("rate-limit-trust-proxy",
 		envOrBool("RATE_LIMIT_TRUST_PROXY", false),
 		"Trust X-Forwarded-For for IP extraction")
+
+	notificationsEnabled := flag.Bool("notifications-enabled", envOrBool("NOTIFICATIONS_ENABLED", true),
+		"Enable the /v1/notifications/ws WebSocket endpoint")
 	flag.Parse()
 
 	setLogLevel(*logLevel)
@@ -141,6 +145,17 @@ func main() {
 
 	log := slog.With("service", "strategy-server")
 	service := strategycore.NewService(strategycore.WithBaseContext(ctx))
+
+	var notifier notifications.Notifier
+	if *notificationsEnabled {
+		bus := notifications.NewBus(
+			notifications.NewPGLog(pool),
+			notifications.NewHub(),
+			notifications.WithLogger(func(format string, args ...any) { log.Info(format, args...) }),
+		)
+		notifier = bus
+	}
+
 	handlerImpl := strategyhttp.NewHandler(
 		service,
 		strategyhttp.WithRunStore(strategyhttp.NewPGRunStore(pool)),
@@ -150,6 +165,7 @@ func main() {
 		strategyhttp.WithTradeStream(tradeStream),
 		strategyhttp.WithLogger(log),
 		strategyhttp.WithEncryptionKey(encryptionKey),
+		strategyhttp.WithNotifier(notifier),
 	)
 	restorer, ok := handlerImpl.(interface{ RestoreRuns(context.Context) error })
 	if !ok {
@@ -187,6 +203,22 @@ func main() {
 		wrappedHandler = corsMiddleware(*corsAllowedOrigins, wrappedHandler)
 	}
 
+	if notifier != nil {
+		wsSubMux := http.NewServeMux()
+		wsSubMux.Handle("/v1/notifications/ws", notifications.NewHandler(
+			notifier,
+			func(ctx context.Context) (string, error) {
+				if _, ok := strategyhttp.AuthInfoFromContext(ctx); !ok {
+					return "", errors.New("missing auth info in context")
+				}
+				client := strategyhttp.NewDORAClient()
+				return client.GetUserID(ctx)
+			},
+			notifications.WithHandlerLogger(log),
+		))
+		wrappedHandler = notificationsRouter{fallback: wrappedHandler, sub: wsSubMux}
+	}
+
 	server := &http.Server{
 		Addr:              *addr,
 		Handler:           wrappedHandler,
@@ -219,6 +251,72 @@ func main() {
 		}
 	}
 	slog.Info("strategy server stopped")
+}
+
+// notificationsRouter dispatches /v1/notifications/ws to a sub-mux that
+// owns the WebSocket route, and falls through to fallback for every other
+// path. The sub-mux only registers the WS endpoint, so an unmatched
+// request is also a 404 — the router treats that as a fall-through rather
+// than letting the sub-mux emit its own 404, which would shadow the
+// REST handler's responses for unrelated paths.
+type notificationsRouter struct {
+	fallback http.Handler
+	sub      *http.ServeMux
+}
+
+func (r notificationsRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path != "/v1/notifications/ws" {
+		r.fallback.ServeHTTP(w, req)
+		return
+	}
+	// Parse the Authorization header and put it into the request context
+	// so the WebSocket handler's ResolveUserID callback can read it via
+	// strategyhttp.AuthInfoFromContext.
+	authHeader := req.Header.Get("Authorization")
+	if ctx, ok := authContextFromHeader(req.Context(), authHeader); ok {
+		req = req.WithContext(ctx)
+	}
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	r.sub.ServeHTTP(rec, req)
+	if rec.status == http.StatusNotFound {
+		r.fallback.ServeHTTP(w, req)
+	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if !s.wroteHeader {
+		s.status = code
+		s.wroteHeader = true
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// authContextFromHeader returns a context that carries the credentials
+// extracted from the supplied Authorization header, using the same
+// ApiKey/Bearer scheme recognition as strategy/http.requireAuth. The
+// second return value is false when the header is absent or unrecognised.
+func authContextFromHeader(ctx context.Context, authHeader string) (context.Context, bool) {
+	switch {
+	case strings.HasPrefix(authHeader, "ApiKey "):
+		key := strings.TrimPrefix(authHeader, "ApiKey ")
+		if key == "" {
+			return ctx, false
+		}
+		return strategyhttp.WithAPIKey(ctx, key), true
+	case strings.HasPrefix(authHeader, "Bearer "):
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if token == "" {
+			return ctx, false
+		}
+		return strategyhttp.WithBearerToken(ctx, token), true
+	}
+	return ctx, false
 }
 
 // corsMiddleware returns an HTTP handler that adds CORS headers. origins is a
