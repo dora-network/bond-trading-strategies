@@ -28,6 +28,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -61,10 +62,20 @@ func main() {
 				"  Set --fred-api-key flag or FRED_API_KEY environment variable.")
 	}
 
-	srv := mcpserver.NewSSEServer(*fredKey, *doraAPIKey, *strategyBaseURL, *baseURL)
+	srvCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mcpSrv, sseSrv := mcpserver.NewSSEServerWithNotifications(*fredKey, *doraAPIKey, *strategyBaseURL, *baseURL)
+	wsURL := mcpserver.NotificationsWSURL(*strategyBaseURL)
+	go func() {
+		if err := mcpserver.StartNotificationsRelay(srvCtx, mcpSrv, wsURL, *doraAPIKey); err != nil &&
+			srvCtx.Err() == nil {
+			log.Printf("notifications relay stopped: %v", err)
+		}
+	}()
 
 	log.Printf("bond-trading-strategies MCP server listening on %s (base URL: %s), strategy-server URL: %s", *addr, *baseURL, *strategyBaseURL)
-	if err := srv.Start(*addr); err != nil {
+	if err := sseSrv.Start(*addr); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
