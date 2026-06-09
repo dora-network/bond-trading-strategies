@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
@@ -50,6 +51,7 @@ type Handler struct {
 	backtestStore      BacktestStore
 	tradesHistoryStore *copytrading.PGTradesHistoryStore
 	tradeStream        *streams.TradeStream
+	notifier           notifications.Notifier
 	encryptionKey      []byte // 32-byte AES-256 key for encrypting API keys at rest
 	mux                *http.ServeMux
 	authedMux          http.Handler
@@ -514,6 +516,14 @@ func WithPricesHandler(pricesHandler *prices.Handler) func(*Handler) {
 func WithLogger(log *slog.Logger) func(*Handler) {
 	return func(h *Handler) {
 		h.log = log
+	}
+}
+
+// WithNotifier sets the notifications.Notifier used to publish lifecycle
+// events for backtests and runs. When unset, publishEvent is a no-op.
+func WithNotifier(n notifications.Notifier) func(*Handler) {
+	return func(h *Handler) {
+		h.notifier = n
 	}
 }
 
