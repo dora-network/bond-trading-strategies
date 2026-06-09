@@ -239,6 +239,141 @@ All producers get the `userID` from the API-key context already attached to the 
 
 `migrations/009_create_notification_log.sql` follows the existing `NNN_short_name.sql` convention (see `001_create_price_history_table.sql` … `008_add_backtest_trade_tables.sql`).
 
+## OpenAPI specification
+
+Update `docs/openapi/strategy-server.json` (the spec is hand-maintained; see `docs/openapi/openapi.go:1` for the embed).
+
+### Endpoint
+
+Add a single operation under a new `notifications` tag:
+
+```json
+{
+  "paths": {
+    "/v1/notifications/ws": {
+      "get": {
+        "tags": ["notifications"],
+        "operationId": "subscribeNotifications",
+        "summary": "Open a WebSocket connection for real-time lifecycle notifications",
+        "description": "Upgrades the HTTP connection to a WebSocket. The server authenticates using the standard Authorization header, resolves the DORA user, and streams JSON-encoded Event objects as text frames. Optional query params: Last-Event-ID (UUIDv7) replays events from the log; types (comma-separated) filters by EventType. Heartbeat is WS-level ping/pong every 30s.",
+        "security": [{"ApiKey": []}, {"Bearer": []}],
+        "parameters": [
+          {
+            "name": "Last-Event-ID",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string", "format": "uuid"},
+            "description": "Replay events with id > Last-Event-ID (UUIDv7). Capped at 1000 events or 24h, whichever is smaller."
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string"},
+            "description": "Comma-separated whitelist of EventType values. Default: all."
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols — WebSocket upgrade succeeded"
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    }
+  }
+}
+```
+
+### Schemas
+
+Add the following to `components.schemas`:
+
+```json
+"Event": {
+  "type": "object",
+  "description": "A single notification event delivered over the WebSocket. New event types (notably dora.*) may appear without a spec change — clients MUST tolerate unknown values of `type`.",
+  "required": ["id", "type", "user_id", "timestamp", "payload"],
+  "properties": {
+    "id":         { "type": "string", "format": "uuid", "description": "UUIDv7. Monotonic; used as the Last-Event-ID replay cursor." },
+    "type":       { "type": "string", "description": "Event type. One of the EventType enum values; clients should also tolerate unknown values." },
+    "user_id":    { "type": "string", "description": "DORA user id the event belongs to." },
+    "run_id":     { "type": "string", "format": "uuid", "nullable": true },
+    "backtest_id":{ "type": "string", "format": "uuid", "nullable": true },
+    "timestamp":  { "type": "string", "format": "date-time", "description": "Event timestamp in RFC3339, always UTC." },
+    "payload":    { "type": "object", "description": "Type-specific JSON object. See payload schemas for the shape of each event type." }
+  }
+}
+```
+
+Per-event-type payload schemas (one for each v1 event type — kept as `additionalProperties: true` at the parent level so future fields don't break clients):
+
+```json
+"BacktestStartedPayload":   { "type": "object", "properties": { "strategy_type": { "type": "string" } } },
+"BacktestCompletedPayload": { "type": "object", "properties": { "total_pnl": { "type": "string" }, "trade_count": { "type": "integer" } } },
+"BacktestFailedPayload":    { "type": "object", "properties": { "error": { "type": "string" } }, "required": ["error"] },
+"RunStartedPayload":        { "type": "object", "properties": { "strategy_type": { "type": "string" } } },
+"RunPausedPayload":         { "type": "object", "additionalProperties": true },
+"RunResumedPayload":        { "type": "object", "additionalProperties": true },
+"RunStoppedPayload":        { "type": "object", "properties": { "reason": { "type": "string" } } },
+"RunStopLossPayload":       { "type": "object", "properties": { "z_score": { "type": "number" }, "pnl": { "type": "string" } } }
+```
+
+A single `EventType` enum:
+
+```json
+"EventType": {
+  "type": "string",
+  "enum": [
+    "backtest.started",
+    "backtest.completed",
+    "backtest.failed",
+    "run.started",
+    "run.paused",
+    "run.resumed",
+    "run.stopped",
+    "run.stop_loss"
+  ]
+}
+```
+
+A new `notification_log` schema documenting the persistence layer (referenced from the description of `Last-Event-ID`):
+
+```json
+"NotificationLogEntry": {
+  "type": "object",
+  "description": "Internal. Persisted copy of an Event used for Last-Event-ID replay. Not exposed via the REST API.",
+  "properties": {
+    "id":         { "type": "string", "format": "uuid" },
+    "user_id":    { "type": "string" },
+    "type":       { "$ref": "#/components/schemas/EventType" },
+    "run_id":     { "type": "string", "format": "uuid", "nullable": true },
+    "backtest_id":{ "type": "string", "format": "uuid", "nullable": true },
+    "created_at": { "type": "string", "format": "date-time" },
+    "payload":    { "type": "object" }
+  }
+}
+```
+
+## README documentation
+
+Add a new section to `README.md` under `### strategy-server`, immediately after `#### OpenAPI specification`. The section should contain:
+
+1. **Endpoint table row** for the new WS endpoint (added to the existing HTTP Endpoints table).
+2. **Flag row** for `--notifications-enabled` (default true).
+3. **A new `#### Notification WebSocket` subsection** with:
+   - One-paragraph description of what the endpoint does and which events it carries.
+   - A complete, runnable client example. The example MUST use the same `coder/websocket` library the project already depends on (so it is copy-pasteable from a `go run file.go` test) and MUST show:
+     - Building the URL with query params (including `Last-Event-ID`).
+     - Sending the `Authorization: ApiKey <key>` header.
+     - Reading frames in a loop, JSON-decoding into a typed `notifications.Event`, and dispatching on `evt.Type`.
+     - Reconnect logic that stores the most recent `Event.ID` and reconnects with `Last-Event-ID=<id>`.
+   - A short `websocat` one-liner for ad-hoc debugging (it ships in most Linux distros and is the easiest way to confirm the endpoint is live).
+   - A note that MCP clients receive the same events as MCP `notifications/event` messages and do not need to connect to the WS directly.
+
+The example Go code MUST compile against the public `notifications` package (i.e. import `github.com/dora-network/bond-trading-strategies/notifications`), so the package's exported types and constructors are the source of truth that the README documents.
+
 ## Rollout
 
 - `strategy-server` gets a new flag `--notifications-enabled` (default true) so the WS endpoint can be turned off without rebuilding if a problem surfaces.
