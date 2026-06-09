@@ -842,6 +842,16 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if doraUserID, ok := doraUserIDFromContext(r.Context()); ok {
+		h.publishEvent(r.Context(), notifications.Event{
+			Type:       notifications.EventBacktestStarted,
+			UserID:     doraUserID,
+			BacktestID: detail.ID.String(),
+			Timestamp:  time.Now().UTC(),
+			Payload:    map[string]any{"strategy_type": detail.StrategyType},
+		})
+	}
+
 	go h.awaitBacktestResult(id, resultCh, batcher) //nolint:contextcheck,gosec // backtest outlives the HTTP request context
 	writeJSON(w, http.StatusAccepted, detail)
 }
@@ -861,36 +871,70 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 	}
 	completedAt := now
 	detail.CompletedAt = &completedAt
+	var evtType notifications.EventType
+	var evtErr string
 	switch r := result.(type) {
 	case types.ErrorResult:
 		detail.Status = "failed"
 		detail.Error = r.Err.Error()
+		evtType = notifications.EventBacktestFailed
+		evtErr = r.Err.Error()
 	case meanreversion.BacktestResult:
 		detail.Status = "completed"
 		raw, err := newBacktestResult(r)
 		if err != nil {
 			detail.Status = "failed"
 			detail.Error = err.Error()
+			evtType = notifications.EventBacktestFailed
+			evtErr = err.Error()
 			break
 		}
 		detail.Result = raw
+		evtType = notifications.EventBacktestCompleted
 	case copytrading.BacktestResult:
 		detail.Status = "completed"
 		raw, err := newCopyTradingBacktestResult(r)
 		if err != nil {
 			detail.Status = "failed"
 			detail.Error = err.Error()
+			evtType = notifications.EventBacktestFailed
+			evtErr = err.Error()
 			break
 		}
 		detail.Result = raw
+		evtType = notifications.EventBacktestCompleted
 	default:
 		detail.Status = "failed"
 		detail.Error = fmt.Sprintf("unknown backtest result type %T", result)
+		evtType = notifications.EventBacktestFailed
+		evtErr = detail.Error
 	}
 	h.mu.Unlock()
 
+	// TODO: replace context.Background() with a context scoped to the
+	// backtest's lifetime. The backtest is launched via
+	// service.RunBacktest, which uses s.baseCtx (the signal-cancelled
+	// server context set in cmd/strategy-server/main.go). Capturing
+	// that ctx at backtest-creation time and threading it through to
+	// this goroutine is the right fix; r.Context() is already
+	// cancelled by the time the backtest finishes.
 	if err := h.saveBacktest(context.Background(), detail); err != nil {
 		slog.Error("failed to save backtest result", "err", err, "backtest_id", id)
+	}
+
+	if evtType != "" && detail.DORAUserID != "" {
+		evt := notifications.Event{
+			Type:       evtType,
+			UserID:     detail.DORAUserID,
+			BacktestID: detail.ID.String(),
+			Timestamp:  time.Now().UTC(),
+		}
+		if evtType == notifications.EventBacktestCompleted {
+			evt.Payload = map[string]any{"strategy_type": detail.StrategyType}
+		} else {
+			evt.Payload = map[string]any{"error": evtErr}
+		}
+		h.publishEvent(h.service.BaseContext(), evt)
 	}
 
 	// Stop the batching writer's background ticker. The strategy engine
@@ -1161,10 +1205,17 @@ func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid
 	h.mu.Unlock()
 
 	if detail, ok := h.backtests[id]; ok {
-		if err := h.saveBacktest(context.Background(), detail); err != nil {
+		if err := h.saveBacktest(r.Context(), detail); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save backtest: %v", err))
 			return
 		}
+		h.publishEvent(r.Context(), notifications.Event{
+			Type:       notifications.EventBacktestFailed,
+			UserID:     doraUserID,
+			BacktestID: detail.ID.String(),
+			Timestamp:  time.Now().UTC(),
+			Payload:    map[string]any{"error": "cancelled"},
+		})
 	}
 
 	h.getBacktestMetadata(w, r, id)
@@ -1246,6 +1297,14 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	h.runs[id] = detail
 	h.mu.Unlock()
 
+	h.publishEvent(r.Context(), notifications.Event{
+		Type:      notifications.EventRunStarted,
+		UserID:    doraUserID,
+		RunID:     detail.ID.String(),
+		Timestamp: time.Now().UTC(),
+		Payload:   map[string]any{"strategy_type": detail.StrategyType},
+	})
+
 	writeJSON(w, http.StatusCreated, detail)
 }
 
@@ -1317,6 +1376,12 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
 		return
 	}
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunStopped,
+		UserID:    doraUserID,
+		RunID:     detail.ID.String(),
+		Timestamp: time.Now().UTC(),
+	})
 	h.getRun(w, ctx, id)
 }
 
@@ -1361,6 +1426,12 @@ func (h *Handler) pauseRun(w http.ResponseWriter, ctx context.Context, id uuid.U
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
 		return
 	}
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunPaused,
+		UserID:    doraUserID,
+		RunID:     detail.ID.String(),
+		Timestamp: time.Now().UTC(),
+	})
 	h.getRun(w, ctx, id)
 }
 
@@ -1420,6 +1491,12 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
 		return
 	}
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunResumed,
+		UserID:    doraUserID,
+		RunID:     detail.ID.String(),
+		Timestamp: time.Now().UTC(),
+	})
 	h.getRun(w, ctx, id)
 }
 
