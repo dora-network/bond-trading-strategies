@@ -63,3 +63,60 @@ func TestHandler_DeliversLiveEvents(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &got))
 	assert.Equal(t, evt.ID, got.ID)
 }
+
+func TestHandler_FiltersByTypes(t *testing.T) {
+	bus := notifications.NewBus(&captureLog{}, notifications.NewHub())
+	h := notifications.NewHandler(bus, func(_ context.Context) (string, error) {
+		return "user-1", nil
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	wsURL := "ws" + strings.TrimPrefix(u.String(), "http") + "/v1/notifications/ws?types=run.started"
+
+	header := http.Header{}
+	header.Set("Authorization", "ApiKey test-key")
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dialCancel()
+	//nolint:bodyclose // coder/websocket docs: caller never closes resp.Body
+	conn, _, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{HTTPHeader: header})
+	require.NoError(t, err)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	// Use a long-lived background context for the live session so that
+	// short read timeouts do not cancel the server's request context.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	filtered := notifications.Event{
+		ID:        uuid.NewString(),
+		Type:      notifications.EventBacktestStarted,
+		UserID:    "user-1",
+		Timestamp: time.Now().UTC(),
+	}
+	require.NoError(t, bus.Publish(ctx, filtered))
+
+	filteredCh := make(chan struct{}, 1)
+	go func() {
+		_, _, _ = conn.Read(ctx)
+		filteredCh <- struct{}{}
+	}()
+	select {
+	case <-filteredCh:
+		t.Fatal("client received filtered event")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	allowed := notifications.Event{
+		ID:        uuid.NewString(),
+		Type:      notifications.EventRunStarted,
+		UserID:    "user-1",
+		Timestamp: time.Now().UTC(),
+	}
+	require.NoError(t, bus.Publish(ctx, allowed))
+
+	select {
+	case <-filteredCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not receive allowed event")
+	}
+}
