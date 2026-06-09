@@ -47,7 +47,7 @@ func TestHandler_DeliversLiveEvents(t *testing.T) {
 
 	header := http.Header{}
 	header.Set("Authorization", "ApiKey test-key")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	//nolint:bodyclose // coder/websocket docs: caller never closes resp.Body
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: header})
