@@ -255,10 +255,10 @@ func main() {
 
 // notificationsRouter dispatches /v1/notifications/ws to a sub-mux that
 // owns the WebSocket route, and falls through to fallback for every other
-// path. The sub-mux only registers the WS endpoint, so an unmatched
-// request is also a 404 — the router treats that as a fall-through rather
-// than letting the sub-mux emit its own 404, which would shadow the
-// REST handler's responses for unrelated paths.
+// path. The sub-mux only registers the WS endpoint, so the router
+// forwards the request directly without an intermediate response
+// recorder: the recorder would shadow http.Hijacker and break
+// websocket.Accept.
 type notificationsRouter struct {
 	fallback http.Handler
 	sub      *http.ServeMux
@@ -276,25 +276,7 @@ func (r notificationsRouter) ServeHTTP(w http.ResponseWriter, req *http.Request)
 	if ctx, ok := authContextFromHeader(req.Context(), authHeader); ok {
 		req = req.WithContext(ctx)
 	}
-	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	r.sub.ServeHTTP(rec, req)
-	if rec.status == http.StatusNotFound {
-		r.fallback.ServeHTTP(w, req)
-	}
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status      int
-	wroteHeader bool
-}
-
-func (s *statusRecorder) WriteHeader(code int) {
-	if !s.wroteHeader {
-		s.status = code
-		s.wroteHeader = true
-	}
-	s.ResponseWriter.WriteHeader(code)
+	r.sub.ServeHTTP(w, req)
 }
 
 // authContextFromHeader returns a context that carries the credentials
