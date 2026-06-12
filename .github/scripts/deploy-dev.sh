@@ -169,13 +169,12 @@ require_secret "$ENCRYPTION_KEY_SECRET_NAME"
 
 if ! truthy "$MIGRATE_ONLY"; then
 	require_env DORA_API_KEY
-	require_env FRED_API_KEY
 	require_env ENCRYPTION_KEY
 	require_service "$MCP_SERVICE_NAME"
 	require_service "$PRICE_DAEMON_SERVICE_NAME"
 
 	put_secret_value "$DORA_API_KEY_SECRET_NAME" "$DORA_API_KEY"
-	put_secret_value "$FRED_API_KEY_SECRET_NAME" "$FRED_API_KEY"
+	put_secret_value "$FRED_API_KEY_SECRET_NAME" "${FRED_API_KEY:-not-configured}"
 	put_secret_value "$ENCRYPTION_KEY_SECRET_NAME" "$ENCRYPTION_KEY"
 fi
 

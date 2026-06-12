@@ -64,6 +64,7 @@ func main() {
 	flag.Parse()
 
 	setLogLevel(*logLevel)
+	*fredAPIKey = optionalEnvValue(*fredAPIKey)
 	if *dbURL == "" {
 		fmt.Fprintln(os.Stderr, "error: -db-url (or DATABASE_URL) is required")
 		flag.Usage()
@@ -371,6 +372,13 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func optionalEnvValue(value string) string {
+	if value == "not-configured" {
+		return ""
+	}
+	return value
 }
 
 func envOrBool(key string, fallback bool) bool {

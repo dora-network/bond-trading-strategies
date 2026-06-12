@@ -46,6 +46,8 @@ func main() {
 	doraAPIKey := flag.StringP("dora-api-key", "k", envOr("DORA_API_KEY", ""), "DORA API key")
 	flag.Parse()
 
+	*fredKey = optionalEnvValue(*fredKey)
+
 	if *doraAPIKey == "" {
 		fmt.Fprintln(os.Stderr, "error: --dora-api-key (or DORA_API_KEY) is required")
 		flag.Usage()
@@ -86,4 +88,11 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func optionalEnvValue(value string) string {
+	if value == "not-configured" {
+		return ""
+	}
+	return value
 }
