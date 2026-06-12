@@ -4,6 +4,7 @@ set -euo pipefail
 AWS_REGION="${AWS_REGION:-us-east-1}"
 REPOSITORY="${REPOSITORY:-dora-bond-trading-strategies}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse HEAD)}"
+DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 
 token_file=""
 
@@ -50,6 +51,7 @@ token_file="$(mktemp /tmp/bond-trading-github-token.XXXXXX)"
 github_token >"$token_file"
 
 docker build \
+	--platform "$DOCKER_PLATFORM" \
 	--secret id=github_token,src="$token_file" \
 	-t "$IMAGE_URI" \
 	.

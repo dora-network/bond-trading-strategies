@@ -11,6 +11,7 @@ PROJECT_NAME="${PROJECT_NAME:-dora-bond-trading}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 STRATEGY_BASE_URL="${STRATEGY_BASE_URL:-https://strategy-dev.dora.co}"
 MCP_BASE_URL="${MCP_BASE_URL:-https://mcp-strategy-dev.dora.co}"
+MIGRATE_ONLY="${MIGRATE_ONLY:-false}"
 
 require_env() {
 	local name="$1"
@@ -18,6 +19,13 @@ require_env() {
 		echo "${name} is required" >&2
 		exit 1
 	fi
+}
+
+truthy() {
+	case "${1:-}" in
+		1 | true | TRUE | yes | YES) return 0 ;;
+		*) return 1 ;;
+	esac
 }
 
 put_secret_value() {
@@ -141,9 +149,6 @@ run_migration() {
 }
 
 require_env IMAGE_TAG
-require_env DORA_API_KEY
-require_env FRED_API_KEY
-require_env ENCRYPTION_KEY
 
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
@@ -157,16 +162,22 @@ FRED_API_KEY_SECRET_NAME="${PROJECT_NAME}/${ENVIRONMENT}/fred-api-key"
 ENCRYPTION_KEY_SECRET_NAME="${PROJECT_NAME}/${ENVIRONMENT}/encryption-key"
 
 require_service "$STRATEGY_SERVICE_NAME"
-require_service "$MCP_SERVICE_NAME"
-require_service "$PRICE_DAEMON_SERVICE_NAME"
 require_secret "$DATABASE_URL_SECRET_NAME"
 require_secret "$DORA_API_KEY_SECRET_NAME"
 require_secret "$FRED_API_KEY_SECRET_NAME"
 require_secret "$ENCRYPTION_KEY_SECRET_NAME"
 
-put_secret_value "$DORA_API_KEY_SECRET_NAME" "$DORA_API_KEY"
-put_secret_value "$FRED_API_KEY_SECRET_NAME" "$FRED_API_KEY"
-put_secret_value "$ENCRYPTION_KEY_SECRET_NAME" "$ENCRYPTION_KEY"
+if ! truthy "$MIGRATE_ONLY"; then
+	require_env DORA_API_KEY
+	require_env FRED_API_KEY
+	require_env ENCRYPTION_KEY
+	require_service "$MCP_SERVICE_NAME"
+	require_service "$PRICE_DAEMON_SERVICE_NAME"
+
+	put_secret_value "$DORA_API_KEY_SECRET_NAME" "$DORA_API_KEY"
+	put_secret_value "$FRED_API_KEY_SECRET_NAME" "$FRED_API_KEY"
+	put_secret_value "$ENCRYPTION_KEY_SECRET_NAME" "$ENCRYPTION_KEY"
+fi
 
 DATABASE_URL_SECRET_ARN="$(secret_arn "$DATABASE_URL_SECRET_NAME")"
 DORA_API_KEY_SECRET_ARN="$(secret_arn "$DORA_API_KEY_SECRET_NAME")"
@@ -333,6 +344,11 @@ migrate_containers="$(
 
 migration_task_definition="$(register_task_definition "${PROJECT_NAME}-migrate-${ENVIRONMENT}" 256 512 "$migrate_containers")"
 run_migration "$migration_task_definition"
+
+if truthy "$MIGRATE_ONLY"; then
+	echo "Skipping service deployment because MIGRATE_ONLY=${MIGRATE_ONLY}"
+	exit 0
+fi
 
 strategy_task_definition="$(register_task_definition "${PROJECT_NAME}-strategy-${ENVIRONMENT}" 1024 2048 "$strategy_containers")"
 mcp_task_definition="$(register_task_definition "${PROJECT_NAME}-mcp-${ENVIRONMENT}" 512 1024 "$mcp_containers")"
