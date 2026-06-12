@@ -31,6 +31,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 
 	mcpserver "github.com/dora-network/bond-trading-strategies/mcp"
@@ -75,7 +76,7 @@ func main() {
 	}()
 
 	log.Printf("bond-trading-strategies MCP server listening on %s (base URL: %s), strategy-server URL: %s", *addr, *baseURL, *strategyBaseURL)
-	if err := sseSrv.Start(*addr); err != nil {
+	if err := http.ListenAndServe(*addr, mcpserver.NewHTTPHandlerFromSSE(sseSrv)); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }

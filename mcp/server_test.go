@@ -3,6 +3,7 @@ package mcpserver_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,6 +25,34 @@ import (
 
 	mcpserver "github.com/dora-network/bond-trading-strategies/mcp"
 )
+
+func TestHTTPHandlerHealth(t *testing.T) {
+	strategySrv := newStrategyMockServer(t)
+	handler := mcpserver.NewHTTPHandler("", "test-api-key", strategySrv.URL, "http://example.test")
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	assert.JSONEq(t, `{"ok":true}`, rec.Body.String())
+}
+
+func TestHTTPHandlerHealthRejectsNonGet(t *testing.T) {
+	strategySrv := newStrategyMockServer(t)
+	handler := mcpserver.NewHTTPHandler("", "test-api-key", strategySrv.URL, "http://example.test")
+
+	req := httptest.NewRequest(http.MethodPost, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	require.Equal(t, "GET", rec.Header().Get("Allow"))
+	body, err := io.ReadAll(rec.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "method not allowed")
+}
 
 func newTestClient(t *testing.T) *mcptest.Server {
 	t.Helper()
