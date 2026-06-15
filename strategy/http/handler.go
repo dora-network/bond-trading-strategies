@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
@@ -843,8 +844,8 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 
 	// Inject the user's API key into the strategy so it can authenticate
 	// with DORA when resolving the asset ID for the order book.
-	info, _ := authFromContext(r.Context())
-	if info.APIKey != "" {
+	info, _ := authctx.AuthInfoFromContext(r.Context())
+	if info != nil && info.APIKey != "" {
 		if withClient, ok := strat.(*meanreversion.Strategy); ok {
 			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))
 			withClientOpts(withClient)
@@ -1287,8 +1288,8 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inject the user's API key into the strategy so it can authenticate with DORA.
-	info, _ := authFromContext(r.Context())
-	if info.APIKey != "" {
+	info, _ := authctx.AuthInfoFromContext(r.Context())
+	if info != nil && info.APIKey != "" {
 		switch withClient := strat.(type) {
 		case *meanreversion.Strategy:
 			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))(withClient)
@@ -1298,7 +1299,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var encryptedAPIKey []byte
-	if info.APIKey != "" && len(h.encryptionKey) > 0 {
+	if info != nil && info.APIKey != "" && len(h.encryptionKey) > 0 {
 		encryptedAPIKey, err = encryptAPIKey([]byte(info.APIKey), h.encryptionKey)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("encrypt api key: %v", err))

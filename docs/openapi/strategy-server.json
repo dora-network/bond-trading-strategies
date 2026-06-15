@@ -491,7 +491,7 @@
         "tags": ["notifications"],
         "operationId": "subscribeNotifications",
         "summary": "Open a WebSocket connection for real-time lifecycle notifications",
-        "description": "Upgrades the HTTP connection to a WebSocket. The server authenticates using the standard Authorization header, resolves the DORA user, and streams JSON-encoded Event objects as text frames. Optional query params: Last-Event-ID (UUIDv7) replays events from the log; types (comma-separated) filters by EventType. Heartbeat is WS-level ping/pong every 30s.",
+        "description": "Upgrades the HTTP connection to a WebSocket. The server authenticates using the standard Authorization header (ApiKey <key> or Bearer <token>), resolves the DORA user, and streams JSON-encoded Event objects as text frames. Clients that cannot set request headers may alternatively pass `x-api-key` as a query parameter; the header takes precedence when both are present. Optional query params: Last-Event-ID (UUIDv7) replays events from the log; types (comma-separated) filters by EventType. Heartbeat is WS-level ping/pong every 30s.",
         "security": [{ "ApiKeyAuth": [] }],
         "parameters": [
           {
@@ -507,6 +507,13 @@
             "required": false,
             "schema": { "type": "string" },
             "description": "Comma-separated whitelist of EventType values. Default: all."
+          },
+          {
+            "name": "x-api-key",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Alternative to the Authorization header for clients that cannot set request headers on the WebSocket handshake. Ignored when the Authorization header is present."
           }
         ],
         "responses": {

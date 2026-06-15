@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/ratelimit"
@@ -122,7 +123,7 @@ func main() {
 	tradeStream := streams.NewTradeStream()
 	if *apiKey != "" {
 		doraClient := strategyhttp.NewDORAClient()
-		obCtx := strategyhttp.WithAPIKey(ctx, *apiKey)
+		obCtx := authctx.WithAPIKey(ctx, *apiKey)
 		orderbooks, err := doraClient.ListOrderBooks(obCtx)
 		if err != nil {
 			slog.Error("failed to list order books for trade stream", "err", err)
@@ -214,7 +215,7 @@ func main() {
 		wsSubMux.Handle("/v1/notifications/ws", notifications.NewHandler(
 			notifier,
 			func(ctx context.Context) (string, error) {
-				if _, ok := strategyhttp.AuthInfoFromContext(ctx); !ok {
+				if _, ok := authctx.AuthInfoFromContext(ctx); !ok {
 					return "", errors.New("missing auth info in context")
 				}
 				client := strategyhttp.NewDORAClient()
@@ -300,14 +301,18 @@ func (r notificationsRouter) ServeHTTP(w http.ResponseWriter, req *http.Request)
 		r.fallback.ServeHTTP(w, req)
 		return
 	}
-	// Parse the Authorization header and put it into the request context
-	// so the WebSocket handler's ResolveUserID callback can read it via
-	// strategyhttp.AuthInfoFromContext.
-	authHeader := req.Header.Get("Authorization")
-	if ctx, ok := authContextFromHeader(req.Context(), authHeader); ok {
-		req = req.WithContext(ctx)
+	// Populate the request context with credentials so the WebSocket
+	// handler's ResolveUserID callback can read them via
+	// authctx.AuthInfoFromContext. The Authorization header takes
+	// precedence; the x-api-key query parameter is a fallback for
+	// clients that cannot set request headers on the WS handshake.
+	ctx := req.Context()
+	if newCtx, ok := authContextFromHeader(ctx, req.Header.Get("Authorization")); ok {
+		ctx = newCtx
+	} else if key := req.URL.Query().Get("x-api-key"); key != "" {
+		ctx = authctx.WithAPIKey(ctx, key)
 	}
-	r.sub.ServeHTTP(w, req)
+	r.sub.ServeHTTP(w, req.WithContext(ctx))
 }
 
 // authContextFromHeader returns a context that carries the credentials
@@ -321,13 +326,13 @@ func authContextFromHeader(ctx context.Context, authHeader string) (context.Cont
 		if key == "" {
 			return ctx, false
 		}
-		return strategyhttp.WithAPIKey(ctx, key), true
+		return authctx.WithAPIKey(ctx, key), true
 	case strings.HasPrefix(authHeader, "Bearer "):
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		if token == "" {
 			return ctx, false
 		}
-		return strategyhttp.WithBearerToken(ctx, token), true
+		return authctx.WithBearerToken(ctx, token), true
 	}
 	return ctx, false
 }

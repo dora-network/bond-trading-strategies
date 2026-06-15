@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -195,7 +196,7 @@ func TestLiveDORAClient_ListBotUsers(t *testing.T) {
 			}
 			client := &liveDORAClient{client: doraclient.NewAPIClient(cfg)}
 
-			ctx := context.WithValue(context.Background(), authContextKey{}, AuthInfo{APIKey: "test-key"})
+			ctx := authctx.WithAPIKey(context.Background(), "test-key")
 
 			got, err := client.ListBotUsers(ctx)
 			require.NoError(t, err)

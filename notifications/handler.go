@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/coder/websocket"
+	"github.com/dora-network/bond-trading-strategies/authctx"
 )
 
 // ResolveUserID validates the request and returns the DORA user ID the
@@ -41,10 +42,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "ApiKey ") && !strings.HasPrefix(authHeader, "Bearer ") {
-		http.Error(w, "missing or unsupported Authorization header", http.StatusUnauthorized)
-		return
+	if _, ok := authctx.AuthInfoFromContext(r.Context()); !ok {
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "ApiKey ") && !strings.HasPrefix(authHeader, "Bearer ") {
+			http.Error(w, "missing or unsupported Authorization header", http.StatusUnauthorized)
+			return
+		}
 	}
 	userID, err := h.resolveUser(r.Context())
 	if err != nil {
