@@ -14,7 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/dora-network/bond-trading-strategies/authctx"
+	"github.com/dora-network/bond-trading-strategies/cors"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/ratelimit"
@@ -207,12 +209,13 @@ func main() {
 	wrappedHandler := rl.Middleware(handlerImpl)
 
 	if *corsAllowedOrigins != "" {
-		wrappedHandler = corsMiddleware(*corsAllowedOrigins, wrappedHandler)
+		wrappedHandler = cors.New(*corsAllowedOrigins)(wrappedHandler)
 	}
 
 	if notifier != nil {
 		wsSubMux := http.NewServeMux()
-		wsSubMux.Handle("/v1/notifications/ws", notifications.NewHandler(
+		wsPatterns, wsAllowAll := cors.OriginPatterns(*corsAllowedOrigins)
+		var wsHandler http.Handler = notifications.NewHandler(
 			notifier,
 			func(ctx context.Context) (string, error) {
 				if _, ok := authctx.AuthInfoFromContext(ctx); !ok {
@@ -222,7 +225,15 @@ func main() {
 				return client.GetUserID(ctx)
 			},
 			notifications.WithHandlerLogger(log),
-		))
+			notifications.WithAcceptOptions(websocket.AcceptOptions{
+				OriginPatterns:     wsPatterns,
+				InsecureSkipVerify: wsAllowAll,
+			}),
+		)
+		if *corsAllowedOrigins != "" {
+			wsHandler = cors.New(*corsAllowedOrigins)(wsHandler)
+		}
+		wsSubMux.Handle("/v1/notifications/ws", wsHandler)
 		wrappedHandler = notificationsRouter{fallback: wrappedHandler, sub: wsSubMux}
 	}
 
@@ -335,47 +346,6 @@ func authContextFromHeader(ctx context.Context, authHeader string) (context.Cont
 		return authctx.WithBearerToken(ctx, token), true
 	}
 	return ctx, false
-}
-
-// corsMiddleware returns an HTTP handler that adds CORS headers. origins is a
-// comma-separated list; a single "*" allows any origin.
-func corsMiddleware(origins string, next http.Handler) http.Handler {
-	allowed := make(map[string]bool)
-	allowAll := false
-	for _, o := range strings.Split(origins, ",") {
-		o = strings.TrimSpace(o)
-		if o == "" {
-			continue
-		}
-		if o == "*" {
-			allowAll = true
-		}
-		allowed[o] = true
-	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		headers := w.Header()
-
-		if allowAll {
-			headers.Set("Access-Control-Allow-Origin", "*")
-		} else if allowed[origin] {
-			headers.Set("Access-Control-Allow-Origin", origin)
-			headers.Add("Vary", "Origin")
-		}
-
-		headers.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		headers.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		headers.Set("Access-Control-Allow-Credentials", "true")
-		headers.Set("Access-Control-Max-Age", "86400")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
 }
 
 func setLogLevel(flagValue string) {

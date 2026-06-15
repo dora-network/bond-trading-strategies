@@ -120,3 +120,62 @@ func TestHandler_FiltersByTypes(t *testing.T) {
 		t.Fatal("client did not receive allowed event")
 	}
 }
+
+func TestHandler_AcceptsConfiguredOriginPattern(t *testing.T) {
+	bus := notifications.NewBus(&captureLog{}, notifications.NewHub())
+	h := notifications.NewHandler(
+		bus,
+		func(_ context.Context) (string, error) { return "user-1", nil },
+		notifications.WithAcceptOptions(websocket.AcceptOptions{
+			OriginPatterns: []string{"app.example.com"},
+		}),
+	)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	wsURL := "ws" + strings.TrimPrefix(u.String(), "http") + "/v1/notifications/ws"
+
+	header := http.Header{}
+	header.Set("Authorization", "ApiKey test-key")
+	header.Set("Origin", "https://app.example.com")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	//nolint:bodyclose // coder/websocket docs: caller never closes resp.Body
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: header})
+	require.NoError(t, err)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	evt := notifications.Event{ID: uuid.NewString(), Type: notifications.EventRunStarted, UserID: "user-1", Timestamp: time.Now().UTC()}
+	require.NoError(t, bus.Publish(ctx, evt))
+
+	_, data, err := conn.Read(ctx)
+	require.NoError(t, err)
+	var got notifications.Event
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, evt.ID, got.ID)
+}
+
+func TestHandler_AcceptsInsecureSkipVerify(t *testing.T) {
+	bus := notifications.NewBus(&captureLog{}, notifications.NewHub())
+	h := notifications.NewHandler(
+		bus,
+		func(_ context.Context) (string, error) { return "user-1", nil },
+		notifications.WithAcceptOptions(websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		}),
+	)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	wsURL := "ws" + strings.TrimPrefix(u.String(), "http") + "/v1/notifications/ws"
+
+	header := http.Header{}
+	header.Set("Authorization", "ApiKey test-key")
+	header.Set("Origin", "https://anywhere.example.com")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	//nolint:bodyclose // coder/websocket docs: caller never closes resp.Body
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: header})
+	require.NoError(t, err)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+}

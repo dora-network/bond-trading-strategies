@@ -18,9 +18,10 @@ type ResolveUserID func(ctx context.Context) (string, error)
 
 // Handler serves GET /v1/notifications/ws.
 type Handler struct {
-	notifier    Notifier
-	resolveUser ResolveUserID
-	log         *slog.Logger
+	notifier      Notifier
+	resolveUser   ResolveUserID
+	log           *slog.Logger
+	acceptOptions websocket.AcceptOptions
 }
 
 const replayLimit = 1000
@@ -36,6 +37,16 @@ func NewHandler(n Notifier, resolve ResolveUserID, opts ...HandlerOption) *Handl
 type HandlerOption func(*Handler)
 
 func WithHandlerLogger(l *slog.Logger) HandlerOption { return func(h *Handler) { h.log = l } }
+
+// WithAcceptOptions configures the WebSocket accept options used
+// when accepting the connection. Callers that need to allow
+// cross-origin WebSocket upgrades (e.g. browser clients at a
+// different origin) should set OriginPatterns or InsecureSkipVerify
+// here. An empty AcceptOptions (the default) rejects all
+// cross-origin upgrades via the coder/websocket library's CSRF check.
+func WithAcceptOptions(opts websocket.AcceptOptions) HandlerOption {
+	return func(h *Handler) { h.acceptOptions = opts }
+}
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -55,7 +66,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
+	conn, err := websocket.Accept(w, r, &h.acceptOptions)
 	if err != nil {
 		h.log.Error("websocket accept failed", "err", err, "user_id", userID)
 		return
