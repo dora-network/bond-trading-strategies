@@ -212,7 +212,13 @@ func TestHandler_StreamSingle(t *testing.T) {
 	t.Parallel()
 
 	t.Run("successful stream", func(t *testing.T) {
-		fakeStore := &candlesfakes.FakeCandleStore{}
+		saveDone := make(chan struct{})
+		fakeStore := &candlesfakes.FakeCandleStore{
+			SaveCandlesStub: func(ctx context.Context, entries []candles.StreamCandlesEntry) error {
+				close(saveDone)
+				return nil
+			},
+		}
 		wg := sync.WaitGroup{}
 		wg.Add(1)
 
@@ -244,10 +250,17 @@ func TestHandler_StreamSingle(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		s := candles.NewStoreSubscriber(fakeStore, h.Subscribe)
+		subscribed := make(chan struct{})
+		s := candles.NewStoreSubscriber(fakeStore, func(requestID uuid.UUID) (chan []candles.StreamCandlesEntry, error) {
+			ch, err := h.Subscribe(requestID)
+			close(subscribed)
+			return ch, err
+		})
 		go func() {
 			_ = s.Start(ctx)
 		}()
+		<-subscribed
+
 		streamErr := make(chan error, 1)
 		go func() {
 			streamErr <- h.StreamSingle(ctx, "book-123")
@@ -261,6 +274,7 @@ func TestHandler_StreamSingle(t *testing.T) {
 		require.ErrorAs(t, err, &closeErr)
 		assert.Equal(t, websocket.StatusNormalClosure, closeErr.Code)
 
+		<-saveDone
 		assert.Equal(t, 1, fakeStore.GetLastTimestampCallCount())
 		assert.GreaterOrEqual(t, fakeStore.SaveCandlesCallCount(), 1)
 	})
