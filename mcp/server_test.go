@@ -30,7 +30,7 @@ func TestHTTPHandlerHealth(t *testing.T) {
 	strategySrv := newStrategyMockServer(t)
 	handler := mcpserver.NewHTTPHandler("", "test-api-key", strategySrv.URL, "http://example.test")
 
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -43,7 +43,7 @@ func TestHTTPHandlerHealthRejectsNonGet(t *testing.T) {
 	strategySrv := newStrategyMockServer(t)
 	handler := mcpserver.NewHTTPHandler("", "test-api-key", strategySrv.URL, "http://example.test")
 
-	req := httptest.NewRequest(http.MethodPost, "/healthz", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
