@@ -10,6 +10,12 @@
       "url": "http://localhost:8081"
     }
   ],
+  "tags": [
+    {
+      "name": "notifications",
+      "description": "Real-time lifecycle notifications delivered over a WebSocket."
+    }
+  ],
   "paths": {
     "/healthz": {
       "get": {
@@ -479,6 +485,46 @@
           "500": { "$ref": "#/components/responses/InternalError" }
         }
       }
+    },
+    "/v1/notifications/ws": {
+      "get": {
+        "tags": ["notifications"],
+        "operationId": "subscribeNotifications",
+        "summary": "Open a WebSocket connection for real-time lifecycle notifications",
+        "description": "Upgrades the HTTP connection to a WebSocket. The server authenticates using the standard Authorization header (ApiKey <key> or Bearer <token>), resolves the DORA user, and streams JSON-encoded Event objects as text frames. Clients that cannot set request headers may alternatively pass `x-api-key` as a query parameter; the header takes precedence when both are present. Optional query params: Last-Event-ID (UUIDv7) replays events from the log; types (comma-separated) filters by EventType. Heartbeat is WS-level ping/pong every 30s.",
+        "security": [{ "ApiKeyAuth": [] }],
+        "parameters": [
+          {
+            "name": "Last-Event-ID",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "Replay events with id > Last-Event-ID (UUIDv7). Capped at 1000 events or 24h, whichever is smaller."
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Comma-separated whitelist of EventType values. Default: all."
+          },
+          {
+            "name": "x-api-key",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Alternative to the Authorization header for clients that cannot set request headers on the WebSocket handshake. Ignored when the Authorization header is present."
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols — WebSocket upgrade succeeded"
+          },
+          "401": {
+            "description": "Missing or invalid Authorization header"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -842,6 +888,114 @@
             "required": ["config"]
           }
         ]
+      },
+      "EventType": {
+        "type": "string",
+        "enum": [
+          "backtest.started",
+          "backtest.completed",
+          "backtest.failed",
+          "run.started",
+          "run.paused",
+          "run.resumed",
+          "run.stopped",
+          "run.stop_loss"
+        ]
+      },
+      "BacktestStartedPayload": {
+        "type": "object",
+        "properties": {
+          "strategy_type": { "type": "string" }
+        }
+      },
+      "BacktestCompletedPayload": {
+        "type": "object",
+        "properties": {
+          "strategy_type": { "type": "string" }
+        }
+      },
+      "BacktestFailedPayload": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" }
+        },
+        "required": ["error"]
+      },
+      "RunStartedPayload": {
+        "type": "object",
+        "properties": {
+          "strategy_type": { "type": "string" }
+        }
+      },
+      "RunStoppedPayload": {
+        "type": "object",
+        "properties": {
+          "reason": { "type": "string" }
+        }
+      },
+      "RunStopLossPayload": {
+        "type": "object",
+        "properties": {
+          "z_score": { "type": "string" },
+          "pnl": { "type": "string" }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "description": "A single notification event delivered over the WebSocket. New event types (notably dora.*) may appear without a spec change — clients MUST tolerate unknown values of `type`.",
+        "required": ["id", "type", "user_id", "timestamp", "payload"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "UUIDv7. Monotonic; used as the Last-Event-ID replay cursor."
+          },
+          "type": { "$ref": "#/components/schemas/EventType" },
+          "user_id": {
+            "type": "string",
+            "description": "DORA user id the event belongs to."
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "backtest_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event timestamp in RFC3339, always UTC."
+          },
+          "payload": {
+            "type": "object",
+            "description": "Type-specific JSON object.",
+            "oneOf": [
+              { "$ref": "#/components/schemas/BacktestStartedPayload" },
+              { "$ref": "#/components/schemas/BacktestCompletedPayload" },
+              { "$ref": "#/components/schemas/BacktestFailedPayload" },
+              { "$ref": "#/components/schemas/RunStartedPayload" },
+              { "$ref": "#/components/schemas/RunStoppedPayload" },
+              { "$ref": "#/components/schemas/RunStopLossPayload" }
+            ]
+          }
+        }
+      },
+      "NotificationLogEntry": {
+        "type": "object",
+        "description": "Internal. Persisted copy of an Event used for Last-Event-ID replay. Not exposed via the REST API.",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "user_id": { "type": "string" },
+          "type": { "$ref": "#/components/schemas/EventType" },
+          "run_id": { "type": "string", "format": "uuid", "nullable": true },
+          "backtest_id": { "type": "string", "format": "uuid", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "payload": { "type": "object" }
+        }
       },
       "ErrorResponse": {
         "type": "object",

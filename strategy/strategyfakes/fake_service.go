@@ -12,6 +12,16 @@ import (
 )
 
 type FakeService struct {
+	BaseContextStub        func() context.Context
+	baseContextMutex       sync.RWMutex
+	baseContextArgsForCall []struct {
+	}
+	baseContextReturns struct {
+		result1 context.Context
+	}
+	baseContextReturnsOnCall map[int]struct {
+		result1 context.Context
+	}
 	PauseStrategyStub        func(context.Context, uuid.UUID) error
 	pauseStrategyMutex       sync.RWMutex
 	pauseStrategyArgsForCall []struct {
@@ -92,6 +102,59 @@ type FakeService struct {
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
+}
+
+func (fake *FakeService) BaseContext() context.Context {
+	fake.baseContextMutex.Lock()
+	ret, specificReturn := fake.baseContextReturnsOnCall[len(fake.baseContextArgsForCall)]
+	fake.baseContextArgsForCall = append(fake.baseContextArgsForCall, struct {
+	}{})
+	stub := fake.BaseContextStub
+	fakeReturns := fake.baseContextReturns
+	fake.recordInvocation("BaseContext", []interface{}{})
+	fake.baseContextMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeService) BaseContextCallCount() int {
+	fake.baseContextMutex.RLock()
+	defer fake.baseContextMutex.RUnlock()
+	return len(fake.baseContextArgsForCall)
+}
+
+func (fake *FakeService) BaseContextCalls(stub func() context.Context) {
+	fake.baseContextMutex.Lock()
+	defer fake.baseContextMutex.Unlock()
+	fake.BaseContextStub = stub
+}
+
+func (fake *FakeService) BaseContextReturns(result1 context.Context) {
+	fake.baseContextMutex.Lock()
+	defer fake.baseContextMutex.Unlock()
+	fake.BaseContextStub = nil
+	fake.baseContextReturns = struct {
+		result1 context.Context
+	}{result1}
+}
+
+func (fake *FakeService) BaseContextReturnsOnCall(i int, result1 context.Context) {
+	fake.baseContextMutex.Lock()
+	defer fake.baseContextMutex.Unlock()
+	fake.BaseContextStub = nil
+	if fake.baseContextReturnsOnCall == nil {
+		fake.baseContextReturnsOnCall = make(map[int]struct {
+			result1 context.Context
+		})
+	}
+	fake.baseContextReturnsOnCall[i] = struct {
+		result1 context.Context
+	}{result1}
 }
 
 func (fake *FakeService) PauseStrategy(arg1 context.Context, arg2 uuid.UUID) error {

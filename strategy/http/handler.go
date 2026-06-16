@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/authctx"
+	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
@@ -37,6 +39,11 @@ const (
 	// written, so a slow trickle of trades doesn't leave a tail of
 	// un-flushed rows in memory.
 	flushAfter = time.Second
+	// defaultStopLossObserverInterval is the polling cadence the
+	// handler uses to detect a stop-loss trigger on a running strategy.
+	// 1s is fine for human-facing notification latency and keeps the
+	// observer's per-run cost negligible.
+	defaultStopLossObserverInterval = time.Second
 )
 
 type Handler struct {
@@ -50,15 +57,37 @@ type Handler struct {
 	backtestStore      BacktestStore
 	tradesHistoryStore *copytrading.PGTradesHistoryStore
 	tradeStream        *streams.TradeStream
+	notifier           notifications.Notifier
 	encryptionKey      []byte // 32-byte AES-256 key for encrypting API keys at rest
 	mux                *http.ServeMux
 	authedMux          http.Handler
 	mu                 sync.RWMutex
 	backtests          map[uuid.UUID]*BacktestDetail
 	runs               map[uuid.UUID]*RunDetail
-	orderbookCache     map[string]DORAOrderBookSummary
-	assetCache         map[string]AssetInfo
-	cacheMu            sync.RWMutex
+	// runningStrategies maps a live run id to the strategy instance that
+	// was started for it, so the stop-loss observer can query the
+	// strategy's recorded trigger. Populated in createRun and
+	// resumePersistedRun; cleared in stopRun and by the observer itself
+	// when the run leaves the running state. Protected by mu.
+	runningStrategies map[uuid.UUID]strategycore.Strategy
+	// stopLossObservers cancels the per-run observer goroutine. Protected
+	// by mu.
+	stopLossObservers map[uuid.UUID]context.CancelFunc
+	// stopLossObserverInterval is the polling cadence for the stop-loss
+	// observer. Defaults to 1s; overridable for tests via
+	// WithStopLossObserverInterval.
+	stopLossObserverInterval time.Duration
+	orderbookCache           map[string]DORAOrderBookSummary
+	assetCache               map[string]AssetInfo
+	cacheMu                  sync.RWMutex
+}
+
+// stopLossObserver is the minimal surface the handler needs from a
+// running strategy to detect a stop-loss exit. *meanreversion.Strategy
+// implements it; copytrading does not yet (see the TODO in its
+// strategy.go).
+type stopLossObserver interface {
+	LastStopLossTrigger() (zScore, pnl decimal.Decimal, triggered bool)
 }
 
 type runStarter interface {
@@ -419,12 +448,15 @@ type MeanReversionTradeRecord struct {
 
 func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handler {
 	h := &Handler{
-		service:        service,
-		now:            time.Now,
-		backtests:      make(map[uuid.UUID]*BacktestDetail),
-		runs:           make(map[uuid.UUID]*RunDetail),
-		orderbookCache: make(map[string]DORAOrderBookSummary),
-		assetCache:     make(map[string]AssetInfo),
+		service:                  service,
+		now:                      time.Now,
+		backtests:                make(map[uuid.UUID]*BacktestDetail),
+		runs:                     make(map[uuid.UUID]*RunDetail),
+		runningStrategies:        make(map[uuid.UUID]strategycore.Strategy),
+		stopLossObservers:        make(map[uuid.UUID]context.CancelFunc),
+		stopLossObserverInterval: defaultStopLossObserverInterval,
+		orderbookCache:           make(map[string]DORAOrderBookSummary),
+		assetCache:               make(map[string]AssetInfo),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -514,6 +546,23 @@ func WithPricesHandler(pricesHandler *prices.Handler) func(*Handler) {
 func WithLogger(log *slog.Logger) func(*Handler) {
 	return func(h *Handler) {
 		h.log = log
+	}
+}
+
+// WithNotifier sets the notifications.Notifier used to publish lifecycle
+// events for backtests and runs. When unset, publishEvent is a no-op.
+func WithNotifier(n notifications.Notifier) func(*Handler) {
+	return func(h *Handler) {
+		h.notifier = n
+	}
+}
+
+// WithStopLossObserverInterval overrides the stop-loss observer poll
+// interval. The default is 1s; tests use a shorter interval to avoid
+// waiting.
+func WithStopLossObserverInterval(d time.Duration) func(*Handler) {
+	return func(h *Handler) {
+		h.stopLossObserverInterval = d
 	}
 }
 
@@ -795,10 +844,10 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 
 	// Inject the user's API key into the strategy so it can authenticate
 	// with DORA when resolving the asset ID for the order book.
-	authInfo, _ := authFromContext(r.Context())
-	if authInfo.APIKey != "" {
+	info, _ := authctx.AuthInfoFromContext(r.Context())
+	if info != nil && info.APIKey != "" {
 		if withClient, ok := strat.(*meanreversion.Strategy); ok {
-			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))
+			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))
 			withClientOpts(withClient)
 		}
 	}
@@ -832,6 +881,16 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if doraUserID, ok := doraUserIDFromContext(r.Context()); ok {
+		h.publishEvent(r.Context(), notifications.Event{
+			Type:       notifications.EventBacktestStarted,
+			UserID:     doraUserID,
+			BacktestID: detail.ID.String(),
+			Timestamp:  time.Now().UTC(),
+			Payload:    map[string]any{"strategy_type": detail.StrategyType},
+		})
+	}
+
 	go h.awaitBacktestResult(id, resultCh, batcher) //nolint:contextcheck,gosec // backtest outlives the HTTP request context
 	writeJSON(w, http.StatusAccepted, detail)
 }
@@ -851,36 +910,70 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 	}
 	completedAt := now
 	detail.CompletedAt = &completedAt
+	var evtType notifications.EventType
+	var evtErr string
 	switch r := result.(type) {
 	case types.ErrorResult:
 		detail.Status = "failed"
 		detail.Error = r.Err.Error()
+		evtType = notifications.EventBacktestFailed
+		evtErr = r.Err.Error()
 	case meanreversion.BacktestResult:
 		detail.Status = "completed"
 		raw, err := newBacktestResult(r)
 		if err != nil {
 			detail.Status = "failed"
 			detail.Error = err.Error()
+			evtType = notifications.EventBacktestFailed
+			evtErr = err.Error()
 			break
 		}
 		detail.Result = raw
+		evtType = notifications.EventBacktestCompleted
 	case copytrading.BacktestResult:
 		detail.Status = "completed"
 		raw, err := newCopyTradingBacktestResult(r)
 		if err != nil {
 			detail.Status = "failed"
 			detail.Error = err.Error()
+			evtType = notifications.EventBacktestFailed
+			evtErr = err.Error()
 			break
 		}
 		detail.Result = raw
+		evtType = notifications.EventBacktestCompleted
 	default:
 		detail.Status = "failed"
 		detail.Error = fmt.Sprintf("unknown backtest result type %T", result)
+		evtType = notifications.EventBacktestFailed
+		evtErr = detail.Error
 	}
 	h.mu.Unlock()
 
+	// TODO: replace context.Background() with a context scoped to the
+	// backtest's lifetime. The backtest is launched via
+	// service.RunBacktest, which uses s.baseCtx (the signal-cancelled
+	// server context set in cmd/strategy-server/main.go). Capturing
+	// that ctx at backtest-creation time and threading it through to
+	// this goroutine is the right fix; r.Context() is already
+	// cancelled by the time the backtest finishes.
 	if err := h.saveBacktest(context.Background(), detail); err != nil {
 		slog.Error("failed to save backtest result", "err", err, "backtest_id", id)
+	}
+
+	if evtType != "" {
+		evt := notifications.Event{
+			Type:       evtType,
+			UserID:     detail.DORAUserID,
+			BacktestID: detail.ID.String(),
+			Timestamp:  time.Now().UTC(),
+		}
+		if evtType == notifications.EventBacktestCompleted {
+			evt.Payload = map[string]any{"strategy_type": detail.StrategyType}
+		} else {
+			evt.Payload = map[string]any{"error": evtErr}
+		}
+		h.publishEvent(h.service.BaseContext(), evt)
 	}
 
 	// Stop the batching writer's background ticker. The strategy engine
@@ -1151,10 +1244,17 @@ func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid
 	h.mu.Unlock()
 
 	if detail, ok := h.backtests[id]; ok {
-		if err := h.saveBacktest(context.Background(), detail); err != nil {
+		if err := h.saveBacktest(r.Context(), detail); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save backtest: %v", err))
 			return
 		}
+		h.publishEvent(r.Context(), notifications.Event{
+			Type:       notifications.EventBacktestFailed,
+			UserID:     doraUserID,
+			BacktestID: detail.ID.String(),
+			Timestamp:  time.Now().UTC(),
+			Payload:    map[string]any{"error": "cancelled"},
+		})
 	}
 
 	h.getBacktestMetadata(w, r, id)
@@ -1188,19 +1288,19 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inject the user's API key into the strategy so it can authenticate with DORA.
-	authInfo, _ := authFromContext(r.Context())
-	if authInfo.APIKey != "" {
+	info, _ := authctx.AuthInfoFromContext(r.Context())
+	if info != nil && info.APIKey != "" {
 		switch withClient := strat.(type) {
 		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(authInfo.APIKey))(withClient)
+			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))(withClient)
 		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(authInfo.APIKey))(withClient)
+			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(info.APIKey))(withClient)
 		}
 	}
 
 	var encryptedAPIKey []byte
-	if authInfo.APIKey != "" && len(h.encryptionKey) > 0 {
-		encryptedAPIKey, err = encryptAPIKey([]byte(authInfo.APIKey), h.encryptionKey)
+	if info != nil && info.APIKey != "" && len(h.encryptionKey) > 0 {
+		encryptedAPIKey, err = encryptAPIKey([]byte(info.APIKey), h.encryptionKey)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("encrypt api key: %v", err))
 			return
@@ -1235,6 +1335,16 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.runs[id] = detail
 	h.mu.Unlock()
+
+	h.startStopLossObserver(detail, strat)
+
+	h.publishEvent(r.Context(), notifications.Event{
+		Type:      notifications.EventRunStarted,
+		UserID:    doraUserID,
+		RunID:     detail.ID.String(),
+		Timestamp: time.Now().UTC(),
+		Payload:   map[string]any{"strategy_type": detail.StrategyType},
+	})
 
 	writeJSON(w, http.StatusCreated, detail)
 }
@@ -1300,6 +1410,9 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 		stoppedAt := now
 		detail.StoppedAt = &stoppedAt
 	}
+	if cancel, ok := h.stopLossObservers[id]; ok {
+		cancel()
+	}
 	h.mu.Unlock()
 
 	detail, _ = h.runDetail(id)
@@ -1307,6 +1420,12 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
 		return
 	}
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunStopped,
+		UserID:    doraUserID,
+		RunID:     detail.ID.String(),
+		Timestamp: time.Now().UTC(),
+	})
 	h.getRun(w, ctx, id)
 }
 
@@ -1351,6 +1470,12 @@ func (h *Handler) pauseRun(w http.ResponseWriter, ctx context.Context, id uuid.U
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
 		return
 	}
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunPaused,
+		UserID:    doraUserID,
+		RunID:     detail.ID.String(),
+		Timestamp: time.Now().UTC(),
+	})
 	h.getRun(w, ctx, id)
 }
 
@@ -1410,6 +1535,12 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
 		return
 	}
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunResumed,
+		UserID:    doraUserID,
+		RunID:     detail.ID.String(),
+		Timestamp: time.Now().UTC(),
+	})
 	h.getRun(w, ctx, id)
 }
 
@@ -1492,6 +1623,7 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}
+	h.startStopLossObserver(detail, strat)
 	return nil
 }
 
@@ -1508,6 +1640,85 @@ func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strateg
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// startStopLossObserver records strat in runningStrategies and spawns a
+// per-run goroutine that polls LastStopLossTrigger until the trigger
+// fires (publishing EventRunStopLoss) or the run leaves the running
+// state. The goroutine is cancellable via the returned cancel func,
+// which is also stored in stopLossObservers so stopRun can cancel it.
+func (h *Handler) startStopLossObserver(detail *RunDetail, strat strategycore.Strategy) {
+	obs, ok := strat.(stopLossObserver)
+	if !ok {
+		return
+	}
+	// h.service.BaseContext() may be nil if a test set up a FakeService
+	// without a BaseContextReturns. Fall back to Background() so the
+	// observer still runs (graceful shutdown won't propagate, which is
+	// acceptable for tests). Production wires the real service whose
+	// BaseContext is the signal-cancelled context.
+	parent := h.service.BaseContext()
+	if parent == nil {
+		parent = context.Background()
+	}
+	obsCtx, cancel := context.WithCancel(parent)
+	h.mu.Lock()
+	h.runningStrategies[detail.ID] = strat
+	h.stopLossObservers[detail.ID] = cancel
+	h.mu.Unlock()
+	go h.runStopLossObserver(obsCtx, detail, obs, cancel)
+}
+
+func (h *Handler) runStopLossObserver(ctx context.Context, detail *RunDetail, obs stopLossObserver, cancel context.CancelFunc) {
+	defer cancel()
+	defer func() {
+		h.mu.Lock()
+		delete(h.stopLossObservers, detail.ID)
+		delete(h.runningStrategies, detail.ID)
+		h.mu.Unlock()
+	}()
+
+	interval := h.stopLossObserverInterval
+	if interval <= 0 {
+		interval = defaultStopLossObserverInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !h.runIsActive(detail.ID) {
+				return
+			}
+			z, pnl, triggered := obs.LastStopLossTrigger()
+			if !triggered {
+				continue
+			}
+			h.publishEvent(ctx, notifications.Event{
+				Type:    notifications.EventRunStopLoss,
+				UserID:  detail.DORAUserID,
+				RunID:   detail.ID.String(),
+				Payload: map[string]any{"z_score": z, "pnl": pnl},
+			})
+			return
+		}
+	}
+}
+
+// runIsActive reports whether the run is still tracked in h.runs with
+// status "running". The observer uses this to exit when the run was
+// stopped or completed by some other path.
+func (h *Handler) runIsActive(id uuid.UUID) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	detail, ok := h.runs[id]
+	if !ok {
+		return false
+	}
+	return detail.Status == "running"
 }
 
 func (h *Handler) resolveDORAUserID(ctx context.Context) (string, error) {

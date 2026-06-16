@@ -121,6 +121,13 @@ type Strategy struct {
 	// DORA during Run. Defaults to 1.0 if unavailable. Used to compute effective
 	// capital: InitialBalance × collateralWeight × Leverage.
 	collateralWeight decimal.Decimal
+
+	// lastStop* record the most recent stop-loss trigger from ShouldExit.
+	// The HTTP handler polls LastStopLossTrigger to emit EventRunStopLoss.
+	// Protected by mu.
+	lastStopZ         decimal.Decimal
+	lastStopPnL       decimal.Decimal
+	lastStopTriggered bool
 }
 
 // New creates a new Strategy with the given Config and optional functional options.
@@ -944,12 +951,14 @@ func (s *Strategy) ShouldExit(openSignal types.Signal, currentZScore decimal.Dec
 			// We went long because spread was wide (z > +entry).
 			// Stop out if spread widens even further (z grows more positive).
 			if currentZScore.Cmp(s.cfg.StopLossZScore) >= 0 {
+				s.recordStopLoss(currentZScore, decimal.Zero)
 				return true, ExitReasonStopLoss
 			}
 		case types.SignalSell:
 			// We went short because spread was tight (z < -entry).
 			// Stop out if spread tightens even further (z grows more negative).
 			if currentZScore.Cmp(s.cfg.StopLossZScore.Neg()) <= 0 {
+				s.recordStopLoss(currentZScore, decimal.Zero)
 				return true, ExitReasonStopLoss
 			}
 		default:
@@ -958,4 +967,27 @@ func (s *Strategy) ShouldExit(openSignal types.Signal, currentZScore decimal.Dec
 	}
 
 	return false, ""
+}
+
+// recordStopLoss stores the z-score and pnl from a stop-loss trigger so
+// the HTTP handler can read them via LastStopLossTrigger and emit a
+// notification. PnL is not computed at the point of exit decision and is
+// left as zero; the handler emits the recorded z-score and a zero pnl.
+func (s *Strategy) recordStopLoss(zScore, pnl decimal.Decimal) {
+	s.mu.Lock()
+	s.lastStopZ = zScore
+	s.lastStopPnL = pnl
+	s.lastStopTriggered = true
+	s.mu.Unlock()
+}
+
+// LastStopLossTrigger returns the z-score and pnl recorded by the most
+// recent stop-loss trigger from ShouldExit, along with a flag indicating
+// whether a stop-loss has fired. Once set, the flag stays set for the
+// lifetime of the Strategy; callers should treat the value as
+// edge-triggered and reset the strategy to re-arm.
+func (s *Strategy) LastStopLossTrigger() (zScore, pnl decimal.Decimal, triggered bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastStopZ, s.lastStopPnL, s.lastStopTriggered
 }

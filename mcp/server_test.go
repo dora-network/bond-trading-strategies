@@ -5,11 +5,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
+	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/testutils"
+	"github.com/google/uuid"
 	"github.com/govalues/decimal"
+	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/mcptest"
 	"github.com/mark3labs/mcp-go/server"
@@ -513,5 +519,117 @@ func TestStrategyConfigSchemaIsTyped(t *testing.T) {
 			require.Equal(t, "array", arr.Type, "disallowed_bonds must be type array, got %q", arr.Type)
 			require.Equal(t, "string", arr.Items.Type, "disallowed_bonds items must be type string, got %q", arr.Items.Type)
 		})
+	}
+}
+
+// TestStartNotificationsRelay_ForwardsEventToMCPClients verifies the
+// end-to-end flow: a fake strategy-server WS pushes an event, and an
+// MCP client connected to the SSE server receives it as a
+// `notifications/event` JSON-RPC notification.
+func TestStartNotificationsRelay_ForwardsEventToMCPClients(t *testing.T) {
+	// 1. Fake strategy-server WS: accepts the upgrade, writes one event,
+	//    then keeps the conn open until ctx cancellation.
+	runID := uuid.NewString()
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/notifications/ws" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") == "" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		evt := notifications.Event{
+			ID:        uuid.NewString(),
+			Type:      notifications.EventRunStarted,
+			UserID:    "user-1",
+			RunID:     runID,
+			Timestamp: time.Now().UTC(),
+		}
+		data, err := json.Marshal(evt)
+		if err != nil {
+			return
+		}
+		_ = conn.Write(r.Context(), websocket.MessageText, data)
+		<-r.Context().Done()
+	}))
+	defer wsSrv.Close()
+	wsURL, err := url.Parse(wsSrv.URL)
+	require.NoError(t, err)
+	wsURL.Scheme = "ws"
+	wsURL.Path = "/v1/notifications/ws"
+	fakeWSURL := wsURL.String()
+
+	// 2. Real MCP server + SSE transport, hosted on an httptest server.
+	//    We build the SSEServer without WithBaseURL so the SSE transport
+	//    can resolve the message endpoint relative to the client
+	//    connection origin (otherwise origin mismatches are enforced).
+	mux := http.NewServeMux()
+	mcpSrv := mcpserver.New("", "test-key", wsSrv.URL)
+	sseSrv := server.NewSSEServer(mcpSrv, server.WithKeepAlive(true))
+	mux.Handle("/", sseSrv)
+	sseTS := httptest.NewServer(mux)
+	defer sseTS.Close()
+	defer func() { _ = sseSrv.Shutdown(context.Background()) }()
+	sseURL := sseTS.URL
+
+	// 3. Connect a real MCP client to the SSE server. The client
+	//    expects the URL to end in the SSE endpoint path.
+	mcpClient, err := client.NewSSEMCPClient(sseURL + "/sse")
+	require.NoError(t, err)
+	defer mcpClient.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, mcpClient.Start(ctx))
+	initReq := mcp.InitializeRequest{}
+	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initReq.Params.ClientInfo = mcp.Implementation{Name: "test", Version: "0.0.1"}
+	_, err = mcpClient.Initialize(ctx, initReq)
+	require.NoError(t, err)
+
+	// 4. Capture the notification.
+	received := make(chan mcp.JSONRPCNotification, 1)
+	mcpClient.OnNotification(func(n mcp.JSONRPCNotification) {
+		if n.Method != "notifications/event" {
+			return
+		}
+		select {
+		case received <- n:
+		default:
+		}
+	})
+
+	// 5. Start the relay.
+	relayCtx, relayCancel := context.WithCancel(context.Background())
+	defer relayCancel()
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		_ = mcpserver.StartNotificationsRelay(relayCtx, mcpSrv, fakeWSURL, "test-key")
+	}()
+
+	// 6. Assert the notification arrived with the expected payload.
+	select {
+	case n := <-received:
+		assert.Equal(t, "notifications/event", n.Method)
+		params := n.Params.AdditionalFields
+		assert.Equal(t, string(notifications.EventRunStarted), params["type"], "type field")
+		assert.Equal(t, runID, params["run_id"], "run_id field")
+		assert.Equal(t, "user-1", params["user_id"], "user_id field")
+		assert.NotEmpty(t, params["id"], "id field")
+	case <-time.After(3 * time.Second):
+		t.Fatal("did not receive notifications/event from MCP client")
+	}
+
+	relayCancel()
+	select {
+	case <-relayDone:
+	case <-time.After(time.Second):
+		t.Fatal("relay did not stop after ctx cancel")
 	}
 }

@@ -301,6 +301,24 @@ func TestStrategy_ShouldExit_StopLossDisabled(t *testing.T) {
 	assert.Empty(t, reason)
 }
 
+func TestStrategy_LastStopLossTrigger(t *testing.T) {
+	s := meanreversion.New(defaultConfig(), nil)
+
+	z, pnl, triggered := s.LastStopLossTrigger()
+	assert.False(t, triggered)
+	assert.True(t, z.IsZero())
+	assert.True(t, pnl.IsZero())
+
+	exit, reason := s.ShouldExit(types.SignalBuy, decimal.MustNew(36, 1))
+	require.True(t, exit)
+	require.Equal(t, meanreversion.ExitReasonStopLoss, reason)
+
+	z, pnl, triggered = s.LastStopLossTrigger()
+	assert.True(t, triggered)
+	assert.True(t, z.Equal(decimal.MustNew(36, 1)))
+	assert.True(t, pnl.IsZero())
+}
+
 func TestBacktester_NoTradesBeforeWindowFull(t *testing.T) {
 	s := meanreversion.New(defaultConfig(), nil)
 	bt := meanreversion.NewBacktester(s, nil)

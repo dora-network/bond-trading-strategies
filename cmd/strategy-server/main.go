@@ -14,6 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/dora-network/bond-trading-strategies/authctx"
+	"github.com/dora-network/bond-trading-strategies/cors"
+	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/ratelimit"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
@@ -54,6 +58,9 @@ func main() {
 	rateLimitTrustProxy := flag.Bool("rate-limit-trust-proxy",
 		envOrBool("RATE_LIMIT_TRUST_PROXY", false),
 		"Trust X-Forwarded-For for IP extraction")
+
+	notificationsEnabled := flag.Bool("notifications-enabled", envOrBool("NOTIFICATIONS_ENABLED", true),
+		"Enable the /v1/notifications/ws WebSocket endpoint")
 	flag.Parse()
 
 	setLogLevel(*logLevel)
@@ -118,7 +125,7 @@ func main() {
 	tradeStream := streams.NewTradeStream()
 	if *apiKey != "" {
 		doraClient := strategyhttp.NewDORAClient()
-		obCtx := strategyhttp.WithAPIKey(ctx, *apiKey)
+		obCtx := authctx.WithAPIKey(ctx, *apiKey)
 		orderbooks, err := doraClient.ListOrderBooks(obCtx)
 		if err != nil {
 			slog.Error("failed to list order books for trade stream", "err", err)
@@ -141,6 +148,23 @@ func main() {
 
 	log := slog.With("service", "strategy-server")
 	service := strategycore.NewService(strategycore.WithBaseContext(ctx))
+
+	var notifier notifications.Notifier
+	if *notificationsEnabled {
+		bus := notifications.NewBus(
+			notifications.NewPGLog(pool),
+			notifications.NewHub(),
+			notifications.WithLogger(func(format string, args ...any) { log.Info(format, args...) }),
+		)
+		notifier = bus
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			retentionLoop(ctx, bus, log)
+		}()
+	}
+
 	handlerImpl := strategyhttp.NewHandler(
 		service,
 		strategyhttp.WithRunStore(strategyhttp.NewPGRunStore(pool)),
@@ -150,6 +174,7 @@ func main() {
 		strategyhttp.WithTradeStream(tradeStream),
 		strategyhttp.WithLogger(log),
 		strategyhttp.WithEncryptionKey(encryptionKey),
+		strategyhttp.WithNotifier(notifier),
 	)
 	restorer, ok := handlerImpl.(interface{ RestoreRuns(context.Context) error })
 	if !ok {
@@ -184,7 +209,32 @@ func main() {
 	wrappedHandler := rl.Middleware(handlerImpl)
 
 	if *corsAllowedOrigins != "" {
-		wrappedHandler = corsMiddleware(*corsAllowedOrigins, wrappedHandler)
+		wrappedHandler = cors.New(*corsAllowedOrigins)(wrappedHandler)
+	}
+
+	if notifier != nil {
+		wsSubMux := http.NewServeMux()
+		wsPatterns, wsAllowAll := cors.OriginPatterns(*corsAllowedOrigins)
+		var wsHandler http.Handler = notifications.NewHandler(
+			notifier,
+			func(ctx context.Context) (string, error) {
+				if _, ok := authctx.AuthInfoFromContext(ctx); !ok {
+					return "", errors.New("missing auth info in context")
+				}
+				client := strategyhttp.NewDORAClient()
+				return client.GetUserID(ctx)
+			},
+			notifications.WithHandlerLogger(log),
+			notifications.WithAcceptOptions(websocket.AcceptOptions{
+				OriginPatterns:     wsPatterns,
+				InsecureSkipVerify: wsAllowAll,
+			}),
+		)
+		if *corsAllowedOrigins != "" {
+			wsHandler = cors.New(*corsAllowedOrigins)(wsHandler)
+		}
+		wsSubMux.Handle("/v1/notifications/ws", wsHandler)
+		wrappedHandler = notificationsRouter{fallback: wrappedHandler, sub: wsSubMux}
 	}
 
 	server := &http.Server{
@@ -221,45 +271,81 @@ func main() {
 	slog.Info("strategy server stopped")
 }
 
-// corsMiddleware returns an HTTP handler that adds CORS headers. origins is a
-// comma-separated list; a single "*" allows any origin.
-func corsMiddleware(origins string, next http.Handler) http.Handler {
-	allowed := make(map[string]bool)
-	allowAll := false
-	for _, o := range strings.Split(origins, ",") {
-		o = strings.TrimSpace(o)
-		if o == "" {
-			continue
-		}
-		if o == "*" {
-			allowAll = true
-		}
-		allowed[o] = true
+// retentionLoop purges notification_log rows older than 24h, once on
+// startup and then every hour until ctx is cancelled.
+func retentionLoop(ctx context.Context, bus *notifications.Bus, log *slog.Logger) {
+	const age = 24 * time.Hour
+	if n, err := bus.DeleteOlderThan(ctx, age); err != nil {
+		log.Warn("notification log retention failed", "err", err)
+	} else if n > 0 {
+		log.Info("notification log retention purged rows on startup", "count", n)
 	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		headers := w.Header()
-
-		if allowAll {
-			headers.Set("Access-Control-Allow-Origin", "*")
-		} else if allowed[origin] {
-			headers.Set("Access-Control-Allow-Origin", origin)
-			headers.Add("Vary", "Origin")
-		}
-
-		headers.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		headers.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		headers.Set("Access-Control-Allow-Credentials", "true")
-		headers.Set("Access-Control-Max-Age", "86400")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			if n, err := bus.DeleteOlderThan(ctx, age); err != nil {
+				log.Warn("notification log retention failed", "err", err)
+			} else if n > 0 {
+				log.Info("notification log retention purged rows", "count", n)
+			}
 		}
+	}
+}
 
-		next.ServeHTTP(w, r)
-	})
+// notificationsRouter dispatches /v1/notifications/ws to a sub-mux that
+// owns the WebSocket route, and falls through to fallback for every other
+// path. The sub-mux only registers the WS endpoint, so the router
+// forwards the request directly without an intermediate response
+// recorder: the recorder would shadow http.Hijacker and break
+// websocket.Accept.
+type notificationsRouter struct {
+	fallback http.Handler
+	sub      *http.ServeMux
+}
+
+func (r notificationsRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path != "/v1/notifications/ws" {
+		r.fallback.ServeHTTP(w, req)
+		return
+	}
+	// Populate the request context with credentials so the WebSocket
+	// handler's ResolveUserID callback can read them via
+	// authctx.AuthInfoFromContext. The Authorization header takes
+	// precedence; the x-api-key query parameter is a fallback for
+	// clients that cannot set request headers on the WS handshake.
+	ctx := req.Context()
+	if newCtx, ok := authContextFromHeader(ctx, req.Header.Get("Authorization")); ok {
+		ctx = newCtx
+	} else if key := req.URL.Query().Get("x-api-key"); key != "" {
+		ctx = authctx.WithAPIKey(ctx, key)
+	}
+	r.sub.ServeHTTP(w, req.WithContext(ctx))
+}
+
+// authContextFromHeader returns a context that carries the credentials
+// extracted from the supplied Authorization header, using the same
+// ApiKey/Bearer scheme recognition as strategy/http.requireAuth. The
+// second return value is false when the header is absent or unrecognised.
+func authContextFromHeader(ctx context.Context, authHeader string) (context.Context, bool) {
+	switch {
+	case strings.HasPrefix(authHeader, "ApiKey "):
+		key := strings.TrimPrefix(authHeader, "ApiKey ")
+		if key == "" {
+			return ctx, false
+		}
+		return authctx.WithAPIKey(ctx, key), true
+	case strings.HasPrefix(authHeader, "Bearer "):
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if token == "" {
+			return ctx, false
+		}
+		return authctx.WithBearerToken(ctx, token), true
+	}
+	return ctx, false
 }
 
 func setLogLevel(flagValue string) {

@@ -33,6 +33,12 @@ type Service interface {
 	PauseStrategy(ctx context.Context, id uuid.UUID) error
 	// ResumeStrategy resumes a paused strategy.
 	ResumeStrategy(ctx context.Context, id uuid.UUID) error
+	// BaseContext returns the base context used to spawn backtest and
+	// run goroutines. It is set via WithBaseContext at construction
+	// time (e.g. a signal-cancelled context at server startup) and
+	// must be honoured by any asynchronous work whose request context
+	// may have already finished.
+	BaseContext() context.Context
 }
 
 var (
@@ -71,6 +77,10 @@ func WithBaseContext(ctx context.Context) func(*service) {
 	return func(s *service) {
 		s.baseCtx = ctx
 	}
+}
+
+func (s *service) BaseContext() context.Context {
+	return s.baseCtx
 }
 
 func (s *service) RunBacktest(

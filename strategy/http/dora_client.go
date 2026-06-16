@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/dora-client-go/doraclient"
 )
 
@@ -184,14 +185,15 @@ func (c *liveDORAClient) ListBotUsers(ctx context.Context) ([]DORABotUser, error
 }
 
 // authContext builds a context that carries the DORA auth credentials extracted
-// from the incoming HTTP request context by the requireAuth middleware.
-// It supports both ApiKey and Bearer token authentication.
+// from the incoming context by requireAuth (REST path) or by the WS router
+// (cmd/strategy-server/notificationsRouter) — both of which use the
+// authctx package. It supports both ApiKey and Bearer token authentication.
 func (c *liveDORAClient) authContext(ctx context.Context) (context.Context, error) {
 	if c == nil || c.client == nil {
 		return nil, errors.New("DORA client is not configured")
 	}
 
-	info, ok := authFromContext(ctx)
+	info, ok := authctx.AuthInfoFromContext(ctx)
 	if !ok {
 		return nil, errors.New("no authorization credentials in context")
 	}

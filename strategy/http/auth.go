@@ -4,27 +4,23 @@ import (
 	"context"
 	"net/http"
 	"strings"
+
+	"github.com/dora-network/bond-trading-strategies/authctx"
 )
 
-type authContextKey struct{}
 type doraUserIDContextKey struct{}
-
-// authInfo holds the parsed Authorization header credentials extracted by
-// requireAuth. Exactly one of APIKey or BearerToken will be non-empty.
-type authInfo struct {
-	// APIKey is populated when the Authorization header carries the "ApiKey" prefix.
-	APIKey string
-	// BearerToken is populated when the Authorization header carries the "Bearer" prefix.
-	BearerToken string
-}
 
 // requireAuth is an HTTP middleware that:
 //  1. Validates the Authorization header (returns 401 if absent or unrecognised).
 //  2. Calls resolveUserID — which contacts DORA — to confirm the credentials
 //     belong to a real user (returns 401 if DORA rejects them).
-//  3. Stores the parsed authInfo and the verified DORA user ID in the request
-//     context so that downstream handlers can retrieve them without making
-//     additional DORA calls.
+//  3. Stores the parsed credentials in the request context via authctx
+//     so that downstream handlers and the liveDORAClient can read them
+//     using the same key, regardless of whether the request was
+//     authenticated here or upstream (e.g. the WS router).
+//  4. Stores the verified DORA user ID in the request context so that
+//     downstream handlers can retrieve it without making additional DORA
+//     calls.
 //
 // Recognised schemes:
 //
@@ -38,7 +34,7 @@ func requireAuth(resolveUserID func(context.Context) (string, error), next http.
 			return
 		}
 
-		var info authInfo
+		var ctx context.Context
 		switch {
 		case strings.HasPrefix(authHeader, "ApiKey "):
 			key := strings.TrimPrefix(authHeader, "ApiKey ")
@@ -46,22 +42,18 @@ func requireAuth(resolveUserID func(context.Context) (string, error), next http.
 				writeError(w, http.StatusUnauthorized, "invalid Authorization header: empty API key")
 				return
 			}
-			info.APIKey = key
+			ctx = authctx.WithAPIKey(r.Context(), key)
 		case strings.HasPrefix(authHeader, "Bearer "):
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 			if token == "" {
 				writeError(w, http.StatusUnauthorized, "invalid Authorization header: empty bearer token")
 				return
 			}
-			info.BearerToken = token
+			ctx = authctx.WithBearerToken(r.Context(), token)
 		default:
 			writeError(w, http.StatusUnauthorized, "invalid Authorization header: unsupported scheme")
 			return
 		}
-
-		// Store authInfo first so that resolveUserID (and the underlying DORA
-		// client) can read the credentials from context when making its request.
-		ctx := context.WithValue(r.Context(), authContextKey{}, info)
 
 		userID, err := resolveUserID(ctx)
 		if err != nil {
@@ -72,20 +64,6 @@ func requireAuth(resolveUserID func(context.Context) (string, error), next http.
 		ctx = context.WithValue(ctx, doraUserIDContextKey{}, userID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
-
-// authFromContext retrieves the authInfo stored in ctx by requireAuth.
-// The second return value is false when no auth info is present.
-func authFromContext(ctx context.Context) (authInfo, bool) {
-	info, ok := ctx.Value(authContextKey{}).(authInfo)
-	return info, ok
-}
-
-// WithAPIKey returns a context that carries the given API key for DORA
-// authentication. It is intended for server startup code that needs to
-// make DORA API calls outside of an HTTP request context.
-func WithAPIKey(ctx context.Context, apiKey string) context.Context {
-	return context.WithValue(ctx, authContextKey{}, authInfo{APIKey: apiKey})
 }
 
 // doraUserIDFromContext retrieves the DORA user ID stored in ctx by requireAuth.

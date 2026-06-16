@@ -48,6 +48,15 @@ type Strategy struct {
 	disallowedSet map[uuid.UUID]struct{}
 	paused        bool
 	mu            sync.Mutex
+	// TODO: copytrading stop-loss. The current copytrading strategy has
+	// no stop-loss branch — exits only happen via the strategy.Stop
+	// message on the message channel. When a stop-loss is added to
+	// copytrading, mirror the meanreversion pattern: add
+	// lastStopZ/lastStopPnL/lastStopTriggered fields (guarded by mu),
+	// a recordStopLoss helper, and a LastStopLossTrigger getter, and
+	// wire the HTTP handler's observer to call it. The observer in
+	// strategy/http/handler.go already handles the absence of the
+	// method gracefully (it only polls meanreversion.Strategy today).
 }
 
 // New creates a new Strategy with the given configuration and functional options.

@@ -219,6 +219,7 @@ func TestHandler_StreamSingle(t *testing.T) {
 		lastTime := time.Date(2026, 4, 10, 15, 29, 0, 0, time.UTC)
 		fakeStore.GetLastTimestampReturns(&lastTime, nil)
 
+		serverReady := make(chan struct{})
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Contains(t, r.URL.RawQuery, "since=2026-04-10T15%3A29%3A00Z")
 
@@ -227,6 +228,7 @@ func TestHandler_StreamSingle(t *testing.T) {
 			defer c.Close(websocket.StatusNormalClosure, "")
 
 			msg := []byte(`[{"Time": "2026-04-10T15:30:00Z", "Val": {"order_book_id": "book-123"}}]`)
+			close(serverReady)
 			wg.Wait()
 			err = c.Write(r.Context(), websocket.MessageText, msg)
 			require.NoError(t, err)
@@ -246,10 +248,14 @@ func TestHandler_StreamSingle(t *testing.T) {
 		go func() {
 			_ = s.Start(ctx)
 		}()
-		time.Sleep(time.Second)
+		streamErr := make(chan error, 1)
+		go func() {
+			streamErr <- h.StreamSingle(ctx, "book-123")
+		}()
+		<-serverReady
 		wg.Done()
 
-		err := h.StreamSingle(ctx, "book-123")
+		err := <-streamErr
 		require.Error(t, err)
 		var closeErr websocket.CloseError
 		require.ErrorAs(t, err, &closeErr)
