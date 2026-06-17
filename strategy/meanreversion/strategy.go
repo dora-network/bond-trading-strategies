@@ -145,6 +145,11 @@ type Strategy struct {
 	decisionSeq int64
 }
 
+// strategyType is the strategy.Decision.StrategyType value used by
+// the live run loop and the client_order_id format.  Keep in sync
+// with the string written by recordDecision.
+const strategyType = "mean_reversion"
+
 // New creates a new Strategy with the given Config and optional functional options.
 // Supported options: WithLogger.
 
@@ -504,8 +509,12 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		inverseLeverage = decimal.One
 	}
 
+	// Build the client_order_id before submitting so the same value
+	// flows into the DORA request and the recorded decision row.
+	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
+
 	if err := s.marketAPIClient.CreateMarketOrder(
-		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, s.fromGlobalPosition,
+		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, s.fromGlobalPosition, clientOrderID,
 	); err != nil {
 		// Self-healing: if the order failed, check the live position on the exchange.
 		// If the live position is actually already 0, we can self-heal and clear our tracking state.
@@ -544,6 +553,7 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		Kind:               strategy.DecisionKindClose,
 		Reason:             "z_score_exit",
 		ReasonDetail:       "close: spread reverted to mean",
+		ClientOrderID:      clientOrderID,
 	})
 
 	s.mu.Lock()
@@ -613,8 +623,11 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		"inverseLeverage", inverseLeverage,
 		"fromGlobalPosition", fromGlobalPosition,
 	)
+	// Build the client_order_id before submitting so the same value
+	// flows into the DORA request and the recorded decision row.
+	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
 	if err := s.marketAPIClient.CreateMarketOrder(
-		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition,
+		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition, clientOrderID,
 	); err != nil {
 		return false, err
 	}
@@ -635,6 +648,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		Kind:               strategy.DecisionKindOpen,
 		Reason:             "z_score_entry",
 		ReasonDetail:       fmt.Sprintf("z-score entry: z=%s signal=%s", decision.ZScore.String(), decision.Signal),
+		ClientOrderID:      clientOrderID,
 	})
 
 	// Update tracked balances and openSignal after a successful order.
@@ -1086,7 +1100,7 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 
 	d.RunID = runID
 	d.Seq = seq
-	d.StrategyType = "mean_reversion"
+	d.StrategyType = strategyType
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = time.Now().UTC()
 	}

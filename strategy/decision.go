@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -82,6 +83,25 @@ type Decision struct {
 	// CreatedAt is the wall-clock time at which the order was placed
 	// (UTC).
 	CreatedAt time.Time
+	// ClientOrderID is the per-order identifier sent to DORA in the
+	// CreateOrderRequest.  Format: <strategy_name>.<run_id>.<uuidv7>.
+	// Set on every successful live order and persisted alongside the
+	// rest of the decision so audit consumers can correlate the row
+	// with the order in DORA.
+	ClientOrderID string
+}
+
+// BuildClientOrderID returns the client_order_id string the live
+// run uses when submitting an order to DORA.  The format is
+// <strategy_name>.<run_id>.<uuidv7>.  A fresh uuidv7 is generated on
+// every call, so the returned string is unique per order and the
+// uuidv7 prefix is monotonically time-sortable.
+//
+// The string is intended to be generated immediately before the
+// CreateMarketOrder call so the same value flows into the DORA
+// request and the recorded Decision row.
+func BuildClientOrderID(strategyName string, runID uuid.UUID) string {
+	return fmt.Sprintf("%s.%s.%s", strategyName, runID, uuid.Must(uuid.NewV7()))
 }
 
 // DecisionRecorder is the minimal interface the live strategy loop uses

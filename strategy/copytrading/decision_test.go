@@ -2,6 +2,7 @@ package copytrading
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -143,6 +145,7 @@ func TestRecordDecision_LiveRunRecordsOnOrder(t *testing.T) {
 		require.True(t, d.CreatedAt.After(time.Time{}), "CreatedAt should be stamped")
 		require.Equal(t, s.runID, d.RunID)
 		require.Equal(t, int64(i+1), d.Seq, "Seq must be monotonically increasing per run")
+		assertValidClientOrderID(t, d.ClientOrderID, "copy_trading", s.runID)
 	}
 
 	cancel()
@@ -297,9 +300,25 @@ func TestRecordDecision_CloseRecordsActualOrderLeverage(t *testing.T) {
 	require.Equal(t, "SELL", d.Side)
 	require.Equal(t, decimal.One, d.Leverage, "close must record the forced order leverage, not the configured one")
 	require.Equal(t, decimal.One, d.InverseLeverage, "close must be sent at inverse_leverage=1 (no leverage)")
+	assertValidClientOrderID(t, d.ClientOrderID, "copy_trading", s.runID)
 
 	cancel()
 	<-done
+}
+
+// assertValidClientOrderID checks that the recorded ClientOrderID
+// follows the live-run contract: <strategy_name>.<run_id>.<uuidv7>.
+// Used by both copytrading and meanreversion decision tests.
+func assertValidClientOrderID(t *testing.T, got, wantStrategy string, wantRunID uuid.UUID) {
+	t.Helper()
+	require.NotEmpty(t, got, "ClientOrderID must be set on every live-run decision")
+
+	parts := strings.SplitN(got, ".", 3)
+	require.Len(t, parts, 3, "ClientOrderID %q must be <strategy_name>.<run_id>.<uuidv7>", got)
+	assert.Equal(t, wantStrategy, parts[0], "strategy name must match")
+	assert.Equal(t, wantRunID.String(), parts[1], "run id must match")
+	_, err := uuid.Parse(parts[2])
+	require.NoError(t, err, "uuidv7 segment must be a valid UUID: %q", parts[2])
 }
 
 var errOrderFailed = &orderError{msg: "order rejected by dora"}

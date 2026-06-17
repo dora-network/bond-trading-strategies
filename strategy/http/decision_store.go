@@ -40,11 +40,11 @@ func (s *PGDecisionStore) SaveDecision(ctx context.Context, d strategycore.Decis
 		INSERT INTO strategy_decisions (
 			run_id, seq, strategy_type, order_book_id, asset,
 			side, signal, kind, quantity, price, leverage, inverse_leverage,
-			from_global_position, reason, reason_detail, created_at
+			from_global_position, reason, reason_detail, client_order_id, created_at
 		) VALUES (
 			$1, $2, $3, $4, $5,
 			$6, $7, $8, $9, $10, $11, $12,
-			$13, $14, $15, $16
+			$13, $14, $15, $16, $17
 		)
 	`
 
@@ -69,6 +69,7 @@ func (s *PGDecisionStore) SaveDecision(ctx context.Context, d strategycore.Decis
 		d.FromGlobalPosition,
 		d.Reason,
 		d.ReasonDetail,
+		d.ClientOrderID,
 		createdAt.UTC(),
 	)
 	if err != nil {

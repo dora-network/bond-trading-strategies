@@ -42,6 +42,7 @@ func TestDoraAPIClient_CreateMarketOrder_ErrorHandling(t *testing.T) {
 		decimal.MustNew(10, 0),
 		decimal.One,
 		false,
+		"test-client-order-id",
 	)
 
 	require.Error(t, err)

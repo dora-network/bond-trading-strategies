@@ -10,7 +10,7 @@ import (
 )
 
 type FakeMarketAPIClient struct {
-	CreateMarketOrderStub        func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool) error
+	CreateMarketOrderStub        func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool, string) error
 	createMarketOrderMutex       sync.RWMutex
 	createMarketOrderArgsForCall []struct {
 		arg1 context.Context
@@ -19,6 +19,7 @@ type FakeMarketAPIClient struct {
 		arg4 decimal.Decimal
 		arg5 decimal.Decimal
 		arg6 bool
+		arg7 string
 	}
 	createMarketOrderReturns struct {
 		result1 error
@@ -73,7 +74,7 @@ type FakeMarketAPIClient struct {
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeMarketAPIClient) CreateMarketOrder(arg1 context.Context, arg2 string, arg3 doraclient.Side, arg4 decimal.Decimal, arg5 decimal.Decimal, arg6 bool) error {
+func (fake *FakeMarketAPIClient) CreateMarketOrder(arg1 context.Context, arg2 string, arg3 doraclient.Side, arg4 decimal.Decimal, arg5 decimal.Decimal, arg6 bool, arg7 string) error {
 	fake.createMarketOrderMutex.Lock()
 	ret, specificReturn := fake.createMarketOrderReturnsOnCall[len(fake.createMarketOrderArgsForCall)]
 	fake.createMarketOrderArgsForCall = append(fake.createMarketOrderArgsForCall, struct {
@@ -83,13 +84,14 @@ func (fake *FakeMarketAPIClient) CreateMarketOrder(arg1 context.Context, arg2 st
 		arg4 decimal.Decimal
 		arg5 decimal.Decimal
 		arg6 bool
-	}{arg1, arg2, arg3, arg4, arg5, arg6})
+		arg7 string
+	}{arg1, arg2, arg3, arg4, arg5, arg6, arg7})
 	stub := fake.CreateMarketOrderStub
 	fakeReturns := fake.createMarketOrderReturns
-	fake.recordInvocation("CreateMarketOrder", []interface{}{arg1, arg2, arg3, arg4, arg5, arg6})
+	fake.recordInvocation("CreateMarketOrder", []interface{}{arg1, arg2, arg3, arg4, arg5, arg6, arg7})
 	fake.createMarketOrderMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2, arg3, arg4, arg5, arg6)
+		return stub(arg1, arg2, arg3, arg4, arg5, arg6, arg7)
 	}
 	if specificReturn {
 		return ret.result1
@@ -103,17 +105,17 @@ func (fake *FakeMarketAPIClient) CreateMarketOrderCallCount() int {
 	return len(fake.createMarketOrderArgsForCall)
 }
 
-func (fake *FakeMarketAPIClient) CreateMarketOrderCalls(stub func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool) error) {
+func (fake *FakeMarketAPIClient) CreateMarketOrderCalls(stub func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool, string) error) {
 	fake.createMarketOrderMutex.Lock()
 	defer fake.createMarketOrderMutex.Unlock()
 	fake.CreateMarketOrderStub = stub
 }
 
-func (fake *FakeMarketAPIClient) CreateMarketOrderArgsForCall(i int) (context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool) {
+func (fake *FakeMarketAPIClient) CreateMarketOrderArgsForCall(i int) (context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool, string) {
 	fake.createMarketOrderMutex.RLock()
 	defer fake.createMarketOrderMutex.RUnlock()
 	argsForCall := fake.createMarketOrderArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5, argsForCall.arg6
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5, argsForCall.arg6, argsForCall.arg7
 }
 
 func (fake *FakeMarketAPIClient) CreateMarketOrderReturns(result1 error) {

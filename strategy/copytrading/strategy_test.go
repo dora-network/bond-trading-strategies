@@ -592,7 +592,7 @@ type fakeMarketAPI struct {
 	orderErr error
 }
 
-func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, _ doraclient.Side, _ decimal.Decimal, _ decimal.Decimal, _ bool) error {
+func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, _ doraclient.Side, _ decimal.Decimal, _ decimal.Decimal, _ bool, _ string) error {
 	f.mu.Lock()
 	f.createMarketOrderCalls++
 	err := f.orderErr

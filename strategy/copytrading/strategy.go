@@ -343,6 +343,10 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		"from_global", fromGlobal,
 	)
 
+	// Build the client_order_id before submitting so the same value
+	// flows into the DORA request and the recorded decision row.
+	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
+
 	// Place market order
 	err = s.marketAPI.CreateMarketOrder(
 		ctx,
@@ -351,6 +355,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		orderSize,
 		inverseLeverage,
 		fromGlobal,
+		clientOrderID,
 	)
 	if err != nil {
 		return fmt.Errorf("create market order: %w", err)
@@ -378,6 +383,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		Kind:               kind,
 		Reason:             "follow_trade",
 		ReasonDetail:       fmt.Sprintf("followed trader %s execution %s", trade.TraderID, trade.ExecutionID),
+		ClientOrderID:      clientOrderID,
 	})
 
 	s.log.Info("placed copy trade",
@@ -393,6 +399,11 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 // positionDirection is the net direction of the bot's holdings for a given
 // asset, derived from the ledger positions endpoint.
 type positionDirection int
+
+// strategyType is the strategy.Decision.StrategyType value used by
+// the live run loop and the client_order_id format.  Keep in sync
+// with the string written by recordDecision.
+const strategyType = "copy_trading"
 
 const (
 	positionFlat positionDirection = iota
@@ -696,7 +707,7 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 
 	d.RunID = runID
 	d.Seq = seq
-	d.StrategyType = "copy_trading"
+	d.StrategyType = strategyType
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = time.Now().UTC()
 	}

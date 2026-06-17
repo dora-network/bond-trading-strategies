@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS strategy_decisions (
     from_global_position BOOLEAN NOT NULL,
     reason VARCHAR(64) NOT NULL,
     reason_detail TEXT,
+    client_order_id VARCHAR(128) NOT NULL,
     created_at TIMESTAMP NOT NULL,
     PRIMARY KEY (run_id, seq),
     -- side is always the DORA side string ("BUY" or "SELL").
@@ -54,8 +55,12 @@ ON strategy_decisions (run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_strategy_decisions_asset_created_at
 ON strategy_decisions (asset, created_at);
 
+CREATE INDEX IF NOT EXISTS idx_strategy_decisions_client_order_id
+ON strategy_decisions (client_order_id);
+
 ---- create above / drop below ----
 
+DROP INDEX IF EXISTS idx_strategy_decisions_client_order_id;
 DROP INDEX IF EXISTS idx_strategy_decisions_asset_created_at;
 DROP INDEX IF EXISTS idx_strategy_decisions_run_id_created_at;
 DROP TABLE IF EXISTS strategy_decisions;
