@@ -586,13 +586,18 @@ type fakeMarketAPI struct {
 	portfolio              *doraclient.AccountPortfolioV2
 	quoteAssetID           string
 	createMarketOrderCalls int
+	// orderErr, when non-nil, is returned by CreateMarketOrder.  Used
+	// by the decision-recording tests to assert that a failed order
+	// does not produce a strategy_decisions row.
+	orderErr error
 }
 
 func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, _ doraclient.Side, _ decimal.Decimal, _ decimal.Decimal, _ bool) error {
 	f.mu.Lock()
 	f.createMarketOrderCalls++
+	err := f.orderErr
 	f.mu.Unlock()
-	return nil
+	return err
 }
 
 func (f *fakeMarketAPI) GetAssetPosition(_ context.Context, _ string) (decimal.Decimal, decimal.Decimal, error) {

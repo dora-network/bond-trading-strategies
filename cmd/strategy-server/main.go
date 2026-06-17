@@ -169,6 +169,7 @@ func main() {
 		service,
 		strategyhttp.WithRunStore(strategyhttp.NewPGRunStore(pool)),
 		strategyhttp.WithBacktestStore(strategyhttp.NewPGBacktestStore(pool)),
+		strategyhttp.WithDecisionStore(strategyhttp.NewPGDecisionStore(pool)),
 		strategyhttp.WithTradesHistoryStore(copytrading.NewPGTradesHistoryStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithTradeStream(tradeStream),

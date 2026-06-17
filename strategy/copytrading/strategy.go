@@ -48,6 +48,13 @@ type Strategy struct {
 	disallowedSet map[uuid.UUID]struct{}
 	paused        bool
 	mu            sync.Mutex
+	// decisionStore is invoked after every successful CreateMarketOrder
+	// in the live run loop.  nil disables recording (backtests, unit
+	// tests, and any caller that does not opt in).
+	decisionStore strategy.DecisionRecorder
+	// decisionSeq is a per-run monotonic counter assigned to each
+	// recorded decision.  Protected by mu.
+	decisionSeq int64
 	// TODO: copytrading stop-loss. The current copytrading strategy has
 	// no stop-loss branch — exits only happen via the strategy.Stop
 	// message on the message channel. When a stop-loss is added to
@@ -109,6 +116,16 @@ func WithLogger(log *slog.Logger) func(*Strategy) {
 func WithTradeStream(ts *streams.TradeStream) func(*Strategy) {
 	return func(s *Strategy) {
 		s.tradeStream = ts
+	}
+}
+
+// WithDecisionStore sets the recorder invoked after every successful
+// CreateMarketOrder in the live run loop.  Passing nil disables
+// recording.  Backtests do not pass a recorder and therefore never
+// write to strategy_decisions.
+func WithDecisionStore(store strategy.DecisionRecorder) func(*Strategy) {
+	return func(s *Strategy) {
+		s.decisionStore = store
 	}
 }
 
@@ -338,6 +355,30 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	if err != nil {
 		return fmt.Errorf("create market order: %w", err)
 	}
+
+	// Record the live-run decision AFTER a successful order. A failed
+	// order must not produce a row — the row is the audit trail of
+	// orders that actually reached DORA.
+	kind := strategy.DecisionKindOpen
+	if isClose(side, current) {
+		kind = strategy.DecisionKindClose
+	} else if current != positionFlat {
+		kind = strategy.DecisionKindExtend
+	}
+	s.recordDecision(ctx, strategy.Decision{
+		OrderBookID:        trade.OrderBookID,
+		Asset:              trade.AssetID,
+		Side:               string(side),
+		Signal:             strings.ToLower(trade.Side),
+		Quantity:           orderSize,
+		Price:              trade.Price,
+		Leverage:           orderLeverage,
+		InverseLeverage:    inverseLeverage,
+		FromGlobalPosition: fromGlobal,
+		Kind:               kind,
+		Reason:             "follow_trade",
+		ReasonDetail:       fmt.Sprintf("followed trader %s execution %s", trade.TraderID, trade.ExecutionID),
+	})
 
 	s.log.Info("placed copy trade",
 		"order_book", trade.OrderBookID,
@@ -630,4 +671,43 @@ func calculateOrderSize(available, percentage, leverage decimal.Decimal, minOrde
 	}
 
 	return orderSize
+}
+
+// recordDecision is called by the live run loop immediately after a
+// successful CreateMarketOrder.  It assigns the per-run seq, stamps
+// CreatedAt, and forwards the row to the configured DecisionRecorder.
+//
+// The helper never returns an error: a failed persistence is logged and
+// the strategy continues.  The live run is the source of truth for
+// what orders were placed; a missing decision row is a degraded-but-
+// correct outcome, not a failure that should kill the run.
+//
+// Backtests never opt in to a recorder and therefore never call into
+// this code path.
+func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
+	if s.decisionStore == nil {
+		return
+	}
+	s.mu.Lock()
+	s.decisionSeq++
+	seq := s.decisionSeq
+	runID := s.runID
+	s.mu.Unlock()
+
+	d.RunID = runID
+	d.Seq = seq
+	d.StrategyType = "copy_trading"
+	if d.CreatedAt.IsZero() {
+		d.CreatedAt = time.Now().UTC()
+	}
+	if err := s.decisionStore.SaveDecision(ctx, d); err != nil {
+		s.log.Error("save strategy decision",
+			"err", err,
+			"run_id", d.RunID,
+			"seq", d.Seq,
+			"side", d.Side,
+			"signal", d.Signal,
+			"quantity", d.Quantity,
+		)
+	}
 }
