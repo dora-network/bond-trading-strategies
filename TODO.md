@@ -30,3 +30,12 @@
 
 - **Agent skill documentation**
   - Construct a `SKILL.md` file for the strategy server so users who prefer agent skills over MCP servers can interact with the service via a skill interface instead.
+
+- **Long Only Option**
+  - When chosen user will only be allowed to hold long positions and never short sell.
+
+## Checks
+
+- Copytrading Min/Max strategy parameters:
+  - Max order size should not be exceeded by the Percentage of available calculation
+  - Min order size should not submit order if size is smaller than min, except when closing positions, then min order size should be ignored

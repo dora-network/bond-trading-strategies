@@ -23,6 +23,12 @@ Order: price-daemon → strategy-server → mcp-server. `.env` is auto-sourced b
 - PostgreSQL with `tern` migrations in `migrations/`
 - Run: `tern migrate --config migrations/tern.conf`
 - Schema: `price_history`, `candles_history`, `strategy_runs`, `strategy_backtests`
+- **Time storage convention:** all `TIMESTAMP` (no time zone) columns hold
+  wall-clock values in **UTC**.  The database server is configured with its
+  system time zone set to UTC, so `pgx` reads the wall-clock value back as
+  UTC.  Writers MUST serialise `time.Time` values as UTC before binding
+  them.  Do not introduce `TIMESTAMPTZ` columns in new tables; the codebase
+  is deliberately consistent on `TIMESTAMP` + UTC.
 
 ## Tests
 

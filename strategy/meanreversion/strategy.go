@@ -109,6 +109,13 @@ type Strategy struct {
 	bondQty             decimal.Decimal // net bond position (+ = long, - = short)
 	usdBal              decimal.Decimal // USD available balance
 
+	// lastPrice is the most recent clean bond price observed for the
+	// configured asset, used as the recorded Price on close decisions
+	// (DORA fills the close at the market price, which is approximately
+	// the last observed mid).  Zero until the first price update.  Protected
+	// by mu.
+	lastPrice decimal.Decimal
+
 	// openSignal records the signal direction of the currently open position.
 	// SignalHold means flat (no position). Derived from bondQty in
 	// initializeBalances (so restarts correctly see the pre-existing position)
@@ -128,7 +135,20 @@ type Strategy struct {
 	lastStopZ         decimal.Decimal
 	lastStopPnL       decimal.Decimal
 	lastStopTriggered bool
+
+	// decisionStore is invoked after every successful CreateMarketOrder
+	// in the live run loop.  nil disables recording (backtests, unit
+	// tests, and any caller that does not opt in).
+	decisionStore strategy.DecisionRecorder
+	// decisionSeq is a per-run monotonic counter assigned to each
+	// recorded decision.  Protected by mu.
+	decisionSeq int64
 }
+
+// strategyType is the strategy.Decision.StrategyType value used by
+// the live run loop and the client_order_id format.  Keep in sync
+// with the string written by recordDecision.
+const strategyType = "mean_reversion"
 
 // New creates a new Strategy with the given Config and optional functional options.
 // Supported options: WithLogger.
@@ -175,6 +195,16 @@ func WithMarketAPIClient(client marketAPIClient) func(*Strategy) {
 func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
 	return func(s *Strategy) {
 		s.backtestWriter = w
+	}
+}
+
+// WithDecisionStore sets the recorder invoked after every successful
+// CreateMarketOrder in the live run loop.  Passing nil disables
+// recording.  Backtests do not pass a recorder and therefore never
+// write to strategy_decisions.
+func WithDecisionStore(store strategy.DecisionRecorder) func(*Strategy) {
+	return func(s *Strategy) {
+		s.decisionStore = store
 	}
 }
 
@@ -479,8 +509,12 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		inverseLeverage = decimal.One
 	}
 
+	// Build the client_order_id before submitting so the same value
+	// flows into the DORA request and the recorded decision row.
+	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
+
 	if err := s.marketAPIClient.CreateMarketOrder(
-		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, s.fromGlobalPosition,
+		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, s.fromGlobalPosition, clientOrderID,
 	); err != nil {
 		// Self-healing: if the order failed, check the live position on the exchange.
 		// If the live position is actually already 0, we can self-heal and clear our tracking state.
@@ -497,6 +531,30 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		}
 		return err
 	}
+
+	// Record the live-run decision AFTER a successful close order.
+	closeSignal := types.SignalSell
+	if side == doraclient.SIDE_BUY {
+		closeSignal = types.SignalBuy
+	}
+	s.mu.RLock()
+	closePrice := s.lastPrice
+	s.mu.RUnlock()
+	s.recordDecision(ctx, strategy.Decision{
+		OrderBookID:        s.cfg.OrderBookID,
+		Asset:              mustParseUUID(assetID),
+		Side:               string(side),
+		Signal:             closeSignal.String(),
+		Quantity:           closeQty,
+		Price:              closePrice, // last observed mid; DORA fills at the market mid
+		Leverage:           s.cfg.Leverage,
+		InverseLeverage:    inverseLeverage,
+		FromGlobalPosition: s.fromGlobalPosition,
+		Kind:               strategy.DecisionKindClose,
+		Reason:             "z_score_exit",
+		ReasonDetail:       "close: spread reverted to mean",
+		ClientOrderID:      clientOrderID,
+	})
 
 	s.mu.Lock()
 	if useTracked {
@@ -565,11 +623,33 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		"inverseLeverage", inverseLeverage,
 		"fromGlobalPosition", fromGlobalPosition,
 	)
+	// Build the client_order_id before submitting so the same value
+	// flows into the DORA request and the recorded decision row.
+	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
 	if err := s.marketAPIClient.CreateMarketOrder(
-		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition,
+		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition, clientOrderID,
 	); err != nil {
 		return false, err
 	}
+
+	// Record the live-run decision AFTER a successful order. A failed
+	// order must not produce a row — the row is the audit trail of
+	// orders that actually reached DORA.
+	s.recordDecision(ctx, strategy.Decision{
+		OrderBookID:        s.cfg.OrderBookID,
+		Asset:              mustParseUUID(assetID),
+		Side:               string(side),
+		Signal:             decision.Signal.String(),
+		Quantity:           quantity,
+		Price:              price,
+		Leverage:           s.cfg.Leverage,
+		InverseLeverage:    inverseLeverage,
+		FromGlobalPosition: fromGlobalPosition,
+		Kind:               strategy.DecisionKindOpen,
+		Reason:             "z_score_entry",
+		ReasonDetail:       fmt.Sprintf("z-score entry: z=%s signal=%s", decision.ZScore.String(), decision.Signal),
+		ClientOrderID:      clientOrderID,
+	})
 
 	// Update tracked balances and openSignal after a successful order.
 	// We use the decision price as an approximation — the actual fill may
@@ -695,6 +775,11 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 					BenchmarkYield: benchmarkYield,
 					Price:          px.Price,
 				}
+				// Track the most recent clean price for the configured
+				// asset.  Recorded on close decisions as the approximate
+				// fill price (DORA fills at the market mid, which is
+				// approximately the last observed mid).
+				s.lastPrice = px.Price
 				// Read window readiness before Update so the guard and the
 				// z-score in decision are computed from the same window state.
 				// On the tick that makes the window full, decision.ZScore is
@@ -990,4 +1075,59 @@ func (s *Strategy) LastStopLossTrigger() (zScore, pnl decimal.Decimal, triggered
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.lastStopZ, s.lastStopPnL, s.lastStopTriggered
+}
+
+// recordDecision is called by the live run loop immediately after a
+// successful CreateMarketOrder.  It assigns the per-run seq, stamps
+// CreatedAt, and forwards the row to the configured DecisionRecorder.
+//
+// The helper never returns an error: a failed persistence is logged and
+// the strategy continues.  The live run is the source of truth for
+// what orders were placed; a missing decision row is a degraded-but-
+// correct outcome, not a failure that should kill the run.
+//
+// Backtests never opt in to a recorder and therefore never call into
+// this code path.
+func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
+	if s.decisionStore == nil {
+		return
+	}
+	s.mu.Lock()
+	s.decisionSeq++
+	seq := s.decisionSeq
+	runID := s.runID
+	s.mu.Unlock()
+
+	d.RunID = runID
+	d.Seq = seq
+	d.StrategyType = strategyType
+	if d.CreatedAt.IsZero() {
+		d.CreatedAt = time.Now().UTC()
+	}
+	if err := s.decisionStore.SaveDecision(ctx, d); err != nil {
+		s.log.Error("save strategy decision",
+			"err", err,
+			"run_id", d.RunID,
+			"seq", d.Seq,
+			"side", d.Side,
+			"signal", d.Signal,
+			"quantity", d.Quantity,
+		)
+	}
+}
+
+// mustParseUUID converts a non-empty DORA asset/order-book ID string
+// (which the upstream API hands us as a string) into a uuid.UUID.
+// Empty input is treated as uuid.Nil so the live-run path can record
+// a decision even if the asset ID lookup failed earlier; the row
+// still preserves run_id + seq for forensics.
+func mustParseUUID(s string) uuid.UUID {
+	if s == "" {
+		return uuid.Nil
+	}
+	id, err := uuid.Parse(s)
+	if err != nil {
+		return uuid.Nil
+	}
+	return id
 }

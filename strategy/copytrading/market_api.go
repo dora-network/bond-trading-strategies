@@ -20,7 +20,7 @@ type marketAPIClient interface {
 	GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error)
 	GetAssetPosition(ctx context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error)
 	QuoteAssetID(ctx context.Context, orderBookID string) (string, error)
-	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool) error //nolint:lll
+	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool, clientOrderID string) error //nolint:lll
 }
 
 type doraAPIClient struct {
@@ -247,6 +247,7 @@ func (c *doraAPIClient) CreateMarketOrder(
 	quantity decimal.Decimal,
 	inverseLeverage decimal.Decimal,
 	fromGlobalPosition bool,
+	clientOrderID string,
 ) error {
 	if c == nil || c.client == nil {
 		return errors.New("DORA client is not configured")
@@ -279,6 +280,9 @@ func (c *doraAPIClient) CreateMarketOrder(
 		fromGlobalPosition,
 		orderBookID,
 	)
+	if clientOrderID != "" {
+		request.SetClientOrderId(clientOrderID)
+	}
 	slog.Info("create order request",
 		"order_book", orderBookID,
 		"side", side,

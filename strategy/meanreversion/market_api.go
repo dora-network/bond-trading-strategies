@@ -19,7 +19,7 @@ type marketAPIClient interface {
 	QuoteAssetID(ctx context.Context, orderBookID string) (string, error)
 	AssetPosition(ctx context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error)
 	GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error)
-	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool) error //nolint:lll
+	CreateMarketOrder(ctx context.Context, orderBookID string, side doraclient.Side, quantity decimal.Decimal, inverseLeverage decimal.Decimal, fromGlobalPosition bool, clientOrderID string) error //nolint:lll
 	AssetCollateralWeight(ctx context.Context, assetID string) (decimal.Decimal, error)
 }
 
@@ -298,6 +298,7 @@ func (c *doraAPIClient) CreateMarketOrder(
 	quantity decimal.Decimal,
 	inverseLeverage decimal.Decimal,
 	fromGlobalPosition bool,
+	clientOrderID string,
 ) error {
 	if c == nil || c.client == nil {
 		return errors.New("DORA client is not configured")
@@ -331,6 +332,9 @@ func (c *doraAPIClient) CreateMarketOrder(
 		fromGlobalPosition,
 		orderBookID,
 	)
+	if clientOrderID != "" {
+		request.SetClientOrderId(clientOrderID)
+	}
 	_, rawResp, err := c.client.DefaultAPI.CreateOrder(authCtx).CreateOrderRequest(*request).Execute()
 	if rawResp != nil && rawResp.Body != nil {
 		defer rawResp.Body.Close()
