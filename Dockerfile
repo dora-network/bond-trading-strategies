@@ -14,8 +14,8 @@ RUN --mount=type=secret,id=github_token \
     go mod download && \
     rm -f /root/.gitconfig
 
-COPY . .
 RUN CGO_ENABLED=0 go install github.com/jackc/tern/v2@v2.4.1
+COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -o /mcp-server ./cmd/mcp-server
 RUN CGO_ENABLED=0 go build -trimpath -o /strategy-server ./cmd/strategy-server
 RUN CGO_ENABLED=0 go build -trimpath -o /price-daemon ./cmd/price-daemon
