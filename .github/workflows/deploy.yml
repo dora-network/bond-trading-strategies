@@ -1,0 +1,65 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - development
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-bond-trading-${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || 'dev') }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  REPOSITORY: dora-bond-trading-strategies
+  DEPLOY_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || 'dev') }}
+
+jobs:
+  deploy:
+    name: Build and deploy ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || 'dev') }}
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'development' || github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || 'dev') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::425946675752:role/dora-github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-bond-trading-${{ env.DEPLOY_ENVIRONMENT }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/build-push.sh
+
+      - name: Deploy ECS services
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ env.DEPLOY_ENVIRONMENT }}
+          IMAGE_TAG: ${{ github.sha }}
+          DORA_API_KEY: ${{ secrets.DORA_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+        run: bash .github/scripts/deploy.sh

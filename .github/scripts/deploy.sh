@@ -3,15 +3,27 @@ set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
 REPOSITORY="${REPOSITORY:-dora-bond-trading-strategies}"
-CLUSTER_NAME="${CLUSTER_NAME:-dora-dev}"
-STRATEGY_SERVICE_NAME="${STRATEGY_SERVICE_NAME:-dora-bond-trading-strategy-dev}"
-MCP_SERVICE_NAME="${MCP_SERVICE_NAME:-dora-bond-trading-mcp-dev}"
-PRICE_DAEMON_SERVICE_NAME="${PRICE_DAEMON_SERVICE_NAME:-dora-bond-trading-price-daemon-dev}"
 PROJECT_NAME="${PROJECT_NAME:-dora-bond-trading}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
-STRATEGY_BASE_URL="${STRATEGY_BASE_URL:-https://strategy-dev.dora.co}"
-MCP_BASE_URL="${MCP_BASE_URL:-https://mcp-strategy-dev.dora.co}"
+CLUSTER_NAME="${CLUSTER_NAME:-dora-${ENVIRONMENT}}"
+STRATEGY_SERVICE_NAME="${STRATEGY_SERVICE_NAME:-${PROJECT_NAME}-strategy-${ENVIRONMENT}}"
+PRICE_DAEMON_SERVICE_NAME="${PRICE_DAEMON_SERVICE_NAME:-${PROJECT_NAME}-price-daemon-${ENVIRONMENT}}"
+WS_URL="${WS_URL:-wss://${ENVIRONMENT}.dora.co}"
+DORA_BASE_URL="${DORA_BASE_URL:-https://${ENVIRONMENT}.dora.co}"
 MIGRATE_ONLY="${MIGRATE_ONLY:-false}"
+
+case "$ENVIRONMENT" in
+	dev)
+		DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-dev.dora.co,https://dora-awsdev.vercel.app"
+		;;
+	staging)
+		DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-staging.dora.co,https://staging.dora.co"
+		;;
+	*)
+		DEFAULT_CORS_ALLOWED_ORIGINS="https://${ENVIRONMENT}.dora.co"
+		;;
+esac
+CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS:-$DEFAULT_CORS_ALLOWED_ORIGINS}"
 
 require_env() {
 	local name="$1"
@@ -50,7 +62,7 @@ require_secret() {
 	local secret_id="$1"
 
 	if ! aws secretsmanager describe-secret --secret-id "$secret_id" >/dev/null 2>&1; then
-		echo "Secret ${secret_id} does not exist. Apply terraform/environments/dev first." >&2
+		echo "Secret ${secret_id} does not exist. Apply Terraform for ${ENVIRONMENT} first." >&2
 		exit 1
 	fi
 }
@@ -67,7 +79,7 @@ require_service() {
 			--output text
 	)"
 	if [[ "$service_count" != "1" ]]; then
-		echo "ECS service ${service_name} does not exist. Apply terraform/environments/dev first." >&2
+		echo "ECS service ${service_name} does not exist. Apply Terraform for ${ENVIRONMENT} first." >&2
 		exit 1
 	fi
 }
@@ -170,7 +182,6 @@ require_secret "$ENCRYPTION_KEY_SECRET_NAME"
 if ! truthy "$MIGRATE_ONLY"; then
 	require_env DORA_API_KEY
 	require_env ENCRYPTION_KEY
-	require_service "$MCP_SERVICE_NAME"
 	require_service "$PRICE_DAEMON_SERVICE_NAME"
 
 	put_secret_value "$DORA_API_KEY_SECRET_NAME" "$DORA_API_KEY"
@@ -190,6 +201,10 @@ strategy_containers="$(
 		--arg dora "$DORA_API_KEY_SECRET_ARN" \
 		--arg fred "$FRED_API_KEY_SECRET_ARN" \
 		--arg encryption "$ENCRYPTION_KEY_SECRET_ARN" \
+		--arg ws_url "$WS_URL" \
+		--arg dora_base_url "$DORA_BASE_URL" \
+		--arg cors_allowed_origins "$CORS_ALLOWED_ORIGINS" \
+		--arg environment "$ENVIRONMENT" \
 		'[{
 			name: "strategy-server",
 			image: $image,
@@ -201,10 +216,10 @@ strategy_containers="$(
 			portMappings: [{containerPort: 8081, protocol: "tcp"}],
 			environment: [
 				{name: "ADDR", value: ":8081"},
-				{name: "WS_URL", value: "wss://dev.dora.co"},
-				{name: "DORA_BASE_URL", value: "https://dev.dora.co"},
+				{name: "WS_URL", value: $ws_url},
+				{name: "DORA_BASE_URL", value: $dora_base_url},
 				{name: "LOG_LEVEL", value: "INFO"},
-				{name: "CORS_ALLOWED_ORIGINS", value: "https://aws-dev.dora.co,https://dora-awsdev.vercel.app"}
+				{name: "CORS_ALLOWED_ORIGINS", value: $cors_allowed_origins}
 			],
 			secrets: [
 				{name: "DATABASE_URL", valueFrom: $db},
@@ -222,50 +237,7 @@ strategy_containers="$(
 			logConfiguration: {
 				logDriver: "awslogs",
 				options: {
-					"awslogs-group": "/ecs/dora-bond-trading-strategy-dev",
-					"awslogs-region": "us-east-1",
-					"awslogs-stream-prefix": "ecs"
-				}
-			}
-		}]'
-)"
-
-mcp_containers="$(
-	jq -cn \
-		--arg image "$IMAGE_URI" \
-		--arg dora "$DORA_API_KEY_SECRET_ARN" \
-		--arg fred "$FRED_API_KEY_SECRET_ARN" \
-		--arg strategy_url "$STRATEGY_BASE_URL" \
-		--arg mcp_url "$MCP_BASE_URL" \
-		'[{
-			name: "mcp-server",
-			image: $image,
-			essential: true,
-			entryPoint: ["/app/mcp-server"],
-			command: ["--addr", ":8080", "--base-url", $mcp_url, "--strategy-base-url", $strategy_url],
-			readonlyRootFilesystem: false,
-			stopTimeout: 10,
-			portMappings: [{containerPort: 8080, protocol: "tcp"}],
-			environment: [
-				{name: "ADDR", value: ":8080"},
-				{name: "MCP_BASE_URL", value: $mcp_url},
-				{name: "STRATEGY_BASE_URL", value: $strategy_url}
-			],
-			secrets: [
-				{name: "DORA_API_KEY", valueFrom: $dora},
-				{name: "FRED_API_KEY", valueFrom: $fred}
-			],
-			healthCheck: {
-				command: ["CMD-SHELL", "wget -q --spider http://localhost:8080/healthz || exit 1"],
-				interval: 30,
-				timeout: 5,
-				retries: 3,
-				startPeriod: 30
-			},
-			logConfiguration: {
-				logDriver: "awslogs",
-				options: {
-					"awslogs-group": "/ecs/dora-bond-trading-mcp-dev",
+					"awslogs-group": "/ecs/dora-bond-trading-strategy-\($environment)",
 					"awslogs-region": "us-east-1",
 					"awslogs-stream-prefix": "ecs"
 				}
@@ -278,6 +250,9 @@ price_daemon_containers="$(
 		--arg image "$IMAGE_URI" \
 		--arg db "$DATABASE_URL_SECRET_ARN" \
 		--arg dora "$DORA_API_KEY_SECRET_ARN" \
+		--arg ws_url "$WS_URL" \
+		--arg dora_base_url "$DORA_BASE_URL" \
+		--arg environment "$ENVIRONMENT" \
 		'[{
 			name: "price-daemon",
 			image: $image,
@@ -288,8 +263,8 @@ price_daemon_containers="$(
 			stopTimeout: 10,
 			environment: [
 				{name: "HTTP_ADDR", value: ":8080"},
-				{name: "WS_URL", value: "wss://dev.dora.co"},
-				{name: "DORA_BASE_URL", value: "https://dev.dora.co"},
+				{name: "WS_URL", value: $ws_url},
+				{name: "DORA_BASE_URL", value: $dora_base_url},
 				{name: "LOG_LEVEL", value: "INFO"},
 				{name: "HEALTH_STALE_AFTER", value: "2m"},
 				{name: "HEALTH_STARTUP_GRACE", value: "2m"}
@@ -308,7 +283,7 @@ price_daemon_containers="$(
 			logConfiguration: {
 				logDriver: "awslogs",
 				options: {
-					"awslogs-group": "/ecs/dora-bond-trading-price-daemon-dev",
+					"awslogs-group": "/ecs/dora-bond-trading-price-daemon-\($environment)",
 					"awslogs-region": "us-east-1",
 					"awslogs-stream-prefix": "ecs"
 				}
@@ -320,6 +295,7 @@ migrate_containers="$(
 	jq -cn \
 		--arg image "$IMAGE_URI" \
 		--arg db "$DATABASE_URL_SECRET_ARN" \
+		--arg environment "$ENVIRONMENT" \
 		'[{
 			name: "migrate",
 			image: $image,
@@ -333,7 +309,7 @@ migrate_containers="$(
 			logConfiguration: {
 				logDriver: "awslogs",
 				options: {
-					"awslogs-group": "/ecs/dora-bond-trading-migrate-dev",
+					"awslogs-group": "/ecs/dora-bond-trading-migrate-\($environment)",
 					"awslogs-region": "us-east-1",
 					"awslogs-stream-prefix": "migrate"
 				}
@@ -350,7 +326,6 @@ if truthy "$MIGRATE_ONLY"; then
 fi
 
 strategy_task_definition="$(register_task_definition "${PROJECT_NAME}-strategy-${ENVIRONMENT}" 1024 2048 "$strategy_containers")"
-mcp_task_definition="$(register_task_definition "${PROJECT_NAME}-mcp-${ENVIRONMENT}" 512 1024 "$mcp_containers")"
 price_task_definition="$(register_task_definition "${PROJECT_NAME}-price-daemon-${ENVIRONMENT}" 512 1024 "$price_daemon_containers")"
 
 aws ecs update-service \
@@ -361,18 +336,12 @@ aws ecs update-service \
 
 aws ecs update-service \
 	--cluster "$CLUSTER_NAME" \
-	--service "$MCP_SERVICE_NAME" \
-	--task-definition "$mcp_task_definition" \
-	--desired-count 1 >/dev/null
-
-aws ecs update-service \
-	--cluster "$CLUSTER_NAME" \
 	--service "$PRICE_DAEMON_SERVICE_NAME" \
 	--task-definition "$price_task_definition" \
 	--desired-count 1 >/dev/null
 
 aws ecs wait services-stable \
 	--cluster "$CLUSTER_NAME" \
-	--services "$STRATEGY_SERVICE_NAME" "$MCP_SERVICE_NAME" "$PRICE_DAEMON_SERVICE_NAME"
+	--services "$STRATEGY_SERVICE_NAME" "$PRICE_DAEMON_SERVICE_NAME"
 
 echo "Deployed ${IMAGE_URI}"
