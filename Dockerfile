@@ -15,6 +15,7 @@ RUN --mount=type=secret,id=github_token \
     rm -f /root/.gitconfig
 
 COPY . .
+RUN CGO_ENABLED=0 go install github.com/jackc/tern/v2@v2.4.1
 RUN CGO_ENABLED=0 go build -trimpath -o /mcp-server ./cmd/mcp-server
 RUN CGO_ENABLED=0 go build -trimpath -o /strategy-server ./cmd/strategy-server
 RUN CGO_ENABLED=0 go build -trimpath -o /price-daemon ./cmd/price-daemon
@@ -28,6 +29,8 @@ WORKDIR /app
 COPY --from=builder /mcp-server /app/mcp-server
 COPY --from=builder /strategy-server /app/strategy-server
 COPY --from=builder /price-daemon /app/price-daemon
+COPY --from=builder /go/bin/tern /app/tern
+COPY migrations /app/migrations
 
 USER appuser
 
@@ -35,4 +38,4 @@ EXPOSE 8080
 EXPOSE 8081
 
 ENTRYPOINT ["/app/mcp-server"]
-CMD ["-addr", ":8080", "-base-url", "http://localhost:8080"]
+CMD ["--addr", ":8080", "--base-url", "http://localhost:8080"]

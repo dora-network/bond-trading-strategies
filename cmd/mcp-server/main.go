@@ -31,7 +31,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"time"
 
 	mcpserver "github.com/dora-network/bond-trading-strategies/mcp"
 	flag "github.com/spf13/pflag"
@@ -44,6 +46,8 @@ func main() {
 	fredKey := flag.StringP("fred-api-key", "f", envOr("FRED_API_KEY", ""), "FRED API key")
 	doraAPIKey := flag.StringP("dora-api-key", "k", envOr("DORA_API_KEY", ""), "DORA API key")
 	flag.Parse()
+
+	*fredKey = optionalEnvValue(*fredKey)
 
 	if *doraAPIKey == "" {
 		fmt.Fprintln(os.Stderr, "error: --dora-api-key (or DORA_API_KEY) is required")
@@ -75,7 +79,12 @@ func main() {
 	}()
 
 	log.Printf("bond-trading-strategies MCP server listening on %s (base URL: %s), strategy-server URL: %s", *addr, *baseURL, *strategyBaseURL)
-	if err := sseSrv.Start(*addr); err != nil {
+	httpServer := &http.Server{
+		Addr:              *addr,
+		Handler:           mcpserver.NewHTTPHandlerFromSSE(sseSrv),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
@@ -85,4 +94,11 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func optionalEnvValue(value string) string {
+	if value == "not-configured" {
+		return ""
+	}
+	return value
 }

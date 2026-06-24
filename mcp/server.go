@@ -14,6 +14,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -151,4 +152,31 @@ func eventToMap(evt notifications.Event) (map[string]any, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// NewHTTPHandler exposes MCP SSE endpoints plus a lightweight health endpoint.
+func NewHTTPHandler(fredAPIKey, doraAPIKey, strategyBaseURL, baseURL string) http.Handler {
+	sseServer := NewSSEServer(fredAPIKey, doraAPIKey, strategyBaseURL, baseURL)
+	return NewHTTPHandlerFromSSE(sseServer)
+}
+
+// NewHTTPHandlerFromSSE exposes an existing MCP SSE server plus a lightweight
+// health endpoint.
+func NewHTTPHandlerFromSSE(sseServer *server.SSEServer) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", handleHealth)
+	mux.Handle("/", sseServer)
+	return mux
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"ok":true}`))
 }
