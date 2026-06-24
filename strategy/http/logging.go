@@ -3,8 +3,10 @@ package http
 import (
 	"bufio"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
+	"time"
 )
 
 // LoggingResponseWriter wraps an http.ResponseWriter to capture the
@@ -78,4 +80,76 @@ func (l *LoggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return nil, nil, errors.New("underlying ResponseWriter does not implement http.Hijacker")
 	}
 	return h.Hijack()
+}
+
+// RequestLog returns a middleware that records one slog record per
+// request. The record carries method, route (from r.Pattern, falling
+// back to r.URL.Path when the request was not matched by a mux
+// pattern), path, status, duration_ms, bytes, user_id, and an
+// optional err string attached via LoggingResponseWriter.WithError.
+//
+// Paths in exempt produce no log record. The default behavior
+// (exempt == nil) logs every request.
+//
+// Log levels:
+//   - status < 400: slog.LevelInfo
+//   - 400 ≤ status < 500: slog.LevelWarn
+//   - status ≥ 500: slog.LevelError
+//
+// 401 responses from requireAuth are logged at slog.LevelWarn with
+// user_id="unauthenticated" and err set to the body the handler
+// wrote.
+//
+// The middleware reads only r.Method, r.URL.Path, r.Pattern, and the
+// resolved DORA user id from the request context. It never reads
+// the Authorization header or any other request body. The user_id
+// helper (doraUserIDFromContext) is defined in auth.go and returns
+// the empty string when authentication has not run.
+func RequestLog(log *slog.Logger, exempt map[string]struct{}) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := exempt[r.URL.Path]; ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			start := time.Now()
+			lw := NewLoggingResponseWriter(w)
+			next.ServeHTTP(lw, r)
+
+			status := lw.Status()
+			level := slog.LevelInfo
+			switch {
+			case status >= http.StatusInternalServerError:
+				level = slog.LevelError
+			case status >= http.StatusBadRequest:
+				level = slog.LevelWarn
+			}
+
+			userID, _ := doraUserIDFromContext(r.Context())
+			if userID == "" {
+				userID = "unauthenticated"
+			}
+
+			route := r.Pattern
+			if route == "" {
+				route = r.URL.Path
+			}
+
+			attrs := []slog.Attr{
+				slog.String("method", r.Method),
+				slog.String("route", route),
+				slog.String("path", r.URL.Path),
+				slog.Int("status", status),
+				slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+				slog.Int("bytes", lw.Bytes()),
+				slog.String("user_id", userID),
+			}
+			if errMsg := lw.Err(); errMsg != "" {
+				attrs = append(attrs, slog.String("err", errMsg))
+			}
+
+			log.LogAttrs(r.Context(), level, "request", attrs...)
+		})
+	}
 }
