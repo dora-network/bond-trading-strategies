@@ -56,14 +56,19 @@ type Handler struct {
 	runStore           RunStore
 	backtestStore      BacktestStore
 	tradesHistoryStore *copytrading.PGTradesHistoryStore
-	tradeStream        *streams.TradeStream
-	notifier           notifications.Notifier
-	encryptionKey      []byte // 32-byte AES-256 key for encrypting API keys at rest
-	mux                *http.ServeMux
-	authedMux          http.Handler
-	mu                 sync.RWMutex
-	backtests          map[uuid.UUID]*BacktestDetail
-	runs               map[uuid.UUID]*RunDetail
+	// decisionStore is invoked by the live strategy loop (meanreversion
+	// and copytrading) after every successful market order to record
+	// the decision that triggered it. nil disables recording; backtests
+	// never opt in and therefore never write to strategy_decisions.
+	decisionStore strategycore.DecisionRecorder
+	tradeStream   *streams.TradeStream
+	notifier      notifications.Notifier
+	encryptionKey []byte // 32-byte AES-256 key for encrypting API keys at rest
+	mux           *http.ServeMux
+	authedMux     http.Handler
+	mu            sync.RWMutex
+	backtests     map[uuid.UUID]*BacktestDetail
+	runs          map[uuid.UUID]*RunDetail
 	// runningStrategies maps a live run id to the strategy instance that
 	// was started for it, so the stop-loss observer can query the
 	// strategy's recorded trigger. Populated in createRun and
@@ -515,9 +520,20 @@ func WithRunStore(store RunStore) func(*Handler) {
 	}
 }
 
+// WithBacktestStore sets the store used by the backtest trade writer.
 func WithBacktestStore(store BacktestStore) func(*Handler) {
 	return func(h *Handler) {
 		h.backtestStore = store
+	}
+}
+
+// WithDecisionStore sets the recorder used by the live strategy loops
+// (meanreversion and copytrading) to record the decision that triggered
+// every market order.  Passing nil disables recording.  Backtests do
+// not pass a recorder and therefore never write to strategy_decisions.
+func WithDecisionStore(store strategycore.DecisionRecorder) func(*Handler) {
+	return func(h *Handler) {
+		h.decisionStore = store
 	}
 }
 
@@ -1298,6 +1314,11 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Attach the per-run decision recorder so every successful live
+	// market order is written to strategy_decisions. nil disables
+	// recording; the helper is a no-op for unknown strategy types.
+	h.attachDecisionStore(strat)
+
 	var encryptedAPIKey []byte
 	if info != nil && info.APIKey != "" && len(h.encryptionKey) > 0 {
 		encryptedAPIKey, err = encryptAPIKey([]byte(info.APIKey), h.encryptionKey)
@@ -1620,6 +1641,9 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		}
 	}
 
+	// Attach the per-run decision recorder. nil disables recording.
+	h.attachDecisionStore(strat)
+
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}
@@ -1787,6 +1811,23 @@ func (h *Handler) resolveStrategy(strategyType string, config json.RawMessage, c
 		return StrategyDefinition{}, nil, nil, http.StatusBadRequest, err
 	}
 	return def, normalised, strat, http.StatusOK, nil
+}
+
+// attachDecisionStore wires the handler's configured DecisionRecorder
+// into a freshly-built strategy so the live run loop persists every
+// decision that triggers a market order.  It is a no-op when the
+// handler has no recorder configured (the default) or when the
+// strategy type does not support recording.
+func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
+	if h.decisionStore == nil {
+		return
+	}
+	switch s := strat.(type) {
+	case *meanreversion.Strategy:
+		meanreversion.WithDecisionStore(h.decisionStore)(s)
+	case *copytrading.Strategy:
+		copytrading.WithDecisionStore(h.decisionStore)(s)
+	}
 }
 
 func defaultStrategies(

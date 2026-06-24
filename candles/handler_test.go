@@ -251,11 +251,25 @@ func TestHandler_StreamSingle(t *testing.T) {
 		defer cancel()
 
 		subscribed := make(chan struct{})
+		// saved is closed by the subscriber's WithWriteHook after a
+		// successful SaveCandles.  The test must wait on this channel
+		// before asserting SaveCandlesCallCount, because the stream
+		// goroutine returns as soon as the websocket closes — which
+		// can happen before the subscriber goroutine has finished
+		// consuming from the channel and persisting the entry.
+		saved := make(chan struct{})
 		s := candles.NewStoreSubscriber(fakeStore, func(requestID uuid.UUID) (chan []candles.StreamCandlesEntry, error) {
 			ch, err := h.Subscribe(requestID)
 			close(subscribed)
 			return ch, err
-		})
+		}, candles.WithWriteHook(func() {
+			select {
+			case <-saved:
+				// already closed
+			default:
+				close(saved)
+			}
+		}))
 		go func() {
 			_ = s.Start(ctx)
 		}()
@@ -276,6 +290,16 @@ func TestHandler_StreamSingle(t *testing.T) {
 
 		<-saveDone
 		assert.Equal(t, 1, fakeStore.GetLastTimestampCallCount())
+
+		// Wait for the save to complete before asserting the count.
+		// Without this, the assertion is racy: the stream returns on
+		// websocket close while the subscriber goroutine may still be
+		// blocked on the channel select or inside SaveCandles.
+		select {
+		case <-saved:
+		case <-ctx.Done():
+			t.Fatal("SaveCandles was not called before the test context expired")
+		}
 		assert.GreaterOrEqual(t, fakeStore.SaveCandlesCallCount(), 1)
 	})
 
