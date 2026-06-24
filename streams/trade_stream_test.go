@@ -120,3 +120,12 @@ func TestTradeStream_MultipleSubscribers(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+func TestSafeStreamURLRedactsAPIKey(t *testing.T) {
+	t.Parallel()
+
+	got := safeStreamURL("wss://example.com/v1/trades/book-123/stream?since=2026-06-24T11%3A26%3A36Z&x-api-key=secret123")
+
+	require.Equal(t, "wss://example.com/v1/trades/book-123/stream?since=2026-06-24T11%3A26%3A36Z&x-api-key=%2A%2A%2A", got)
+	require.NotContains(t, got, "secret123")
+}

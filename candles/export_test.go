@@ -10,6 +10,10 @@ func (h *Handler) BuildURL(orderBookID string, since *time.Time) (string, error)
 	return h.buildURL(orderBookID, since)
 }
 
+func (h *Handler) SafeURL(rawURL string) string {
+	return h.safeURL(rawURL)
+}
+
 func (h *Handler) ProcessMessage(ctx context.Context, orderBookID string, data []byte) error {
 	return h.processMessage(ctx, orderBookID, data)
 }

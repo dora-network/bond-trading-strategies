@@ -83,6 +83,16 @@ func TestHandler_buildURL(t *testing.T) {
 	}
 }
 
+func TestHandler_safeURLRedactsAPIKey(t *testing.T) {
+	t.Parallel()
+
+	h := candles.New(candles.Config{}, &candlesfakes.FakeCandleStore{})
+	got := h.SafeURL("wss://example.com/v1/charts/book-123/candle/stream?api_key=secret123&resolution=1m")
+
+	assert.Equal(t, "wss://example.com/v1/charts/book-123/candle/stream?api_key=%2A%2A%2A&resolution=1m", got)
+	assert.NotContains(t, got, "secret123")
+}
+
 func TestHandler_processMessage(t *testing.T) {
 	t.Parallel()
 
