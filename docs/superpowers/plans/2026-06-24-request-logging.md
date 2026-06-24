@@ -10,6 +10,20 @@
 
 ---
 
+## Commit gate
+
+**The implementer subagent MUST NOT commit.** After every task,
+stage the work with `git add` and stop. The controller reviews
+each task with the user before the commit is made. The plan's
+"Commit" step is replaced with "Stage and report" for every
+task: run `git add <files>` and report the staged paths. The
+controller (or the user, after review) runs the `git commit`
+command.
+
+Why: the user wants a per-task review checkpoint. Skipping
+this gate means the work is committed before the user sees
+it, which is wrong.
+
 ## File structure
 
 | File | Status | Responsibility |
@@ -239,12 +253,15 @@ existing `"net/http"` import is enough for the rest).
 Run: `go test ./strategy/http/ -run TestLoggingResponseWriter -v`
 Expected: all five tests PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Stage and report**
 
 ```bash
 git add strategy/http/logging.go strategy/http/logging_test.go
-git commit -m "feat(http): add LoggingResponseWriter with status, bytes, error capture"
 ```
+
+Report the staged paths. **DO NOT run `git commit`.** The
+controller reviews the diff and the user approves the commit
+message.
 
 ---
 
@@ -412,9 +429,14 @@ func TestRequestLog_WarnOn4xx(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	handler := strategyhttp.RequestLog(logger, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		strategyhttp.WriteError(w, http.StatusBadRequest, "bad input")
+		// RequestLog already wrapped w in a *LoggingResponseWriter.
+		// Type-assert it to call WithError; do NOT wrap again, the
+		// inner wrapper's state would be invisible to the middleware.
+		lw := w.(*strategyhttp.LoggingResponseWriter)
+		lw.WithError("bad input")
+		lw.WriteHeader(http.StatusBadRequest)
+		_, _ = lw.Write([]byte(`{"error":"bad input"}`))
 	}))
-
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/backtests", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -424,7 +446,6 @@ func TestRequestLog_WarnOn4xx(t *testing.T) {
 	assert.Equal(t, float64(400), log["status"])
 	assert.Equal(t, "bad input", log["err"])
 }
-
 func TestRequestLog_ErrorOn5xx(t *testing.T) {
 	t.Parallel()
 
@@ -432,7 +453,10 @@ func TestRequestLog_ErrorOn5xx(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	handler := strategyhttp.RequestLog(logger, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		strategyhttp.WriteError(w, http.StatusInternalServerError, "boom")
+		lw := w.(*strategyhttp.LoggingResponseWriter)
+		lw.WithError("boom")
+		lw.WriteHeader(http.StatusInternalServerError)
+		_, _ = lw.Write([]byte(`{"error":"boom"}`))
 	}))
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/backtests", nil)
@@ -608,12 +632,13 @@ func TestRequestLog_NoErrFieldWhenAbsent(t *testing.T) {
 Run: `go test ./strategy/http/ -run 'TestRequestLog_|TestLoggingResponseWriter_' -v`
 Expected: all tests PASS.
 
-- [ ] **Step 11: Commit**
+- [ ] **Step 11: Stage and report**
 
 ```bash
 git add strategy/http/logging.go strategy/http/logging_test.go
-git commit -m "feat(http): add RequestLog middleware with level rules and exempt paths"
 ```
+
+Report the staged paths. **DO NOT run `git commit`.**
 
 ---
 
@@ -661,47 +686,73 @@ on the log output, so adding `WithError` should be transparent.
 
 - [ ] **Step 4: Add a focused test that asserts the wired-up behaviour end-to-end**
 
-The simplest way to exercise this is to add a test that runs the
-middleware around a handler that calls `writeError`, and asserts the
-log record carries the message. Append to
-`strategy/http/logging_test.go`:
+`writeError` is unexported, so this test must live in a file
+with `package http` (internal), not `package http_test`. Create a
+new file `strategy/http/logging_internal_test.go` with:
 
 ```go
-// TestRequestLog_AttachesErrorFromWriteError ensures writeError
-// stashes the message on the wrapper so the middleware can include
-// it in the log record. This covers the wiring between
+package http
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// parseLogJSON decodes a single JSON line emitted by slog into a
+// map. Mirrors the helper in logging_test.go (kept separate so the
+// external and internal test files can evolve independently).
+func parseLogJSON(t *testing.T, buf *bytes.Buffer) map[string]any {
+	t.Helper()
+	var rec map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
+	return rec
+}
+
+// TestWriteError_AttachesErrorToWrapper ensures writeError stashes
+// the message on the logging wrapper so the middleware can include
+// it in the request log record. This covers the wiring between
 // writeError's WithError call and the middleware's Err() read.
-func TestRequestLog_AttachesErrorFromWriteError(t *testing.T) {
+func TestWriteError_AttachesErrorToWrapper(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	handler := strategyhttp.RequestLog(logger, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		strategyhttp.WriteError(w, http.StatusBadRequest, "config: invalid field")
+	handler := RequestLog(logger, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusBadRequest, "config: invalid field")
 	}))
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/backtests", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	log := parseLog(t, &buf)
+	log := parseLogJSON(t, &buf)
 	assert.Equal(t, "WARN", log["level"])
 	assert.Equal(t, "config: invalid field", log["err"])
 }
-```
 
 - [ ] **Step 5: Run the new test**
 
-Run: `go test ./strategy/http/ -run TestRequestLog_AttachesErrorFromWriteError -v`
+Run: `go test ./strategy/http/ -run TestWriteError_AttachesErrorToWrapper -v`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Stage and report**
 
 ```bash
-git add strategy/http/handler.go strategy/http/logging_test.go
-git commit -m "feat(http): attach error message to logging wrapper from writeError"
+git add strategy/http/handler.go strategy/http/logging_internal_test.go
 ```
+
+Note: `logging_test.go` is NOT staged here — the previous task
+(Task 2) staged it. The new file is `logging_internal_test.go`.
+Report the staged paths. **DO NOT run `git commit`.**
 
 ---
 
