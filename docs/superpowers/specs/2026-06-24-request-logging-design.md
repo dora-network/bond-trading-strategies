@@ -87,7 +87,6 @@ Note: a 401 from `requireAuth` falls in the `slog.Warn` band, with
 `user_id="unauthenticated"` and `err` set to the body the handler
 wrote (e.g. `"missing Authorization header"`).
 Fields on the record (all `slog.Attr`):
-Fields on the record (all `slog.Attr`, set in this order):
 
 | Field         | Type   | Source                                            |
 |---------------|--------|---------------------------------------------------|
@@ -296,9 +295,6 @@ sense, individual tests where each one has a distinct setup):
   base64, length, prefix, or suffix). The operational guarantee
   is "the key never appears in the log in any form", not
   "the key is not printed verbatim".
-  derivable from the output.
-- `TestRequestLog_NoErrFieldWhenAbsent` — 200 with no `WithError`
-  call → emitted record has no `err` attribute.
 
 The slog capture uses `slog.NewJSONHandler` writing to a
 `*bytes.Buffer`, which the test reads and decodes as JSON to assert
