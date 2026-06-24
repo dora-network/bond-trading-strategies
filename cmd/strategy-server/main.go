@@ -214,6 +214,12 @@ func main() {
 		wrappedHandler = cors.New(*corsAllowedOrigins)(wrappedHandler)
 	}
 
+	exemptLogPaths := map[string]struct{}{
+		"/healthz":    {},
+		"/v1/openapi": {},
+	}
+	wrappedHandler = strategyhttp.RequestLog(log, exemptLogPaths)(wrappedHandler)
+
 	if notifier != nil {
 		wsSubMux := http.NewServeMux()
 		wsPatterns, wsAllowAll := cors.OriginPatterns(*corsAllowedOrigins)

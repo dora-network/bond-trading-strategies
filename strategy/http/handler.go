@@ -2312,6 +2312,9 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, ErrorResponse{Error: message})
+	if lw, ok := w.(*LoggingResponseWriter); ok {
+		lw.WithError(message)
+	}
 }
 
 func writeMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
