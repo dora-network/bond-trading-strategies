@@ -102,11 +102,11 @@ Fields on the record (all `slog.Attr`):
 The `msg` attribute is the literal string `"request"`. Operators
 filter on it.
 
-The route is taken from `r.Pattern` (Go 1.26, available in this
-module — `go.mod` declares `go 1.26.2`). For requests matched by the
+The route is taken from `r.Pattern`, which has been on
+`*http.Request` since Go 1.22. For requests matched by the
 strategy-server's `http.ServeMux`, `r.Pattern` is the mux pattern
 (e.g. `/v1/backtests/{id}`). For requests that did not match a
-pattern (e.g. 404s from the global mux), `r.Pattern` is nil and we
+pattern (e.g. 404s from the global mux), `r.Pattern` is empty and we
 fall back to `r.URL.Path`. This gives operators a useful "which
 endpoint" grouping for matched routes and a literal path for
 unmatched ones, with no allocation.
