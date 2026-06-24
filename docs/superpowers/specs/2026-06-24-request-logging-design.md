@@ -73,8 +73,9 @@ Out of scope:
 ### Log line shape
 
 A single slog record is emitted per non-exempt request, after the
-handler returns. The record is built by the middleware and emitted on
-`h.log` (the existing `*slog.Logger` field on `Handler`):
+handler returns. The record is built by the middleware and emitted
+on the `*slog.Logger` passed to it (in production, the
+`slog.Default()` already configured by `cmd/strategy-server/main.go`):
 
 | Level       | When                                   |
 |-------------|----------------------------------------|
@@ -85,7 +86,7 @@ handler returns. The record is built by the middleware and emitted on
 Note: a 401 from `requireAuth` falls in the `slog.Warn` band, with
 `user_id="unauthenticated"` and `err` set to the body the handler
 wrote (e.g. `"missing Authorization header"`).
-
+Fields on the record (all `slog.Attr`):
 Fields on the record (all `slog.Attr`, set in this order):
 
 | Field         | Type   | Source                                            |
@@ -192,11 +193,13 @@ and reads the resolved `user_id` from context (set by `requireAuth`).
 **`strategy/http/handler.go`** (existing) — one small change:
 
 - In `writeError`, after `writeJSON(w, status, ErrorResponse{Error: message})`,
-  call `if lw, ok := w.(LoggingResponseWriter); ok { lw.WithError(message) }`.
-  The type-assertion is the contract: every request that reaches
-  `writeError` has flowed through `RequestLog` in `main.go`, so
-  `w` is a `LoggingResponseWriter`. The `ok` check is defensive and
-  never false in production.
+  call `if lw, ok := w.(*LoggingResponseWriter); ok { lw.WithError(message) }`.
+  The wrapper is constructed as a pointer (`&LoggingResponseWriter{...}`)
+  in the middleware, and `http.ResponseWriter` is an interface, so the
+  type assertion must match a pointer. The assertion is the contract:
+  every request that reaches `writeError` has flowed through
+  `RequestLog` in `main.go`, so `w` is a `*LoggingResponseWriter`.
+  The `ok` check is defensive and never false in production.
 
 **`cmd/strategy-server/main.go`** (existing) — one small change:
 
@@ -286,6 +289,13 @@ sense, individual tests where each one has a distinct setup):
   `Authorization: ApiKey secret-abc-123`. Capture the slog output
   and assert the substring `secret-abc-123` is not present. Also
   assert the key is not hashed, fingerprinted, or otherwise
+  derivable from the output.
+  The assertion is intentionally strict: the test must fail if
+  ANY substring of the `Authorization` header value appears in
+  the emitted record in any encoding (raw, lowercase, hex,
+  base64, length, prefix, or suffix). The operational guarantee
+  is "the key never appears in the log in any form", not
+  "the key is not printed verbatim".
   derivable from the output.
 - `TestRequestLog_NoErrFieldWhenAbsent` — 200 with no `WithError`
   call → emitted record has no `err` attribute.
