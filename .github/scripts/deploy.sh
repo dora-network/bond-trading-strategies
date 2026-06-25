@@ -20,6 +20,7 @@ case "$ENVIRONMENT" in
 		DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-staging.dora.co,https://staging.dora.co"
 		;;
 	*)
+		# Custom/integrator domains should pass CORS_ALLOWED_ORIGINS explicitly.
 		DEFAULT_CORS_ALLOWED_ORIGINS="https://${ENVIRONMENT}.dora.co"
 		;;
 esac
@@ -135,7 +136,23 @@ run_migration() {
 	task_arn="$(jq -r '.tasks[0].taskArn' <<<"$task_output")"
 	echo "Migration task: ${task_arn}"
 
-	aws ecs wait tasks-stopped --cluster "$CLUSTER_NAME" --tasks "$task_arn" || true
+	if ! aws ecs wait tasks-stopped --cluster "$CLUSTER_NAME" --tasks "$task_arn"; then
+		task_desc="$(
+			aws ecs describe-tasks \
+				--cluster "$CLUSTER_NAME" \
+				--tasks "$task_arn" 2>/dev/null || true
+		)"
+		if [[ -n "$task_desc" ]]; then
+			echo "Migration task did not stop before the waiter failed:" >&2
+			jq -r '
+				.tasks[0] |
+				"lastStatus=\(.lastStatus // "unknown"), desiredStatus=\(.desiredStatus // "unknown"), stoppedReason=\(.stoppedReason // "")"
+			' <<<"$task_desc" >&2
+		else
+			echo "Migration task waiter failed before task status could be read: ${task_arn}" >&2
+		fi
+		exit 1
+	fi
 
 	task_desc="$(
 		aws ecs describe-tasks \

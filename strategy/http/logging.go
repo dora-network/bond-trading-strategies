@@ -34,19 +34,24 @@ func NewLoggingResponseWriter(w http.ResponseWriter) *LoggingResponseWriter {
 // Header exposes the wrapped writer's Header.
 func (l *LoggingResponseWriter) Header() http.Header { return l.w.Header() }
 
-// WriteHeader records the status code and forwards to the wrapped
-// writer. Subsequent calls are passed through unchanged (matching
-// net/http's behaviour).
+// WriteHeader records the first status code and forwards it to the
+// wrapped writer. Subsequent calls are ignored, matching net/http's
+// first-call-wins behavior.
 func (l *LoggingResponseWriter) WriteHeader(status int) {
-	if !l.statusSet {
-		l.status = status
-		l.statusSet = true
+	if l.statusSet {
+		return
 	}
+	l.status = status
+	l.statusSet = true
 	l.w.WriteHeader(status)
 }
 
 // Write forwards to the wrapped writer and counts the bytes written.
 func (l *LoggingResponseWriter) Write(b []byte) (int, error) {
+	if !l.statusSet {
+		l.status = http.StatusOK
+		l.statusSet = true
+	}
 	n, err := l.w.Write(b)
 	l.bytes += n
 	return n, err
