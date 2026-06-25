@@ -83,6 +83,16 @@ func TestHandler_buildURL(t *testing.T) {
 	}
 }
 
+func TestHandler_safeURLRedactsAPIKey(t *testing.T) {
+	t.Parallel()
+
+	h := candles.New(candles.Config{}, &candlesfakes.FakeCandleStore{})
+	got := h.SafeURL("wss://example.com/v1/charts/book-123/candle/stream?api_key=secret123&resolution=1m")
+
+	assert.Equal(t, "wss://example.com/v1/charts/book-123/candle/stream?api_key=%2A%2A%2A&resolution=1m", got)
+	assert.NotContains(t, got, "secret123")
+}
+
 func TestHandler_processMessage(t *testing.T) {
 	t.Parallel()
 
@@ -212,7 +222,13 @@ func TestHandler_StreamSingle(t *testing.T) {
 	t.Parallel()
 
 	t.Run("successful stream", func(t *testing.T) {
-		fakeStore := &candlesfakes.FakeCandleStore{}
+		saveDone := make(chan struct{})
+		fakeStore := &candlesfakes.FakeCandleStore{
+			SaveCandlesStub: func(ctx context.Context, entries []candles.StreamCandlesEntry) error {
+				close(saveDone)
+				return nil
+			},
+		}
 		wg := sync.WaitGroup{}
 		wg.Add(1)
 
@@ -244,6 +260,7 @@ func TestHandler_StreamSingle(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
+		subscribed := make(chan struct{})
 		// saved is closed by the subscriber's WithWriteHook after a
 		// successful SaveCandles.  The test must wait on this channel
 		// before asserting SaveCandlesCallCount, because the stream
@@ -251,7 +268,11 @@ func TestHandler_StreamSingle(t *testing.T) {
 		// can happen before the subscriber goroutine has finished
 		// consuming from the channel and persisting the entry.
 		saved := make(chan struct{})
-		s := candles.NewStoreSubscriber(fakeStore, h.Subscribe, candles.WithWriteHook(func() {
+		s := candles.NewStoreSubscriber(fakeStore, func(requestID uuid.UUID) (chan []candles.StreamCandlesEntry, error) {
+			ch, err := h.Subscribe(requestID)
+			close(subscribed)
+			return ch, err
+		}, candles.WithWriteHook(func() {
 			select {
 			case <-saved:
 				// already closed
@@ -262,6 +283,8 @@ func TestHandler_StreamSingle(t *testing.T) {
 		go func() {
 			_ = s.Start(ctx)
 		}()
+		<-subscribed
+
 		streamErr := make(chan error, 1)
 		go func() {
 			streamErr <- h.StreamSingle(ctx, "book-123")
@@ -275,6 +298,7 @@ func TestHandler_StreamSingle(t *testing.T) {
 		require.ErrorAs(t, err, &closeErr)
 		assert.Equal(t, websocket.StatusNormalClosure, closeErr.Code)
 
+		<-saveDone
 		assert.Equal(t, 1, fakeStore.GetLastTimestampCallCount())
 
 		// Wait for the save to complete before asserting the count.

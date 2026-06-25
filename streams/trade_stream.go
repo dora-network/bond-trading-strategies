@@ -105,8 +105,9 @@ func (ts *TradeStream) dialTradeStream(
 	q.Set("since", since.Format(time.RFC3339))
 	base.RawQuery = q.Encode()
 
-	slog.Info("dialing trade stream", "url", base.String())
-	conn, _, err := websocket.Dial(ctx, base.String(), nil)
+	dialURL := base.String()
+	slog.Info("dialing trade stream", "url", safeStreamURL(dialURL))
+	conn, _, err := websocket.Dial(ctx, dialURL, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dial trade stream: %w", err)
 	}
@@ -130,6 +131,21 @@ func (ts *TradeStream) dialTradeStream(
 	}()
 
 	return ch, cancel, nil
+}
+
+func safeStreamURL(rawURL string) string {
+	base, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	q := base.Query()
+	if q.Get("x-api-key") != "" {
+		q.Set("x-api-key", "***")
+	}
+	base.RawQuery = q.Encode()
+
+	return base.String()
 }
 
 func (ts *TradeStream) readLoop(ctx context.Context, tradeChan <-chan []byte, orderBookID uuid.UUID) {

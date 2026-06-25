@@ -64,6 +64,13 @@ func main() {
 	flag.Parse()
 
 	setLogLevel(*logLevel)
+	*fredAPIKey = optionalEnvValue(*fredAPIKey)
+	if *fredAPIKey == "" {
+		if err := os.Unsetenv("FRED_API_KEY"); err != nil {
+			slog.Error("failed to unset FRED_API_KEY", "err", err)
+			os.Exit(1)
+		}
+	}
 	if *dbURL == "" {
 		fmt.Fprintln(os.Stderr, "error: -db-url (or DATABASE_URL) is required")
 		flag.Usage()
@@ -212,6 +219,12 @@ func main() {
 	if *corsAllowedOrigins != "" {
 		wrappedHandler = cors.New(*corsAllowedOrigins)(wrappedHandler)
 	}
+
+	exemptLogPaths := map[string]struct{}{
+		"/healthz":    {},
+		"/v1/openapi": {},
+	}
+	wrappedHandler = strategyhttp.RequestLog(log, exemptLogPaths)(wrappedHandler)
 
 	if notifier != nil {
 		wsSubMux := http.NewServeMux()
@@ -372,6 +385,13 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func optionalEnvValue(value string) string {
+	if value == "not-configured" {
+		return ""
+	}
+	return value
 }
 
 func envOrBool(key string, fallback bool) bool {

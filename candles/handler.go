@@ -160,7 +160,7 @@ func (h *Handler) streamSingle(ctx context.Context, orderBookID string) error {
 		return fmt.Errorf("build ws url for %s: %w", orderBookID, err)
 	}
 
-	slog.Info("connecting to candle stream", "order_book_id", orderBookID, "url", wsURL)
+	slog.Info("connecting to candle stream", "order_book_id", orderBookID, "url", h.safeURL(wsURL))
 
 	conn, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
@@ -241,4 +241,19 @@ func (h *Handler) buildURL(orderBookID string, since *time.Time) (string, error)
 	base.RawQuery = q.Encode()
 
 	return base.String(), nil
+}
+
+func (h *Handler) safeURL(rawURL string) string {
+	base, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	q := base.Query()
+	if q.Get("api_key") != "" {
+		q.Set("api_key", "***")
+	}
+	base.RawQuery = q.Encode()
+
+	return base.String()
 }
