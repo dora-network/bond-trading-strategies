@@ -65,6 +65,12 @@ func main() {
 
 	setLogLevel(*logLevel)
 	*fredAPIKey = optionalEnvValue(*fredAPIKey)
+	if *fredAPIKey == "" {
+		if err := os.Unsetenv("FRED_API_KEY"); err != nil {
+			slog.Error("failed to unset FRED_API_KEY", "err", err)
+			os.Exit(1)
+		}
+	}
 	if *dbURL == "" {
 		fmt.Fprintln(os.Stderr, "error: -db-url (or DATABASE_URL) is required")
 		flag.Usage()

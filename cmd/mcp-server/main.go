@@ -29,6 +29,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -84,7 +85,7 @@ func main() {
 		Handler:           mcpserver.NewHTTPHandlerFromSSE(sseSrv),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	if err := httpServer.ListenAndServe(); err != nil {
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server error: %v", err)
 	}
 }
