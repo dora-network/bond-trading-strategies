@@ -14,7 +14,7 @@ MIGRATE_ONLY="${MIGRATE_ONLY:-false}"
 
 case "$ENVIRONMENT" in
 	dev)
-		DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-dev.dora.co,https://dora-awsdev.vercel.app"
+		DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-dev.dora.co,https://dev.dora.co,https://dora-awsdev.vercel.app"
 		;;
 	staging)
 		DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-staging.dora.co,https://staging.dora.co"
