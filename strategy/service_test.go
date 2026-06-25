@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,13 +86,10 @@ func TestService_RunBacktest(t *testing.T) {
 }
 
 func TestService_StopBacktest(t *testing.T) {
-	mu := sync.Mutex{}
-	isRunning := false
+	var isRunning atomic.Bool
 	myStrategy := &strategyfakes.FakeStrategy{
 		BacktestStub: func(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
-			mu.Lock()
-			isRunning = true
-			mu.Unlock()
+			isRunning.Store(true)
 
 			for {
 				select {
@@ -131,11 +129,11 @@ func TestService_StopBacktest(t *testing.T) {
 		for {
 			select {
 			case res := <-ch:
-				assert.True(t, isRunning)
+				assert.True(t, isRunning.Load())
 				assert.Equal(t, types.ErrorResult{Err: fmt.Errorf("backtest cancelled by user")}, res)
 				return
 			case <-ctx.Done():
-				assert.True(t, isRunning)
+				assert.True(t, isRunning.Load())
 				assert.Fail(t, "timeout")
 				return
 			}
@@ -144,15 +142,12 @@ func TestService_StopBacktest(t *testing.T) {
 }
 
 func TestService_RunStrategy(t *testing.T) {
-	mu := sync.Mutex{}
-	isRunning := false
+	var isRunning atomic.Bool
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	myStrategy := &strategyfakes.FakeStrategy{
 		RunStub: func(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
-			mu.Lock()
-			isRunning = true
-			mu.Unlock()
+			isRunning.Store(true)
 			defer wg.Done()
 
 			for {
@@ -175,11 +170,9 @@ func TestService_RunStrategy(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, strategy.RunExists(svc, id))
 		require.Eventually(t, func() bool {
-			mu.Lock()
-			defer mu.Unlock()
-			return isRunning
+			return isRunning.Load()
 		}, time.Second, 10*time.Millisecond)
-		assert.True(t, isRunning)
+		assert.True(t, isRunning.Load())
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), timeout)
 		defer stopCancel()
 		require.NoError(t, svc.StopStrategy(stopCtx, id))

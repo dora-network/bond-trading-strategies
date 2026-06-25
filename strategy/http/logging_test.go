@@ -55,6 +55,53 @@ func TestLoggingResponseWriter_DefaultStatusIs200(t *testing.T) {
 	assert.Equal(t, "", lw.Err())
 }
 
+type writeHeaderRecorder struct {
+	header http.Header
+	codes  []int
+}
+
+func (w *writeHeaderRecorder) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *writeHeaderRecorder) Write(b []byte) (int, error) { return len(b), nil }
+
+func (w *writeHeaderRecorder) WriteHeader(status int) {
+	w.codes = append(w.codes, status)
+}
+
+func TestLoggingResponseWriter_IgnoresSubsequentWriteHeader(t *testing.T) {
+	t.Parallel()
+
+	rec := &writeHeaderRecorder{}
+	lw := strategyhttp.NewLoggingResponseWriter(rec)
+
+	lw.WriteHeader(http.StatusCreated)
+	lw.WriteHeader(http.StatusInternalServerError)
+
+	assert.Equal(t, http.StatusCreated, lw.Status())
+	assert.Equal(t, []int{http.StatusCreated}, rec.codes)
+}
+
+func TestLoggingResponseWriter_WriteCommitsDefaultStatus(t *testing.T) {
+	t.Parallel()
+
+	rec := &writeHeaderRecorder{}
+	lw := strategyhttp.NewLoggingResponseWriter(rec)
+
+	n, err := lw.Write([]byte("ok"))
+	lw.WriteHeader(http.StatusInternalServerError)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	assert.Equal(t, http.StatusOK, lw.Status())
+	assert.Equal(t, 2, lw.Bytes())
+	assert.Empty(t, rec.codes, "WriteHeader after Write must not be forwarded")
+}
+
 func TestLoggingResponseWriter_WithError(t *testing.T) {
 	t.Parallel()
 
