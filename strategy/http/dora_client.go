@@ -2,8 +2,11 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 
@@ -39,19 +42,26 @@ func hasBotPrefix(s string) bool {
 }
 
 const (
-	apiKeyPrefix             = "ApiKey"
-	copyTraderPageSize int32 = 100
-	copyTraderMaxPages int32 = 10
+	apiKeyPrefix               = "ApiKey"
+	copyTraderPageSize   int32 = 100
+	copyTraderMaxPages   int32 = 10
+	responsePreviewBytes       = 4096
 )
 
 type liveDORAClient struct {
-	client *doraclient.APIClient
+	client     *doraclient.APIClient
+	baseURL    string
+	httpClient *http.Client
 }
 
 // NewDORAClient creates a new DORA HTTP client using the DORA_BASE_URL
 // environment variable (if set) for the server URL.
 func NewDORAClient() *liveDORAClient {
 	cfg := doraclient.NewConfiguration()
+	baseURL := ""
+	if len(cfg.Servers) > 0 {
+		baseURL = cfg.Servers[0].URL
+	}
 
 	if baseURL := os.Getenv("DORA_BASE_URL"); baseURL != "" {
 		cfg.Servers = doraclient.ServerConfigurations{{
@@ -60,8 +70,17 @@ func NewDORAClient() *liveDORAClient {
 		}}
 	}
 
+	if len(cfg.Servers) > 0 {
+		baseURL = cfg.Servers[0].URL
+	}
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = http.DefaultClient
+	}
+
 	return &liveDORAClient{
-		client: doraclient.NewAPIClient(cfg),
+		client:     doraclient.NewAPIClient(cfg),
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		httpClient: cfg.HTTPClient,
 	}
 }
 
@@ -119,26 +138,51 @@ func (c *liveDORAClient) GetAssetByID(ctx context.Context, assetID string) (*Ass
 }
 
 func (c *liveDORAClient) GetUserID(ctx context.Context) (string, error) {
-	authCtx, err := c.authContext(ctx)
+	if c == nil || c.httpClient == nil || c.baseURL == "" {
+		return "", errors.New("DORA client is not configured")
+	}
+
+	authHeader, err := authHeader(ctx)
 	if err != nil {
 		return "", err
 	}
 
-	resp, rawResp, err := c.client.DefaultAPI.GetUserSelf(authCtx).Execute()
-	if rawResp != nil && rawResp.Body != nil {
-		defer rawResp.Body.Close()
+	//nolint:gosec // DORA_BASE_URL is trusted deployment config and is already used by the generated DORA client.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/user/self", nil)
+	if err != nil {
+		return "", fmt.Errorf("create get user self request: %w", err)
 	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", authHeader)
+
+	//nolint:gosec // Request URL is built from trusted DORA_BASE_URL service config above.
+	rawResp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("get user self: %w", err)
 	}
-	if resp == nil || resp.Data == nil {
+	defer rawResp.Body.Close()
+
+	if rawResp.StatusCode < http.StatusOK || rawResp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(rawResp.Body, responsePreviewBytes))
+		return "", fmt.Errorf("get user self: status %d: %s", rawResp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var resp struct {
+		Data *struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rawResp.Body).Decode(&resp); err != nil {
+		return "", fmt.Errorf("get user self: decode response: %w", err)
+	}
+	if resp.Data == nil {
 		return "", errors.New("get user self: missing response data")
 	}
-	if resp.Data.Id == "" {
+	if resp.Data.ID == "" {
 		return "", errors.New("get user self: missing user ID")
 	}
 
-	return resp.Data.Id, nil
+	return resp.Data.ID, nil
 }
 
 // ListBotUsers fetches DORA users and returns those whose first or last name
@@ -193,9 +237,9 @@ func (c *liveDORAClient) authContext(ctx context.Context) (context.Context, erro
 		return nil, errors.New("DORA client is not configured")
 	}
 
-	info, ok := authctx.AuthInfoFromContext(ctx)
-	if !ok {
-		return nil, errors.New("no authorization credentials in context")
+	info, err := authInfo(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	switch {
@@ -211,4 +255,28 @@ func (c *liveDORAClient) authContext(ctx context.Context) (context.Context, erro
 	default:
 		return nil, errors.New("no API key or bearer token in authorization context")
 	}
+}
+
+func authHeader(ctx context.Context) (string, error) {
+	info, err := authInfo(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	switch {
+	case info.APIKey != "":
+		return apiKeyPrefix + " " + info.APIKey, nil
+	case info.BearerToken != "":
+		return "Bearer " + info.BearerToken, nil
+	default:
+		return "", errors.New("no API key or bearer token in authorization context")
+	}
+}
+
+func authInfo(ctx context.Context) (*authctx.AuthInfo, error) {
+	info, ok := authctx.AuthInfoFromContext(ctx)
+	if !ok {
+		return nil, errors.New("no authorization credentials in context")
+	}
+	return info, nil
 }

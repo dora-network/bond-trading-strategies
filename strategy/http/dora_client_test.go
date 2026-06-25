@@ -49,6 +49,56 @@ func TestIsBotUser(t *testing.T) {
 	}
 }
 
+func TestLiveDORAClientGetUserIDIgnoresUnknownUserFields(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/user/self", r.URL.Path)
+		assert.Equal(t, "ApiKey test-key", r.Header.Get("Authorization"))
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"id":                                     "user-123",
+				"email":                                  "user-123@example.com",
+				"first_name":                             "Test",
+				"last_name":                              "User",
+				"country_of_domicile":                    "US",
+				"native_asset_id":                        "USD",
+				"roles":                                  []string{"TRADER"},
+				"show_tutorial_cards":                    false,
+				"notifications_enabled":                  true,
+				"tenant_id":                              "tenant-123",
+				"allow_email_notifications":              true,
+				"allow_liquidations_notifications":       true,
+				"allow_deposit_withdrawal_notifications": true,
+				"allow_orders_notifications":             true,
+				"allow_copy_trading":                     true,
+			},
+			"metadata": map[string]any{
+				"status_code": 200,
+				"trace_id":    "trace",
+				"request_id":  "req",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := doraclient.NewConfiguration()
+	cfg.Servers = doraclient.ServerConfigurations{
+		{URL: srv.URL, Description: "test"},
+	}
+	client := &liveDORAClient{
+		client:     doraclient.NewAPIClient(cfg),
+		baseURL:    srv.URL,
+		httpClient: srv.Client(),
+	}
+
+	got, err := client.GetUserID(authctx.WithAPIKey(context.Background(), "test-key"))
+	require.NoError(t, err)
+	assert.Equal(t, "user-123", got)
+}
+
 func TestLiveDORAClient_ListBotUsers(t *testing.T) {
 	t.Parallel()
 
