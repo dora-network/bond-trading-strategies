@@ -3,8 +3,8 @@ github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6p
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/dora-network/dora-client-go v0.0.0-20260521110737-366a34d6d1c7 h1:03ZJfUGG2mBgh8yUGGgtZV/UZvQWbVD0pSfYqGGh3r8=
-github.com/dora-network/dora-client-go v0.0.0-20260521110737-366a34d6d1c7/go.mod h1:VsYQoO22xk6r+guAxfDczkIOaOSdIfoC2rMYKqaG8yY=
+github.com/dora-network/dora-client-go v0.0.0-20260630142949-774925b0e9a8 h1:rQeZBvFEV7/odAt4bsMIPq086ZKm76cQQ49jxL+JT60=
+github.com/dora-network/dora-client-go v0.0.0-20260630142949-774925b0e9a8/go.mod h1:VsYQoO22xk6r+guAxfDczkIOaOSdIfoC2rMYKqaG8yY=
 github.com/frankban/quicktest v1.14.6 h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHkI4W8=
 github.com/frankban/quicktest v1.14.6/go.mod h1:4ptaffx2x8+WTWXmUCuVU6aPUX1/Mz7zb5vbUoiM6w0=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
