@@ -306,6 +306,128 @@ func TestRecordDecision_CloseRecordsActualOrderLeverage(t *testing.T) {
 	<-done
 }
 
+// TestRecordDecision_CloseOnIsolatedMarginPreservesLeverage pins the
+// behaviour for closing a leveraged position that lives in an
+// isolated margin account: the strategy must (a) source the close
+// size from the isolated account only — never the global account —
+// so the order doesn't exceed what one account holds, and (b) keep
+// the configured leverage instead of forcing it to 1, since DORA
+// only rejects leveraged closes on the global account, not on
+// isolated positions. Regression guard for DORA-5778.
+func TestRecordDecision_CloseOnIsolatedMarginPreservesLeverage(t *testing.T) {
+	t.Parallel()
+
+	rec := &fakeDecisionRecorder{}
+	s, api, followed, bondID, orderBookID := buildStrategyForDecisionTest(rec)
+
+	// Strategy-level leverage > 1: positions are taken in isolated
+	// margin. The bug only manifests under this configuration.
+	s.cfg.Leverage = decimal.MustParse("2.0")
+
+	// Position the bond ONLY in an isolated margin account (no
+	// global account entry) so that an over-eager fallback to the
+	// global account would either sum to zero or, if a stale global
+	// entry existed, over-size the close.
+	yes := true
+	no := false
+	api.portfolio = &doraclient.AccountPortfolioV2{
+		Accounts: map[string]map[string]doraclient.AccountV2{
+			"isolated-bond": {
+				bondID.String(): {
+					AssetId:   bondID.String(),
+					IsGlobal:  &no,
+					Available: "42",
+					Borrowed:  "0",
+				},
+				api.quoteAssetID: {
+					AssetId:   api.quoteAssetID,
+					IsGlobal:  &no,
+					Available: "500",
+					Borrowed:  "0",
+				},
+			},
+			"global": {
+				// Same assetId on global is 0; ensuring we don't
+				// read from here. If we did, the close order would
+				// be sourced from the wrong account.
+				bondID.String(): {
+					AssetId:   bondID.String(),
+					IsGlobal:  &yes,
+					Available: "0",
+					Borrowed:  "0",
+				},
+				api.quoteAssetID: {
+					AssetId:   api.quoteAssetID,
+					IsGlobal:  &yes,
+					Available: "10000",
+					Borrowed:  "0",
+				},
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msgCh := make(chan strategy.Message)
+	tradeCh := make(chan streams.TradeEvent, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+	}()
+
+	// Follow a trader selling our bond — current=Long (isolated),
+	// side=Sell → close.
+	tradeCh <- streams.TradeEvent{
+		TraderID:    followed,
+		OrderBookID: orderBookID,
+		AssetID:     bondID,
+		Side:        "sell",
+		Quantity:    decimal.MustParse("1"),
+		Price:       decimal.MustParse("100"),
+		ExecutionID: "exec-isolated-close",
+	}
+
+	require.Eventually(t, func() bool {
+		return api.createMarketOrderCount() == 1
+	}, 2*time.Second, 20*time.Millisecond, "expected one CreateMarketOrder call")
+	require.Eventually(t, func() bool {
+		return len(rec.snapshot()) == 1
+	}, 2*time.Second, 20*time.Millisecond, "expected one recorded close decision")
+
+	decisions := rec.snapshot()
+	require.Len(t, decisions, 1)
+	d := decisions[0]
+
+	require.Equal(t, strategy.DecisionKindClose, d.Kind)
+	require.Equal(t, "SELL", d.Side)
+	// Isolated close: strategy leverage is preserved (DORA accepts
+	// leveraged closes only on isolated margin, not on global).
+	require.Equal(t, decimal.MustParse("2.0"), d.Leverage,
+		"isolated-margin close must keep strategy leverage, not force 1")
+	require.Equal(t, decimal.MustParse("0.5"), d.InverseLeverage,
+		"isolated-margin close must compute inverse_leverage=1/2.0")
+	assertValidClientOrderID(t, d.ClientOrderID, "copy_trading", s.runID)
+
+	// Size: must equal the isolated account's bond available (42),
+	// NOT zero (wrongly empty), NOT the sum across accounts (also
+	// 42 in this case but the test would still detect the path),
+	// and NOT a leverage-multiplied amount.
+	api.mu.Lock()
+	gotQuantity := api.capturedQuantity
+	gotFromGlobal := api.capturedFromGlobal
+	api.mu.Unlock()
+	require.False(t, gotFromGlobal,
+		"close on an isolated-margin long must use from_global=false")
+	require.True(t, gotQuantity.Equal(decimal.MustParse("42")),
+		"close must size from isolated account's bond available, got %s", gotQuantity)
+
+	cancel()
+	<-done
+}
+
 // assertValidClientOrderID checks that the recorded ClientOrderID
 // follows the live-run contract: <strategy_name>.<run_id>.<uuidv7>.
 // Used by both copytrading and meanreversion decision tests.
