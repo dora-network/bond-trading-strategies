@@ -462,7 +462,7 @@ func TestAvailableBalanceFor(t *testing.T) {
 			want:         "500",
 		},
 		{
-			name:         "isolated with no account falls back to global",
+			name:         "isolated with no matching bond account returns zero (no silent global fallback)",
 			balanceAsset: usd,
 			bondAsset:    uuid.New().String(),
 			fromGlobal:   false,
@@ -586,15 +586,27 @@ type fakeMarketAPI struct {
 	portfolio              *doraclient.AccountPortfolioV2
 	quoteAssetID           string
 	createMarketOrderCalls int
+	// capturedQuantity, capturedSide, capturedFromGlobal,
+	// capturedInverse record the last CreateMarketOrder call's
+	// arguments so tests can assert what the strategy actually
+	// sent to DORA (vs. what it intended).
+	capturedQuantity   decimal.Decimal
+	capturedSide       doraclient.Side
+	capturedFromGlobal bool
+	capturedInverse    decimal.Decimal
 	// orderErr, when non-nil, is returned by CreateMarketOrder.  Used
 	// by the decision-recording tests to assert that a failed order
 	// does not produce a strategy_decisions row.
 	orderErr error
 }
 
-func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, _ doraclient.Side, _ decimal.Decimal, _ decimal.Decimal, _ bool, _ string) error {
+func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, side doraclient.Side, quantity decimal.Decimal, inverse decimal.Decimal, fromGlobal bool, _ string) error {
 	f.mu.Lock()
 	f.createMarketOrderCalls++
+	f.capturedQuantity = quantity
+	f.capturedSide = side
+	f.capturedFromGlobal = fromGlobal
+	f.capturedInverse = inverse
 	err := f.orderErr
 	f.mu.Unlock()
 	return err
