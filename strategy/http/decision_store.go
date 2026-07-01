@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -76,4 +78,61 @@ func (s *PGDecisionStore) SaveDecision(ctx context.Context, d strategycore.Decis
 		return fmt.Errorf("save strategy decision run=%s seq=%d: %w", d.RunID, d.Seq, err)
 	}
 	return nil
+}
+
+// Cursor is the opaque continuation token returned by ListDecisions
+// when more rows are available. The wire format is versioned so the
+// encoding can evolve without breaking in-flight clients; clients MUST
+// NOT parse the underlying payload.
+type Cursor struct {
+	// Time is the created_at of the last row on the previous page.
+	Time time.Time
+	// Seq is the seq of the last row on the previous page.
+	Seq int64
+	// Version is the codec version. Decoding an unknown version is an
+	// error. Bump it when changing the on-wire format.
+	Version byte
+}
+
+const cursorVersion byte = 1
+
+// cursorPayload is the on-wire shape of a Cursor. The version byte
+// is part of the payload (not a struct-level constant) so a future
+// change to the encoding can bump V and old clients will see a
+// clear "unsupported cursor version" error rather than a decode
+// failure on a missing field.
+type cursorPayload struct {
+	V byte  `json:"v"`
+	T int64 `json:"t"`
+	S int64 `json:"s"`
+}
+
+// Encode returns the base64(JSON({v, t, s})) form of c.
+func (c *Cursor) Encode() string {
+	b, _ := json.Marshal(cursorPayload{V: c.Version, T: c.Time.UnixNano(), S: c.Seq})
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// DecodeCursor parses a value produced by Cursor.Encode. Returns an
+// error for empty input, bad base64, bad JSON, or unknown version.
+func DecodeCursor(raw string) (*Cursor, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("cursor is empty")
+	}
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode cursor: %w", err)
+	}
+	var payload cursorPayload
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return nil, fmt.Errorf("parse cursor: %w", err)
+	}
+	if payload.V != cursorVersion {
+		return nil, fmt.Errorf("unsupported cursor version %d", payload.V)
+	}
+	return &Cursor{
+		Time:    time.Unix(0, payload.T).UTC(),
+		Seq:     payload.S,
+		Version: payload.V,
+	}, nil
 }
