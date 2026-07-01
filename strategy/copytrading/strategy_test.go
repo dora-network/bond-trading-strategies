@@ -119,8 +119,8 @@ func TestFromGlobalPosition(t *testing.T) {
 		positionOnGlobal bool
 		want             bool
 	}{
-		// Closes: fromGlobal mirrors the IsGlobal of the account
-		// holding the existing position. Leverage is irrelevant here.
+		// Closes: strategy leverage > 1 always isolates; otherwise
+		// fromGlobal mirrors positionOnGlobal.
 		{
 			name:             "SELL closing a long in global account → global",
 			side:             doraclient.SIDE_SELL,
@@ -138,12 +138,12 @@ func TestFromGlobalPosition(t *testing.T) {
 			want:             false,
 		},
 		{
-			name:             "SELL closing a long, leverage irrelevant (close on global)",
+			name:             "SELL closing a long, leverage > 1 forces isolated",
 			side:             doraclient.SIDE_SELL,
 			current:          positionLong,
 			leverage:         decimal.MustParse("2.0"),
 			positionOnGlobal: true,
-			want:             true,
+			want:             false,
 		},
 		{
 			name:             "BUY closing a short in global account → global",
@@ -162,7 +162,7 @@ func TestFromGlobalPosition(t *testing.T) {
 			want:             false,
 		},
 		{
-			name:             "BUY closing a short, leverage irrelevant (close on isolated)",
+			name:             "BUY closing a short, leverage > 1 forces isolated",
 			side:             doraclient.SIDE_BUY,
 			current:          positionShort,
 			leverage:         decimal.MustParse("2.0"),
@@ -664,16 +664,19 @@ func TestProperty_PositionLogic(t *testing.T) {
 	})
 
 	t.Run("fromGlobalPosition_close_invariants", func(t *testing.T) {
-		// For closes, fromGlobal always matches positionOnGlobal
+		// For closes, fromGlobal mirrors positionOnGlobal ONLY when
+		// the strategy leverage ≤ 1. Above that, every order
+		// (including closes) routes through isolated.
 		// Long + sell (close)
 		require.True(t, fromGlobalPosition(doraclient.SIDE_SELL, positionLong, decimal.MustParse("1.0"), true))
 		require.False(t, fromGlobalPosition(doraclient.SIDE_SELL, positionLong, decimal.MustParse("1.0"), false))
-		require.True(t, fromGlobalPosition(doraclient.SIDE_SELL, positionLong, decimal.MustParse("2.0"), true))
+		require.False(t, fromGlobalPosition(doraclient.SIDE_SELL, positionLong, decimal.MustParse("2.0"), true),
+			"close with leverage>1 must isolate regardless of positionOnGlobal")
 		require.False(t, fromGlobalPosition(doraclient.SIDE_SELL, positionLong, decimal.MustParse("2.0"), false))
 		// Short + buy (close)
 		require.True(t, fromGlobalPosition(doraclient.SIDE_BUY, positionShort, decimal.MustParse("1.0"), true))
 		require.False(t, fromGlobalPosition(doraclient.SIDE_BUY, positionShort, decimal.MustParse("1.0"), false))
-		require.True(t, fromGlobalPosition(doraclient.SIDE_BUY, positionShort, decimal.MustParse("2.0"), true))
+		require.False(t, fromGlobalPosition(doraclient.SIDE_BUY, positionShort, decimal.MustParse("2.0"), true))
 		require.False(t, fromGlobalPosition(doraclient.SIDE_BUY, positionShort, decimal.MustParse("2.0"), false))
 	})
 

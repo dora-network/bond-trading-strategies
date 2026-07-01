@@ -271,16 +271,17 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		"side", side,
 	)
 
-	// DORA's inverse_leverage is 1/leverage. DORA rejects leveraged
-	// closes ONLY on the global account ("cannot use leverage while
-	// position has available bonds"). For closes on isolated margin
-	// (fromGlobal=false), leverage is allowed and we pass the same
-	// leverage as opens/extends. For closes on the global account
-	// (fromGlobal=true), force leverage to 1 to match DORA's rule.
+	// Order leverage rule (DORA-5778):
+	//   - Closes ALWAYS go out at leverage=1, regardless of the
+	//     strategy's configured leverage. The strategy-level
+	//     leverage only determines which account (fromGlobal) the
+	//     order sizes against — it never reaches the order itself.
+	//   - Opens/extends use the strategy leverage; inverse_leverage
+	//     is 1/leverage when leverage > 1 and 1.0 otherwise.
 	orderLeverage := s.cfg.Leverage
-	if isClose(side, current) && fromGlobal {
+	if isClose(side, current) {
 		orderLeverage = decimal.One
-		s.log.Info("closing position on global account, forcing leverage=1", "side", side, "current", current)
+		s.log.Info("closing position, forcing leverage=1", "side", side, "current", current)
 	}
 
 	// Read the right account's available balance for the chosen
@@ -501,31 +502,34 @@ func balanceAssetFor(side doraclient.Side, current positionDirection, bondAssetI
 
 // fromGlobalPosition reports whether a DORA order with the given side
 // and current asset position should use DORA's global (cross-margin)
-// position pool.
+// position pool. The decision is purely a function of strategy
+// leverage and the order type (open/extend vs close):
 //
-// The rule is two-part:
-//
-//   - Closes (Long+SELL or Short+BUY): fromGlobal mirrors the
-//     IsGlobal flag of the account that holds the existing position
-//     (positionOnGlobal). A close on the global account uses the
-//     global pool (fromGlobal=true); a close on an isolated account
-//     uses isolated margin (fromGlobal=false). The caller resolves
-//     positionOnGlobal from the portfolio.
-//
-//   - Opens/extends: long with no leverage → global (true);
-//     leveraged long or any short → isolated (false). This is
-//     purely a function of (side, leverage) — the position doesn't
-//     matter because there's nothing to close.
+//   - Strategy leverage ≤ 1.0: longs and short opens route to the
+//     account that already holds (or will hold) the position. For
+//     a close this mirrors positionOnGlobal; for an open it's
+//     BUY→global, SELL→isolated (shorts always borrow).
+//   - Strategy leverage > 1.0: every order — opens, extends, AND
+//     closes — routes through the bond's isolated margin account.
+//     Even if a stale global-account entry existed, the strategy
+//     leverage means the position is structurally isolated.
 func fromGlobalPosition(side doraclient.Side, current positionDirection, leverage decimal.Decimal, positionOnGlobal bool) bool {
+	noLeverage := leverage.Cmp(decimal.One) <= 0
+	isolated := !noLeverage
+
 	closesLong := current == positionLong && side == doraclient.SIDE_SELL
 	closesShort := current == positionShort && side == doraclient.SIDE_BUY
-	if closesLong || closesShort {
+	if (closesLong || closesShort) && !isolated {
+		// Strategy leverage ≤ 1: close on the account that holds
+		// the position (long lives on global, short on isolated).
 		return positionOnGlobal
 	}
 
-	// Opens/extends. Shorts always need leverage; longs only when
-	// strategy-level leverage > 1.
-	noLeverage := leverage.Cmp(decimal.One) <= 0
+	// Strategy leverage > 1 (any side) and opens/extends at any
+	// leverage all route through isolated.
+	if isolated {
+		return false
+	}
 	switch side {
 	case doraclient.SIDE_BUY:
 		return noLeverage

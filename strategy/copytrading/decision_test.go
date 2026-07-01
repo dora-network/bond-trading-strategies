@@ -231,15 +231,25 @@ func TestRecordDecision_NilRecorderIsNoop(t *testing.T) {
 // not the strategy's configured leverage.  Regression guard: prior
 // versions recorded s.cfg.Leverage for every order, which would log
 // e.g. Leverage=2.0 for a close that was placed at inverse_leverage=1.
+// TestRecordDecision_CloseRecordsActualOrderLeverage pins the
+// contract that a close decision records the leverage actually sent
+// to DORA (always 1.0 for closes, since DORA accepts leveraged
+// closes only on isolated margin and we always force leverage=1
+// on closes for simplicity and predictability — the strategy-level
+// leverage only picks the account). Regression guard: prior
+// versions either kept the strategy's leverage for a close (which
+// DORA rejects on global) or routed the close size from the wrong
+// account.
 func TestRecordDecision_CloseRecordsActualOrderLeverage(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeDecisionRecorder{}
 	s, api, followed, bondID, orderBookID := buildStrategyForDecisionTest(rec)
 
-	// Reconfigure with a non-unit configured leverage so the bug would
-	// be visible: a close at forced leverage=1 must NOT record 2.0.
-	s.cfg.Leverage = decimal.MustParse("2.0")
+	// Strategy leverage = 1.0: longs live on the global account.
+	// A non-unit value would route the close through an isolated
+	// account (covered by the next test).
+	s.cfg.Leverage = decimal.One
 
 	// Position the fake portfolio in a Long state (Available > 0,
 	// Borrowed = 0) so the subsequent sell is detected as a close by
@@ -298,36 +308,41 @@ func TestRecordDecision_CloseRecordsActualOrderLeverage(t *testing.T) {
 
 	require.Equal(t, strategy.DecisionKindClose, d.Kind, "sell-against-Long should be classified as close")
 	require.Equal(t, "SELL", d.Side)
-	require.Equal(t, decimal.One, d.Leverage, "close must record the forced order leverage, not the configured one")
-	require.Equal(t, decimal.One, d.InverseLeverage, "close must be sent at inverse_leverage=1 (no leverage)")
+	require.Equal(t, decimal.One, d.Leverage, "close must record leverage=1 regardless of strategy leverage")
+	require.Equal(t, decimal.One, d.InverseLeverage, "close must be sent at inverse_leverage=1")
 	assertValidClientOrderID(t, d.ClientOrderID, "copy_trading", s.runID)
+
+	// Close on a global long at leverage=1: fromGlobal=true, size
+	// equals the global account's bond available.
+	api.mu.Lock()
+	gotQuantity := api.capturedQuantity
+	gotFromGlobal := api.capturedFromGlobal
+	api.mu.Unlock()
+	require.True(t, gotFromGlobal,
+		"close on a global long at strategy leverage=1 must use from_global=true")
+	require.True(t, gotQuantity.Equal(decimal.MustParse("1000")),
+		"close must size from global account's bond available, got %s", gotQuantity)
 
 	cancel()
 	<-done
 }
 
-// TestRecordDecision_CloseOnIsolatedMarginPreservesLeverage pins the
-// behaviour for closing a leveraged position that lives in an
-// isolated margin account: the strategy must (a) source the close
-// size from the isolated account only — never the global account —
-// so the order doesn't exceed what one account holds, and (b) keep
-// the configured leverage instead of forcing it to 1, since DORA
-// only rejects leveraged closes on the global account, not on
-// isolated positions. Regression guard for DORA-5778.
-func TestRecordDecision_CloseOnIsolatedMarginPreservesLeverage(t *testing.T) {
+// TestRecordDecision_CloseOnIsolatedMarginForcesLeverageOne pins
+// the DORA-5778 contract that closes ALWAYS go out at
+// inverse_leverage=1, regardless of strategy leverage. The
+// strategy-level leverage only picks the account (fromGlobal);
+// it never propagates to the order. Regression guard for the
+// previous behaviour where isolated closes were incorrectly
+// sent with the configured leverage.
+func TestRecordDecision_CloseOnIsolatedMarginForcesLeverageOne(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeDecisionRecorder{}
 	s, api, followed, bondID, orderBookID := buildStrategyForDecisionTest(rec)
 
-	// Strategy-level leverage > 1: positions are taken in isolated
-	// margin. The bug only manifests under this configuration.
+	// Strategy leverage > 1: positions live in isolated margin.
 	s.cfg.Leverage = decimal.MustParse("2.0")
 
-	// Position the bond ONLY in an isolated margin account (no
-	// global account entry) so that an over-eager fallback to the
-	// global account would either sum to zero or, if a stale global
-	// entry existed, over-size the close.
 	yes := true
 	no := false
 	api.portfolio = &doraclient.AccountPortfolioV2{
@@ -347,9 +362,6 @@ func TestRecordDecision_CloseOnIsolatedMarginPreservesLeverage(t *testing.T) {
 				},
 			},
 			"global": {
-				// Same assetId on global is 0; ensuring we don't
-				// read from here. If we did, the close order would
-				// be sourced from the wrong account.
 				bondID.String(): {
 					AssetId:   bondID.String(),
 					IsGlobal:  &yes,
@@ -378,8 +390,6 @@ func TestRecordDecision_CloseOnIsolatedMarginPreservesLeverage(t *testing.T) {
 		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
 	}()
 
-	// Follow a trader selling our bond — current=Long (isolated),
-	// side=Sell → close.
 	tradeCh <- streams.TradeEvent{
 		TraderID:    followed,
 		OrderBookID: orderBookID,
@@ -403,31 +413,30 @@ func TestRecordDecision_CloseOnIsolatedMarginPreservesLeverage(t *testing.T) {
 
 	require.Equal(t, strategy.DecisionKindClose, d.Kind)
 	require.Equal(t, "SELL", d.Side)
-	// Isolated close: strategy leverage is preserved (DORA accepts
-	// leveraged closes only on isolated margin, not on global).
-	require.Equal(t, decimal.MustParse("2.0"), d.Leverage,
-		"isolated-margin close must keep strategy leverage, not force 1")
-	require.Equal(t, decimal.MustParse("0.5"), d.InverseLeverage,
-		"isolated-margin close must compute inverse_leverage=1/2.0")
+	// Closes ALWAYS go out at leverage=1, even when the strategy
+	// is configured for leverage=2 and the position lives in
+	// isolated margin.
+	require.Equal(t, decimal.One, d.Leverage,
+		"close must record leverage=1 regardless of strategy leverage")
+	require.Equal(t, decimal.One, d.InverseLeverage,
+		"close must be sent at inverse_leverage=1 regardless of strategy leverage")
 	assertValidClientOrderID(t, d.ClientOrderID, "copy_trading", s.runID)
 
-	// Size: must equal the isolated account's bond available (42),
-	// NOT zero (wrongly empty), NOT the sum across accounts (also
-	// 42 in this case but the test would still detect the path),
-	// and NOT a leverage-multiplied amount.
+	// Size from isolated account only.
 	api.mu.Lock()
 	gotQuantity := api.capturedQuantity
 	gotFromGlobal := api.capturedFromGlobal
 	api.mu.Unlock()
 	require.False(t, gotFromGlobal,
-		"close on an isolated-margin long must use from_global=false")
+		"isolated-margin close must use from_global=false")
 	require.True(t, gotQuantity.Equal(decimal.MustParse("42")),
-		"close must size from isolated account's bond available, got %s", gotQuantity)
+		"isolated-margin close must size from isolated bond available, got %s", gotQuantity)
 
 	cancel()
 	<-done
 }
 
+// assertValidClientOrderID checks that the recorded ClientOrderID
 // assertValidClientOrderID checks that the recorded ClientOrderID
 // follows the live-run contract: <strategy_name>.<run_id>.<uuidv7>.
 // Used by both copytrading and meanreversion decision tests.
