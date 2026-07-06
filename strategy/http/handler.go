@@ -31,6 +31,12 @@ const (
 	strategyStatusNotImplemented = "not_implemented"
 	defaultPaginationLimit       = 10
 	maxPaginationLimit           = 50
+	defaultTradingDecisionsLimit = 50
+	// maxTradingDecisionsLimit is the upper bound for the
+	// trading-decisions list endpoint.  It is higher than
+	// maxPaginationLimit because the cursor-paginated contract has no
+	// page*limit offset to protect and the per-row payload is narrow.
+	maxTradingDecisionsLimit = 200
 	// batchSize is the row count that triggers a flush in the batching
 	// backtest trade writer. Tuned with flushAfter so a backtest emitting
 	// rows faster than the flush interval still drains in bounded chunks.
@@ -1099,6 +1105,66 @@ func parseDateFilter(r *http.Request) (from, to time.Time) {
 		}
 	}
 	return from, to
+}
+
+// ParseDecisionsDateFilter parses the from/to query parameters for the
+// trading-decisions endpoint. Unlike parseDateFilter, malformed input
+// is rejected with a parse error rather than silently dropped, because
+// a typo'd date on a paginated endpoint would silently widen the
+// result set across many pages.
+func ParseDecisionsDateFilter(r *http.Request) (from, to *time.Time, err error) {
+	parse := func(raw string) (*time.Time, error) {
+		if raw == "" {
+			return nil, nil
+		}
+		if t, perr := time.Parse(time.RFC3339, raw); perr == nil {
+			return &t, nil
+		}
+		if t, perr := time.Parse("2006-01-02", raw); perr == nil {
+			return &t, nil
+		}
+		return nil, fmt.Errorf("invalid date %q (want RFC3339 or YYYY-MM-DD)", raw)
+	}
+	from, err = parse(r.URL.Query().Get("from"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("from: %w", err)
+	}
+	to, err = parse(r.URL.Query().Get("to"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("to: %w", err)
+	}
+	return from, to, nil
+}
+
+// ParseDecisionCursor parses the cursor query parameter. Returns nil
+// with no error when the parameter is absent. The cursor must be
+// opaque to clients; this function decodes the wire format produced
+// by Cursor.Encode.
+func ParseDecisionCursor(r *http.Request) (*Cursor, error) {
+	raw := r.URL.Query().Get("cursor")
+	if raw == "" {
+		return nil, nil
+	}
+	return DecodeCursor(raw)
+}
+
+// ParseDecisionLimit parses the limit query parameter for the
+// trading-decisions endpoint. Default is 50, silently clamped to
+// [1, 200]. Garbage / non-positive input keeps the default. The
+// behaviour matches parsePagination in this package.
+func ParseDecisionLimit(r *http.Request) int {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return defaultTradingDecisionsLimit
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultTradingDecisionsLimit
+	}
+	if n > maxTradingDecisionsLimit {
+		return maxTradingDecisionsLimit
+	}
+	return n
 }
 
 func (h *Handler) getBacktestTrades(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
