@@ -59,21 +59,23 @@ type Decision struct {
 	Quantity decimal.Decimal `json:"quantity"`
 	// Price is the bond price at decision time, used for sizing.
 	Price decimal.Decimal `json:"price"`
-	// Leverage is the leverage value that was used to derive
-	// InverseLeverage for this specific order.  This may differ from
-	// the strategy's configured Leverage for close orders, which the
-	// copy-trading strategy forces to 1.0 (DORA rejects leveraged
-	// closes).  For mean-reversion opens and closes it equals the
-	// configured Leverage.
+	// Leverage is the leverage sent to DORA for this specific order.
+	// For opens and extends of either strategy, equals the strategy's
+	// configured Leverage. For closes, both strategies force 1.0. You
+	// cannot borrow in order to close a position.
 	Leverage decimal.Decimal `json:"leverage"`
-	// InverseLeverage is the value sent to DORA for this order
-	// (1 / Leverage, with Leverage=1 mapping to 1).  Consumers that
-	// need to reconstruct the order can derive Leverage back as
-	// 1 / InverseLeverage, but should prefer the recorded Leverage
-	// field to avoid rounding artefacts.
+	// InverseLeverage is the value sent to DORA for this order, equal
+	// to 1 / Leverage. For opens and extends it is 1 / cfg.Leverage
+	// when cfg.Leverage > 1, otherwise 1.0. For closes it is always
+	// 1.0 regardless of cfg.Leverage, because the close's Leverage is
+	// forced to 1 (see Leverage)
 	InverseLeverage decimal.Decimal `json:"inverse_leverage"`
 	// FromGlobalPosition mirrors the DORA flag controlling which
-	// account the order draws from.
+	// account the order draws from. Both strategies hardcode this to
+	// false: every order (open, extend, close) goes through the
+	// bond's isolated margin account. The field is preserved for
+	// audit completeness and to keep the JSON contract stable for
+	// downstream consumers.
 	FromGlobalPosition bool `json:"from_global_position"`
 	// Kind is one of DecisionKind{Open,Close,Extend}.
 	Kind DecisionKind `json:"kind"`
