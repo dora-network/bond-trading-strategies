@@ -161,8 +161,6 @@ func (c *strategyClient) getBacktestClosedTrades(ctx context.Context, id string,
 // listTradingDecisions proxies GET /v1/trading-decisions/{runID} on
 // strategy-server. The response shape is
 // { "items": [...], "next_cursor": "..." }.
-//
-//nolint:unused // wired up by the list_trading_decisions MCP tool registration in Task 9
 func (c *strategyClient) listTradingDecisions(
 	ctx context.Context,
 	runID string,
@@ -188,7 +186,6 @@ func (c *strategyClient) listTradingDecisions(
 	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, path, nil)
 }
 
-//nolint:unused // consumed by listTradingDecisions; registered as an MCP tool in Task 9
 type listTradingDecisionsParams struct {
 	From   string
 	To     string

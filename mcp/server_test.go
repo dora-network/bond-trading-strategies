@@ -126,6 +126,28 @@ func newStrategyMockServer(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"items":[{"bond_id":"BOND-1","open_time":"2026-04-24T10:00:00Z","close_time":"2026-04-24T11:00:00Z","signal":"BUY","exit_signal":"SELL","entry_spread":"0.015","exit_spread":"0.008","position_size":"5","pnl":"2","exit_reason":"take_profit","entry_price":"100","exit_price":"102","quantity":"5","entry_balance":"10000"}]}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/backtests/44444444-4444-4444-4444-444444444444":
 			_, _ = w.Write([]byte(`{"id":"44444444-4444-4444-4444-444444444444","dora_user_id":"test-user","strategy_type":"mean_reversion","status":"cancelled","created_at":"2026-04-24T12:00:00Z","completed_at":"2026-04-24T12:01:00Z"}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/trading-decisions/"):
+			runID := strings.TrimPrefix(r.URL.Path, "/v1/trading-decisions/")
+			q := r.URL.Query()
+			item := map[string]any{
+				"run_id":     runID,
+				"seq":        1,
+				"side":       "buy",
+				"kind":       "open",
+				"created_at": "2026-04-24T12:00:00Z",
+			}
+			resp := map[string]any{
+				"items":       []map[string]any{item},
+				"next_cursor": "next-page",
+				"echo_run_id": runID,
+				"echo_from":   q.Get("from"),
+				"echo_to":     q.Get("to"),
+				"echo_limit":  q.Get("limit"),
+				"echo_cursor": q.Get("cursor"),
+			}
+			enc, err := json.Marshal(resp)
+			require.NoError(t, err)
+			_, _ = w.Write(enc)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not found"}`))
@@ -309,6 +331,36 @@ func TestStrategyBacktestLifecycle(t *testing.T) {
 	assert.Contains(t, textContent(t, cancel), "cancelled")
 }
 
+func TestListTradingDecisionsTool(t *testing.T) {
+	ts := newTestClient(t)
+
+	// Happy path: the tool proxies run_id and the optional filters to
+	// strategy-server and returns the canned items + next_cursor. The
+	// mock echoes the path run_id and each query param so we can assert
+	// the client forwarded them faithfully.
+	result := callTool(t, ts, "list_trading_decisions", map[string]any{
+		"run_id": "22222222-2222-2222-2222-222222222222",
+		"from":   "2026-01-01T00:00:00Z",
+		"to":     "2026-01-31T23:59:59Z",
+		"limit":  25,
+		"cursor": "prev-page",
+	})
+	require.False(t, result.IsError)
+	text := textContent(t, result)
+	assert.Contains(t, text, `"echo_run_id": "22222222-2222-2222-2222-222222222222"`)
+	assert.Contains(t, text, `"echo_from": "2026-01-01T00:00:00Z"`)
+	assert.Contains(t, text, `"echo_to": "2026-01-31T23:59:59Z"`)
+	assert.Contains(t, text, `"echo_limit": "25"`)
+	assert.Contains(t, text, `"echo_cursor": "prev-page"`)
+	assert.Contains(t, text, `"next_cursor": "next-page"`)
+	assert.Contains(t, text, `"side": "buy"`)
+
+	// Empty run_id returns an error result, not a panic.
+	errResult := callTool(t, ts, "list_trading_decisions", map[string]any{"run_id": ""})
+	require.True(t, errResult.IsError)
+	assert.Contains(t, textContent(t, errResult), "run_id is required")
+}
+
 func TestStrategyCopyTradingNotImplemented(t *testing.T) {
 	ts := newTestClient(t)
 
@@ -474,6 +526,7 @@ func TestToolsListContainsExpectedTools(t *testing.T) {
 		"strategy_backtest_closed_trades",
 		"strategy_backtest_metadata",
 		"strategy_backtest_cancel",
+		"list_trading_decisions",
 		"fred_fetch_series",
 		"fred_fetch_latest",
 		"fred_fetch_yield_curve",
