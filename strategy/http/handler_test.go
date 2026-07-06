@@ -1698,6 +1698,15 @@ func (s *memoryRunStore) SaveRun(ctx context.Context, detail *strategyhttp.RunDe
 	return nil
 }
 
+// CheckRunExists satisfies the RunStore interface for the in-memory fake.
+// Ownership is inferred from the run map; a run present for a different
+// user is reported as not existing, mirroring the 404-collapse semantic
+// of the real PGRunStore.
+func (s *memoryRunStore) CheckRunExists(_ context.Context, id uuid.UUID, doraUserID string) (bool, error) {
+	run, ok := s.runs[id]
+	return ok && run.DORAUserID == doraUserID, nil
+}
+
 func (s *memoryRunStore) String() string {
 	return fmt.Sprintf("memoryRunStore(%d)", len(s.runs))
 }
