@@ -1137,9 +1137,11 @@ func ParseDecisionsDateFilter(r *http.Request) (from, to *time.Time, err error) 
 			return nil, nil
 		}
 		if t, perr := time.Parse(time.RFC3339, raw); perr == nil {
+			t = t.UTC() // make sure time is in UTC to match the database
 			return &t, nil
 		}
 		if t, perr := time.Parse("2006-01-02", raw); perr == nil {
+			t = t.UTC() // make sure time is in UTC to match the database
 			return &t, nil
 		}
 		return nil, fmt.Errorf("invalid date %q (want RFC3339 or YYYY-MM-DD)", raw)

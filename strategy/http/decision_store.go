@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -180,6 +181,9 @@ func (s *PGDecisionStore) ListDecisions(ctx context.Context, p ListDecisionsPara
 	if p.Limit <= 0 {
 		return nil, nil, fmt.Errorf("list decisions: limit must be positive, got %d", p.Limit)
 	}
+	if (p.AfterTime == nil) != (p.AfterSeq == nil) {
+		return nil, nil, errors.New("list decisions: after_time and after_seq must be set together")
+	}
 
 	const q = `
 		SELECT run_id, seq, strategy_type, order_book_id, asset,
@@ -240,10 +244,10 @@ func (s *PGDecisionStore) ListDecisions(ctx context.Context, p ListDecisionsPara
 	}
 
 	if len(out) > p.Limit {
-		next := out[p.Limit] // the probe row
+		last := out[p.Limit-1] // the last data row
 		return out[:p.Limit], &Cursor{
-			Time:    next.CreatedAt,
-			Seq:     next.Seq,
+			Time:    last.CreatedAt,
+			Seq:     last.Seq,
 			Version: cursorVersion,
 		}, nil
 	}

@@ -159,7 +159,9 @@ func (ts *TradeStream) runBookReconnectLoop(ctx context.Context, wsURL, apiKey s
 		delay = initialReconnectDelay // reset on every successful connect
 
 		ts.readLoop(ctx, tradeChan, obID)
-
+		if cancel != nil {
+			cancel()
+		}
 		ts.mu.Lock()
 		delete(ts.bookCancels, obStr)
 		ts.mu.Unlock()
