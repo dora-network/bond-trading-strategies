@@ -1698,6 +1698,15 @@ func (s *memoryRunStore) SaveRun(ctx context.Context, detail *strategyhttp.RunDe
 	return nil
 }
 
+// CheckRunExists satisfies the RunStore interface for the in-memory fake.
+// Ownership is inferred from the run map; a run present for a different
+// user is reported as not existing, mirroring the 404-collapse semantic
+// of the real PGRunStore.
+func (s *memoryRunStore) CheckRunExists(_ context.Context, id uuid.UUID, doraUserID string) (bool, error) {
+	run, ok := s.runs[id]
+	return ok && run.DORAUserID == doraUserID, nil
+}
+
 func (s *memoryRunStore) String() string {
 	return fmt.Sprintf("memoryRunStore(%d)", len(s.runs))
 }
@@ -2466,4 +2475,207 @@ func TestHandler_EmitsRunStopLossEvent(t *testing.T) {
 		}
 		return false
 	}, 2*time.Second, 10*time.Millisecond, "expected EventRunStopLoss to be published")
+}
+
+// fakeRunStore is a minimal RunStore for the trading-decisions
+// handler tests. Only CheckRunExists is exercised by getRunDecisions;
+// LoadRuns and SaveRun are present to satisfy the interface and are
+// never called on this path. The calls counter lets tests assert the
+// ownership check was (or was not) reached.
+type fakeRunStore struct {
+	exists bool
+	err    error
+	calls  int
+}
+
+func (s *fakeRunStore) LoadRuns(_ context.Context) ([]*strategyhttp.RunDetail, error) {
+	return nil, nil
+}
+
+func (s *fakeRunStore) SaveRun(_ context.Context, _ *strategyhttp.RunDetail) error {
+	return nil
+}
+
+func (s *fakeRunStore) CheckRunExists(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
+	s.calls++
+	return s.exists, s.err
+}
+
+// fakeDecisionReader is a minimal DecisionReader for the
+// trading-decisions handler tests. It returns a canned page of
+// decisions plus an optional next cursor; the calls counter lets
+// tests assert the reader was (or was not) reached.
+type fakeDecisionReader struct {
+	items []strategycore.Decision
+	next  *strategyhttp.Cursor
+	err   error
+	calls int
+}
+
+func (f *fakeDecisionReader) ListDecisions(_ context.Context, _ strategyhttp.ListDecisionsParams) ([]strategycore.Decision, *strategyhttp.Cursor, error) {
+	f.calls++
+	return f.items, f.next, f.err
+}
+
+// newDecisionsHandler wires a Handler with the inline fakes for the
+// trading-decisions tests. The doraClientFunc default resolves the
+// caller to "test-user", which the fake run store ignores.
+func newDecisionsHandler(t *testing.T, runStore strategyhttp.RunStore, reader strategyhttp.DecisionReader) http.Handler {
+	t.Helper()
+	return strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithRunStore(runStore),
+		strategyhttp.WithDecisionReader(reader),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+}
+
+func doDecisionsReq(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "ApiKey test-key")
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func sampleDecision(runID uuid.UUID) strategycore.Decision {
+	return strategycore.Decision{
+		RunID:           runID,
+		Seq:             1,
+		StrategyType:    "mean_reversion",
+		OrderBookID:     uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+		Asset:           uuid.MustParse("33333333-3333-3333-3333-333333333333"),
+		Side:            "BUY",
+		Signal:          "buy",
+		Kind:            strategycore.DecisionKindOpen,
+		Quantity:        decimal.MustNew(100, 0),
+		Price:           decimal.MustParse("98.5"),
+		Leverage:        decimal.MustNew(1, 0),
+		InverseLeverage: decimal.MustNew(1, 0),
+		Reason:          "z_score_entry",
+		ReasonDetail:    "z=-2.4",
+		ClientOrderID:   "mean_reversion." + runID.String() + ".0",
+		CreatedAt:       time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+	}
+}
+
+func TestGetRunDecisions_HappyPath(t *testing.T) {
+	t.Parallel()
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	runStore := &fakeRunStore{exists: true}
+	reader := &fakeDecisionReader{items: []strategycore.Decision{sampleDecision(runID)}}
+	handler := newDecisionsHandler(t, runStore, reader)
+
+	rec := doDecisionsReq(t, handler, "/v1/trading-decisions/"+runID.String())
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Items      []strategycore.Decision `json:"items"`
+		NextCursor string                  `json:"next_cursor"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Items, 1)
+	assert.Equal(t, int64(1), body.Items[0].Seq)
+	assert.Equal(t, "mean_reversion", body.Items[0].StrategyType)
+	assert.Empty(t, body.NextCursor)
+	assert.NotContains(t, rec.Body.String(), "next_cursor")
+	assert.Equal(t, 1, runStore.calls)
+	assert.Equal(t, 1, reader.calls)
+}
+
+func TestGetRunDecisions_RunNotFoundIs404(t *testing.T) {
+	t.Parallel()
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	runStore := &fakeRunStore{exists: false}
+	reader := &fakeDecisionReader{}
+	handler := newDecisionsHandler(t, runStore, reader)
+
+	rec := doDecisionsReq(t, handler, "/v1/trading-decisions/"+runID.String())
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "run not found")
+	assert.Equal(t, 1, runStore.calls)
+	assert.Equal(t, 0, reader.calls, "reader must not be called when the run is absent")
+}
+
+func TestGetRunDecisions_WrongUserIs404(t *testing.T) {
+	t.Parallel()
+	// The handler must not distinguish "no such run" from "run belongs
+	// to another user": CheckRunExists collapses both into false, and
+	// the response is the same 404 with "run not found".
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	runStore := &fakeRunStore{exists: false}
+	reader := &fakeDecisionReader{}
+	handler := newDecisionsHandler(t, runStore, reader)
+
+	rec := doDecisionsReq(t, handler, "/v1/trading-decisions/"+runID.String())
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "run not found")
+	assert.Equal(t, 0, reader.calls, "reader must not be called for a wrong-user run")
+}
+
+func TestGetRunDecisions_BadRunIDIs400(t *testing.T) {
+	t.Parallel()
+	runStore := &fakeRunStore{exists: true}
+	reader := &fakeDecisionReader{}
+	handler := newDecisionsHandler(t, runStore, reader)
+
+	rec := doDecisionsReq(t, handler, "/v1/trading-decisions/not-a-uuid")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid run_id")
+	assert.Equal(t, 0, runStore.calls, "ownership check must not run for an unparseable run_id")
+	assert.Equal(t, 0, reader.calls)
+}
+
+func TestGetRunDecisions_BadDateIs400(t *testing.T) {
+	t.Parallel()
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	runStore := &fakeRunStore{exists: true}
+	reader := &fakeDecisionReader{}
+	handler := newDecisionsHandler(t, runStore, reader)
+
+	rec := doDecisionsReq(t, handler, "/v1/trading-decisions/"+runID.String()+"?from=yesterday")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, 1, runStore.calls)
+	assert.Equal(t, 0, reader.calls, "reader must not be called when the date filter is malformed")
+}
+
+func TestGetRunDecisions_BadCursorIs400(t *testing.T) {
+	t.Parallel()
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	runStore := &fakeRunStore{exists: true}
+	reader := &fakeDecisionReader{}
+	handler := newDecisionsHandler(t, runStore, reader)
+
+	rec := doDecisionsReq(t, handler, "/v1/trading-decisions/"+runID.String()+"?cursor=garbage")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, 1, runStore.calls)
+	assert.Equal(t, 0, reader.calls, "reader must not be called when the cursor is malformed")
+}
+
+func TestGetRunDecisions_LastPageOmitsNextCursor(t *testing.T) {
+	t.Parallel()
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	runStore := &fakeRunStore{exists: true}
+	items := []strategycore.Decision{
+		sampleDecision(runID),
+		sampleDecision(runID),
+		sampleDecision(runID),
+	}
+	reader := &fakeDecisionReader{items: items, next: nil}
+	handler := newDecisionsHandler(t, runStore, reader)
+
+	rec := doDecisionsReq(t, handler, "/v1/trading-decisions/"+runID.String())
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Items      []strategycore.Decision `json:"items"`
+		NextCursor string                  `json:"next_cursor"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Items, 3)
+	assert.Empty(t, body.NextCursor)
+	assert.NotContains(t, rec.Body.String(), "next_cursor")
+	assert.Equal(t, 1, reader.calls)
 }

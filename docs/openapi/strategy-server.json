@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Strategy Service API",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`."
   },
   "servers": [
@@ -56,7 +56,9 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/DORAOrderBookSummary" }
+                      "items": {
+                        "$ref": "#/components/schemas/DORAOrderBookSummary"
+                      }
                     }
                   }
                 }
@@ -100,7 +102,9 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/CopyTraderSummary" }
+                      "items": {
+                        "$ref": "#/components/schemas/CopyTraderSummary"
+                      }
                     }
                   }
                 }
@@ -151,7 +155,9 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/StrategySummary" }
+                      "items": {
+                        "$ref": "#/components/schemas/StrategySummary"
+                      }
                     }
                   }
                 }
@@ -198,7 +204,9 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/BacktestSummary" }
+                      "items": {
+                        "$ref": "#/components/schemas/BacktestSummary"
+                      }
                     },
                     "page": { "type": "integer" },
                     "limit": { "type": "integer" }
@@ -249,7 +257,9 @@
             "description": "Backtest result summary",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/BacktestResultSummary" }
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestResultSummary"
+                }
               }
             }
           },
@@ -525,6 +535,68 @@
           }
         }
       }
+    },
+    "/v1/trading-decisions/{run_id}": {
+      "parameters": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "from",
+          "in": "query",
+          "required": false,
+          "description": "RFC3339 or YYYY-MM-DD. Inclusive lower bound on created_at. Malformed values are rejected with 400.",
+          "schema": { "type": "string" }
+        },
+        {
+          "name": "to",
+          "in": "query",
+          "required": false,
+          "description": "RFC3339 or YYYY-MM-DD. Inclusive upper bound on created_at. Malformed values are rejected with 400.",
+          "schema": { "type": "string" }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "description": "Page size. Default 50, silently clamped to [1, 200].",
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "required": false,
+          "description": "Opaque continuation token returned by a previous call. Malformed values are rejected with 400.",
+          "schema": { "type": "string" }
+        }
+      ],
+      "get": {
+        "operationId": "listTradingDecisions",
+        "summary": "List the trading decisions recorded for a live strategy run, newest first",
+        "description": "Returns the strategy_decisions rows for a single run owned by the authenticated user. Backtest runs are not represented in this table. The user is derived from the auth token, not the URL — wrong-user and not-found both produce 404. The cursor is opaque and versioned; do not parse it.",
+        "security": [{ "ApiKeyAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "One page of decisions",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DecisionList" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
     }
   },
   "components": {
@@ -553,7 +625,12 @@
         "name": "limit",
         "in": "query",
         "description": "Items per page (default 10, max 50)",
-        "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 10
+        }
       }
     },
     "responses": {
@@ -608,7 +685,13 @@
           "quote_asset_id": { "type": "string" },
           "status": { "type": "string" }
         },
-        "required": ["id", "display_name", "base_asset_id", "quote_asset_id", "status"]
+        "required": [
+          "id",
+          "display_name",
+          "base_asset_id",
+          "quote_asset_id",
+          "status"
+        ]
       },
       "DORAUserSummary": {
         "type": "object",
@@ -638,7 +721,10 @@
         "type": "object",
         "properties": {
           "type": { "type": "string" },
-          "status": { "type": "string", "enum": ["available", "not_implemented"] },
+          "status": {
+            "type": "string",
+            "enum": ["available", "not_implemented"]
+          },
           "description": { "type": "string" },
           "config_fields": {
             "type": "array",
@@ -663,7 +749,10 @@
       "CreateBacktestRequest": {
         "type": "object",
         "properties": {
-          "strategy_type": { "type": "string", "enum": ["mean_reversion", "copytrading"] },
+          "strategy_type": {
+            "type": "string",
+            "enum": ["mean_reversion", "copytrading"]
+          },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
@@ -678,7 +767,10 @@
       "CreateRunRequest": {
         "type": "object",
         "properties": {
-          "strategy_type": { "type": "string", "enum": ["mean_reversion", "copytrading"] },
+          "strategy_type": {
+            "type": "string",
+            "enum": ["mean_reversion", "copytrading"]
+          },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
@@ -692,13 +784,27 @@
         "type": "object",
         "properties": {
           "lookback_window": { "type": "integer", "minimum": 2, "default": 20 },
-          "entry_z_score": { "type": "number", "exclusiveMinimum": 0, "default": 2.0 },
+          "entry_z_score": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 2.0
+          },
           "exit_z_score": { "type": "number", "minimum": 0, "default": 0.5 },
-          "stop_loss_z_score": { "type": "number", "minimum": 0, "default": 3.5 },
+          "stop_loss_z_score": {
+            "type": "number",
+            "minimum": 0,
+            "default": 3.5
+          },
           "min_std_dev": { "type": "number", "minimum": 0, "default": 0.0005 },
-          "max_position_size": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1.0 },
+          "max_position_size": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 1.0
+          },
           "order_book_id": {
-            "type": "string", "format": "uuid",
+            "type": "string",
+            "format": "uuid",
             "description": "DORA order book UUID used to locate the traded asset and place orders."
           },
           "tenor": {
@@ -706,12 +812,15 @@
             "description": "Benchmark Treasury tenor, e.g. 1M, 6M, 2Y, 5Y, 10Y, 30Y."
           },
           "initial_balance": {
-            "type": "number", "exclusiveMinimum": 0,
+            "type": "number",
+            "exclusiveMinimum": 0,
             "default": 1.0,
             "description": "Starting capital for backtests. Omitted for live runs — obtained from DORA positions."
           },
           "leverage": {
-            "type": "number", "exclusiveMinimum": 0, "default": 1.0,
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
             "description": "Leverage multiplier for live orders."
           }
         }
@@ -720,12 +829,14 @@
         "type": "object",
         "properties": {
           "followed_trader": {
-            "type": "string", "format": "uuid",
+            "type": "string",
+            "format": "uuid",
             "description": "DORA user id of the trader whose trades will be copied."
           },
           "percentage_of_available": {
             "type": "number",
-            "exclusiveMinimum": 0, "maximum": 1,
+            "exclusiveMinimum": 0,
+            "maximum": 1,
             "description": "Fraction of available balance to allocate per copied trade. Must be in (0, 1]."
           },
           "leverage": {
@@ -734,11 +845,13 @@
             "description": "Leverage multiplier applied to copied orders. Must be greater than 0."
           },
           "min_order_size": {
-            "type": "integer", "minimum": 0,
+            "type": "integer",
+            "minimum": 0,
             "description": "Minimum order size; orders below this threshold are skipped. Defaults to 0."
           },
           "max_order_size": {
-            "type": "integer", "minimum": 0,
+            "type": "integer",
+            "minimum": 0,
             "description": "Maximum order size; orders above this threshold are clipped. Must be >= min_order_size. Defaults to 0 (no cap)."
           },
           "disallowed_bonds": {
@@ -747,7 +860,9 @@
             "description": "Bond UUIDs to exclude from copying. If absent or empty, all bonds are eligible."
           },
           "initial_balance": {
-            "type": "number", "minimum": 0, "default": 10000,
+            "type": "number",
+            "minimum": 0,
+            "default": 10000,
             "description": "Starting cash for backtests. Omit or set to 0 to use the package default (10000). Omitted for live runs — obtained from DORA positions."
           }
         },
@@ -759,15 +874,31 @@
           "id": { "type": "string", "format": "uuid" },
           "dora_user_id": { "type": "string" },
           "strategy_type": { "type": "string" },
-          "status": { "type": "string", "enum": ["running", "completed", "failed", "cancelled"] },
+          "status": {
+            "type": "string",
+            "enum": ["running", "completed", "failed", "cancelled"]
+          },
           "config": { "description": "Normalised strategy config JSON" },
           "asset_name": { "type": "string" },
           "asset_symbol": { "type": "string" },
           "created_at": { "type": "string", "format": "date-time" },
-          "completed_at": { "type": "string", "format": "date-time", "nullable": true },
-          "error": { "type": "string", "description": "Error message if the backtest failed" }
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message if the backtest failed"
+          }
         },
-        "required": ["id", "dora_user_id", "strategy_type", "status", "created_at"]
+        "required": [
+          "id",
+          "dora_user_id",
+          "strategy_type",
+          "status",
+          "created_at"
+        ]
       },
       "BacktestDetail": {
         "allOf": [
@@ -788,17 +919,26 @@
         "type": "object",
         "description": "Flattened backtest result returned by GET /v1/backtests/{id}. Mirrors the Go BacktestResultSummary struct — contains result fields at top level alongside strategy type, status, and config, but omits id, dora_user_id, and timestamps.",
         "properties": {
-          "total_pnl": { "type": "string", "description": "Total realised P&L" },
+          "total_pnl": {
+            "type": "string",
+            "description": "Total realised P&L"
+          },
           "win_count": { "type": "integer" },
           "loss_count": { "type": "integer" },
           "max_drawdown": { "type": "string" },
           "sharpe_ratio": { "type": "string" },
           "strategy_type": { "type": "string" },
-          "status": { "type": "string", "enum": ["running", "completed", "failed", "cancelled"] },
+          "status": {
+            "type": "string",
+            "enum": ["running", "completed", "failed", "cancelled"]
+          },
           "config": { "description": "Normalised strategy config JSON" },
           "asset_name": { "type": "string" },
           "asset_symbol": { "type": "string" },
-          "error": { "type": "string", "description": "Error message if the backtest failed" }
+          "error": {
+            "type": "string",
+            "description": "Error message if the backtest failed"
+          }
         },
         "required": ["strategy_type", "status"]
       },
@@ -819,7 +959,15 @@
           "max_drawdown": { "type": "string" },
           "sharpe_ratio": { "type": "string" }
         },
-        "required": ["closed_trades", "trade_records", "total_pnl", "win_count", "loss_count", "max_drawdown", "sharpe_ratio"]
+        "required": [
+          "closed_trades",
+          "trade_records",
+          "total_pnl",
+          "win_count",
+          "loss_count",
+          "max_drawdown",
+          "sharpe_ratio"
+        ]
       },
       "ClosedTrade": {
         "type": "object",
@@ -841,7 +989,16 @@
           "quantity": { "type": "string" },
           "entry_balance": { "type": "string" }
         },
-        "required": ["bond_id", "open_time", "close_time", "signal", "entry_spread", "exit_spread", "position_size", "pnl"]
+        "required": [
+          "bond_id",
+          "open_time",
+          "close_time",
+          "signal",
+          "entry_spread",
+          "exit_spread",
+          "position_size",
+          "pnl"
+        ]
       },
       "TradeRecord": {
         "type": "object",
@@ -864,12 +1021,26 @@
           "id": { "type": "string", "format": "uuid" },
           "dora_user_id": { "type": "string" },
           "strategy_type": { "type": "string" },
-          "status": { "type": "string", "enum": ["running", "paused", "stopped"] },
+          "status": {
+            "type": "string",
+            "enum": ["running", "paused", "stopped"]
+          },
           "created_at": { "type": "string", "format": "date-time" },
           "updated_at": { "type": "string", "format": "date-time" },
-          "stopped_at": { "type": "string", "format": "date-time", "nullable": true }
+          "stopped_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
         },
-        "required": ["id", "dora_user_id", "strategy_type", "status", "created_at", "updated_at"]
+        "required": [
+          "id",
+          "dora_user_id",
+          "strategy_type",
+          "status",
+          "created_at",
+          "updated_at"
+        ]
       },
       "RunDetail": {
         "allOf": [
@@ -992,7 +1163,11 @@
           "user_id": { "type": "string" },
           "type": { "$ref": "#/components/schemas/EventType" },
           "run_id": { "type": "string", "format": "uuid", "nullable": true },
-          "backtest_id": { "type": "string", "format": "uuid", "nullable": true },
+          "backtest_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
           "created_at": { "type": "string", "format": "date-time" },
           "payload": { "type": "object" }
         }
@@ -1003,6 +1178,66 @@
           "error": { "type": "string" }
         },
         "required": ["error"]
+      },
+      "Decision": {
+        "type": "object",
+        "description": "One trading decision recorded during a live strategy run. The row is the source of truth for the inputs that produced a single market order; clients should treat all fields as immutable audit data.",
+        "properties": {
+          "run_id": { "type": "string", "format": "uuid" },
+          "seq": { "type": "integer", "format": "int64" },
+          "strategy_type": { "type": "string" },
+          "order_book_id": { "type": "string", "format": "uuid" },
+          "asset": { "type": "string", "format": "uuid" },
+          "side": { "type": "string", "enum": ["BUY", "SELL"] },
+          "signal": {
+            "type": "string",
+            "enum": ["buy", "sell", "BUY", "SELL"]
+          },
+          "kind": { "type": "string", "enum": ["open", "close", "extend"] },
+          "quantity": { "type": "string" },
+          "price": { "type": "string" },
+          "leverage": { "type": "string" },
+          "inverse_leverage": { "type": "string" },
+          "from_global_position": { "type": "boolean" },
+          "reason": { "type": "string" },
+          "reason_detail": { "type": "string" },
+          "client_order_id": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "required": [
+          "run_id",
+          "seq",
+          "strategy_type",
+          "order_book_id",
+          "asset",
+          "side",
+          "signal",
+          "kind",
+          "quantity",
+          "price",
+          "leverage",
+          "inverse_leverage",
+          "from_global_position",
+          "reason",
+          "reason_detail",
+          "client_order_id",
+          "created_at"
+        ]
+      },
+      "DecisionList": {
+        "type": "object",
+        "description": "One page of trading decisions. next_cursor is omitted on the last page; clients should treat absent and empty string the same.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Decision" }
+          },
+          "next_cursor": {
+            "type": "string",
+            "description": "Opaque continuation token. Pass back as the cursor query parameter to fetch the next page. Clients MUST NOT parse this value."
+          }
+        },
+        "required": ["items"]
       }
     }
   }

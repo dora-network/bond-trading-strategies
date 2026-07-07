@@ -4,12 +4,19 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type RunStore interface {
 	LoadRuns(ctx context.Context) ([]*RunDetail, error)
 	SaveRun(ctx context.Context, detail *RunDetail) error
+	// CheckRunExists reports whether a run with the given id exists and
+	// is owned by doraUserID. The decisions handler uses it to enforce
+	// ownership before serving rows from strategy_decisions. A nil error
+	// with a false result means the run does not exist OR it belongs to
+	// another user; the handler maps both to 404.
+	CheckRunExists(ctx context.Context, id uuid.UUID, doraUserID string) (bool, error)
 }
 
 type PGRunStore struct {
@@ -93,4 +100,17 @@ func (s *PGRunStore) SaveRun(ctx context.Context, detail *RunDetail) error {
 	}
 
 	return nil
+}
+
+// CheckRunExists returns true iff a run with id exists for doraUserID.
+// The single-row SELECT EXISTS short-circuits on the first match and
+// uses the strategy_runs primary key on id. The dora_user_id filter
+// is a residual predicate; no separate index is required.
+func (s *PGRunStore) CheckRunExists(ctx context.Context, id uuid.UUID, doraUserID string) (bool, error) {
+	const q = `SELECT EXISTS(SELECT 1 FROM strategy_runs WHERE id = $1 AND dora_user_id = $2)`
+	var ok bool
+	if err := s.pool.QueryRow(ctx, q, id, doraUserID).Scan(&ok); err != nil {
+		return false, fmt.Errorf("check strategy run exists %s: %w", id, err)
+	}
+	return ok, nil
 }

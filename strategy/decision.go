@@ -32,63 +32,69 @@ const (
 // is intentionally a snapshot of the inputs that produced the order,
 // not a denormalised join — the row is the source of truth for
 // "what was the strategy thinking when it placed this order?".
+//
+// JSON tags are part of the public trading-decisions API contract.
+// The marshal test in strategy/http/decision_test.go locks the field
+// names; do not rename a tag without bumping the OpenAPI version.
 type Decision struct {
 	// RunID is the strategy_runs row that owns this decision.
-	RunID uuid.UUID
+	RunID uuid.UUID `json:"run_id"`
 	// Seq is a monotonically increasing per-run counter assigned by the
 	// strategy.  Combined with RunID it forms the primary key.
-	Seq int64
+	Seq int64 `json:"seq"`
 	// StrategyType is the strategy name ("mean_reversion" or
 	// "copy_trading") that produced the decision.
-	StrategyType string
+	StrategyType string `json:"strategy_type"`
 	// OrderBookID is the DORA order book the order was placed on.
-	OrderBookID uuid.UUID
+	OrderBookID uuid.UUID `json:"order_book_id"`
 	// Asset is the traded bond/asset UUID.
-	Asset uuid.UUID
+	Asset uuid.UUID `json:"asset"`
 	// Side is "buy" or "sell" — the DORA side that was sent.
-	Side string
+	Side string `json:"side"`
 	// Signal is the strategy's signal at decision time ("buy" or
 	// "sell").  For mean-reversion it is the z-score signal; for
 	// copy-trading it is the side the followed trader executed.
-	Signal string
+	Signal string `json:"signal"`
 	// Quantity is the order size in bond units that was submitted.
-	Quantity decimal.Decimal
+	Quantity decimal.Decimal `json:"quantity"`
 	// Price is the bond price at decision time, used for sizing.
-	Price decimal.Decimal
-	// Leverage is the leverage value that was used to derive
-	// InverseLeverage for this specific order.  This may differ from
-	// the strategy's configured Leverage for close orders, which the
-	// copy-trading strategy forces to 1.0 (DORA rejects leveraged
-	// closes).  For mean-reversion opens and closes it equals the
-	// configured Leverage.
-	Leverage decimal.Decimal
-	// InverseLeverage is the value sent to DORA for this order
-	// (1 / Leverage, with Leverage=1 mapping to 1).  Consumers that
-	// need to reconstruct the order can derive Leverage back as
-	// 1 / InverseLeverage, but should prefer the recorded Leverage
-	// field to avoid rounding artefacts.
-	InverseLeverage decimal.Decimal
+	Price decimal.Decimal `json:"price"`
+	// Leverage is the leverage sent to DORA for this specific order.
+	// For opens and extends of either strategy, equals the strategy's
+	// configured Leverage. For closes, both strategies force 1.0. You
+	// cannot borrow in order to close a position.
+	Leverage decimal.Decimal `json:"leverage"`
+	// InverseLeverage is the value sent to DORA for this order, equal
+	// to 1 / Leverage. For opens and extends it is 1 / cfg.Leverage
+	// when cfg.Leverage > 1, otherwise 1.0. For closes it is always
+	// 1.0 regardless of cfg.Leverage, because the close's Leverage is
+	// forced to 1 (see Leverage)
+	InverseLeverage decimal.Decimal `json:"inverse_leverage"`
 	// FromGlobalPosition mirrors the DORA flag controlling which
-	// account the order draws from.
-	FromGlobalPosition bool
+	// account the order draws from. Both strategies hardcode this to
+	// false: every order (open, extend, close) goes through the
+	// bond's isolated margin account. The field is preserved for
+	// audit completeness and to keep the JSON contract stable for
+	// downstream consumers.
+	FromGlobalPosition bool `json:"from_global_position"`
 	// Kind is one of DecisionKind{Open,Close,Extend}.
-	Kind DecisionKind
+	Kind DecisionKind `json:"kind"`
 	// Reason is a short machine-readable code (e.g. "z_score_entry",
 	// "take_profit", "stop_loss", "follow_trade") so that consumers
 	// can group decisions without parsing ReasonDetail.
-	Reason string
+	Reason string `json:"reason"`
 	// ReasonDetail is a free-form human-readable explanation of why
 	// the decision fired; safe to surface in the UI.
-	ReasonDetail string
+	ReasonDetail string `json:"reason_detail"`
 	// CreatedAt is the wall-clock time at which the order was placed
 	// (UTC).
-	CreatedAt time.Time
+	CreatedAt time.Time `json:"created_at"`
 	// ClientOrderID is the per-order identifier sent to DORA in the
 	// CreateOrderRequest.  Format: <strategy_name>.<run_id>.<uuidv7>.
 	// Set on every successful live order and persisted alongside the
 	// rest of the decision so audit consumers can correlate the row
 	// with the order in DORA.
-	ClientOrderID string
+	ClientOrderID string `json:"client_order_id"`
 }
 
 // BuildClientOrderID returns the client_order_id string the live

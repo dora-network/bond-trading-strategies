@@ -31,6 +31,12 @@ const (
 	strategyStatusNotImplemented = "not_implemented"
 	defaultPaginationLimit       = 10
 	maxPaginationLimit           = 50
+	defaultTradingDecisionsLimit = 50
+	// maxTradingDecisionsLimit is the upper bound for the
+	// trading-decisions list endpoint.  It is higher than
+	// maxPaginationLimit because the cursor-paginated contract has no
+	// page*limit offset to protect and the per-row payload is narrow.
+	maxTradingDecisionsLimit = 200
 	// batchSize is the row count that triggers a flush in the batching
 	// backtest trade writer. Tuned with flushAfter so a backtest emitting
 	// rows faster than the flush interval still drains in bounded chunks.
@@ -61,14 +67,21 @@ type Handler struct {
 	// the decision that triggered it. nil disables recording; backtests
 	// never opt in and therefore never write to strategy_decisions.
 	decisionStore strategycore.DecisionRecorder
-	tradeStream   *streams.TradeStream
-	notifier      notifications.Notifier
-	encryptionKey []byte // 32-byte AES-256 key for encrypting API keys at rest
-	mux           *http.ServeMux
-	authedMux     http.Handler
-	mu            sync.RWMutex
-	backtests     map[uuid.UUID]*BacktestDetail
-	runs          map[uuid.UUID]*RunDetail
+	// decisionReader serves the read-only /v1/trading-decisions/{run_id}
+	// endpoint. The route is registered unconditionally in NewHandler;
+	// when decisionReader is nil the handler short-circuits to 503 so
+	// the endpoint can be deployed without wiring a reader until the
+	// operator opts in. Distinct from decisionStore (the write-side
+	// DecisionRecorder) so the read path carries no write concerns.
+	decisionReader DecisionReader
+	tradeStream    *streams.TradeStream
+	notifier       notifications.Notifier
+	encryptionKey  []byte // 32-byte AES-256 key for encrypting API keys at rest
+	mux            *http.ServeMux
+	authedMux      http.Handler
+	mu             sync.RWMutex
+	backtests      map[uuid.UUID]*BacktestDetail
+	runs           map[uuid.UUID]*RunDetail
 	// runningStrategies maps a live run id to the strategy instance that
 	// was started for it, so the stop-loss observer can query the
 	// strategy's recorded trigger. Populated in createRun and
@@ -482,6 +495,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 	h.mux.HandleFunc("/v1/strategies", h.handleStrategies)
 	h.mux.HandleFunc("/v1/backtests", h.handleBacktests)
 	h.mux.HandleFunc("/v1/backtests/", h.handleBacktestByID)
+	h.mux.HandleFunc("/v1/trading-decisions/", h.handleTradingDecisions)
 	h.mux.HandleFunc("/v1/runs", h.handleRuns)
 	h.mux.HandleFunc("/v1/runs/", h.handleRunByID)
 	h.mux.HandleFunc("/v1/openapi", h.handleOpenAPI)
@@ -534,6 +548,17 @@ func WithBacktestStore(store BacktestStore) func(*Handler) {
 func WithDecisionStore(store strategycore.DecisionRecorder) func(*Handler) {
 	return func(h *Handler) {
 		h.decisionStore = store
+	}
+}
+
+// WithDecisionReader sets the reader used by the
+// /v1/trading-decisions/{run_id} endpoint. Passing nil leaves the
+// endpoint registered but makes it return 503 — useful when the read
+// path is deployed without a wired reader. The reader is distinct
+// from the write-side recorder (see WithDecisionStore).
+func WithDecisionReader(reader DecisionReader) func(*Handler) {
+	return func(h *Handler) {
+		h.decisionReader = reader
 	}
 }
 
@@ -1099,6 +1124,164 @@ func parseDateFilter(r *http.Request) (from, to time.Time) {
 		}
 	}
 	return from, to
+}
+
+// ParseDecisionsDateFilter parses the from/to query parameters for the
+// trading-decisions endpoint. Unlike parseDateFilter, malformed input
+// is rejected with a parse error rather than silently dropped, because
+// a typo'd date on a paginated endpoint would silently widen the
+// result set across many pages.
+func ParseDecisionsDateFilter(r *http.Request) (from, to *time.Time, err error) {
+	parse := func(raw string) (*time.Time, error) {
+		if raw == "" {
+			return nil, nil
+		}
+		if t, perr := time.Parse(time.RFC3339, raw); perr == nil {
+			t = t.UTC() // make sure time is in UTC to match the database
+			return &t, nil
+		}
+		if t, perr := time.Parse("2006-01-02", raw); perr == nil {
+			t = t.UTC() // make sure time is in UTC to match the database
+			return &t, nil
+		}
+		return nil, fmt.Errorf("invalid date %q (want RFC3339 or YYYY-MM-DD)", raw)
+	}
+	from, err = parse(r.URL.Query().Get("from"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("from: %w", err)
+	}
+	to, err = parse(r.URL.Query().Get("to"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("to: %w", err)
+	}
+	return from, to, nil
+}
+
+// ParseDecisionCursor parses the cursor query parameter. Returns nil
+// with no error when the parameter is absent. The cursor must be
+// opaque to clients; this function decodes the wire format produced
+// by Cursor.Encode.
+func ParseDecisionCursor(r *http.Request) (*Cursor, error) {
+	raw := r.URL.Query().Get("cursor")
+	if raw == "" {
+		return nil, nil
+	}
+	return DecodeCursor(raw)
+}
+
+// ParseDecisionLimit parses the limit query parameter for the
+// trading-decisions endpoint. Default is 50, silently clamped to
+// [1, 200]. Garbage / non-positive input keeps the default. The
+// behaviour matches parsePagination in this package.
+func ParseDecisionLimit(r *http.Request) int {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return defaultTradingDecisionsLimit
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultTradingDecisionsLimit
+	}
+	if n > maxTradingDecisionsLimit {
+		return maxTradingDecisionsLimit
+	}
+	return n
+}
+
+// handleTradingDecisions is the top-level dispatcher for the
+// /v1/trading-decisions/{run_id} endpoint. It pulls run_id from the
+// path and delegates to getRunDecisions. Non-GET methods are rejected
+// with 405.
+func (h *Handler) handleTradingDecisions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	raw := strings.TrimPrefix(r.URL.Path, "/v1/trading-decisions/")
+	raw = strings.TrimSuffix(raw, "/")
+	if raw == "" {
+		writeError(w, http.StatusBadRequest, "run_id is required")
+		return
+	}
+	runID, err := uuid.Parse(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid run_id")
+		return
+	}
+	h.getRunDecisions(w, r, runID)
+}
+
+// getRunDecisions serves GET /v1/trading-decisions/{run_id}. The flow
+// is: resolve the caller, verify the run exists and belongs to the
+// caller, parse the date / cursor / limit parameters, fetch one page
+// of decisions, write the JSON response. A nil decisionReader
+// short-circuits to 503 — the route is registered unconditionally but
+// the reader is optional.
+func (h *Handler) getRunDecisions(w http.ResponseWriter, r *http.Request, runID uuid.UUID) {
+	ctx := r.Context()
+
+	doraUserID, err := h.resolveDORAUserID(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
+		return
+	}
+
+	if h.decisionReader == nil {
+		writeError(w, http.StatusServiceUnavailable, "trading decisions endpoint is not configured")
+		return
+	}
+
+	exists, err := h.runStore.CheckRunExists(ctx, runID, doraUserID)
+	if err != nil {
+		slog.Error("check run exists", "err", err, "run_id", runID)
+		writeError(w, http.StatusInternalServerError, "check run")
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+
+	from, to, err := ParseDecisionsDateFilter(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cursor, err := ParseDecisionCursor(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit := ParseDecisionLimit(r)
+
+	params := ListDecisionsParams{
+		RunID: runID,
+		From:  from,
+		To:    to,
+		Limit: limit,
+	}
+	if cursor != nil {
+		t := cursor.Time
+		s := cursor.Seq
+		params.AfterTime = &t
+		params.AfterSeq = &s
+	}
+
+	items, next, err := h.decisionReader.ListDecisions(ctx, params)
+	if err != nil {
+		slog.Error("list decisions", "err", err, "run_id", runID)
+		writeError(w, http.StatusInternalServerError, "list decisions")
+		return
+	}
+
+	resp := struct {
+		Items      []strategycore.Decision `json:"items"`
+		NextCursor string                  `json:"next_cursor,omitempty"`
+	}{Items: items}
+	if next != nil {
+		resp.NextCursor = next.Encode()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) getBacktestTrades(w http.ResponseWriter, r *http.Request, id uuid.UUID) {

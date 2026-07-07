@@ -172,11 +172,14 @@ func main() {
 		}()
 	}
 
+	decisionStore := strategyhttp.NewPGDecisionStore(pool)
+
 	handlerImpl := strategyhttp.NewHandler(
 		service,
 		strategyhttp.WithRunStore(strategyhttp.NewPGRunStore(pool)),
 		strategyhttp.WithBacktestStore(strategyhttp.NewPGBacktestStore(pool)),
-		strategyhttp.WithDecisionStore(strategyhttp.NewPGDecisionStore(pool)),
+		strategyhttp.WithDecisionStore(decisionStore),
+		strategyhttp.WithDecisionReader(decisionStore),
 		strategyhttp.WithTradesHistoryStore(copytrading.NewPGTradesHistoryStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithTradeStream(tradeStream),
