@@ -619,10 +619,10 @@ func WithStopLossObserverInterval(d time.Duration) func(*Handler) {
 // notifications/orderupdates package. The concrete type lives outside
 // strategy/http; this interface is defined locally to keep the import
 // boundary one-way (strategy/http does not import notifications/orderupdates).
-//
-//counterfeiter:generate . orderUpdatesManager
 type orderUpdatesManager interface {
-	EnsureSubscribed(ctx context.Context, doraUserID, apiKey string) error
+	EnsureSubscribed(ctx context.Context, doraUserID, apiKey string,
+		runID uuid.UUID, status string) error
+	UpdateRunStatus(runID uuid.UUID, status string)
 	Unsubscribe(doraUserID string)
 }
 
@@ -1559,7 +1559,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	h.runs[id] = detail
 	h.mu.Unlock()
 	if h.orderUpdates != nil && doraUserID != "" && info != nil && info.APIKey != "" {
-		if err := h.orderUpdates.EnsureSubscribed(r.Context(), doraUserID, info.APIKey); err != nil {
+		if err := h.orderUpdates.EnsureSubscribed(r.Context(), doraUserID, info.APIKey, detail.ID, detail.Status); err != nil {
 			slog.Warn("EnsureSubscribed failed", "user_id", doraUserID, "err", err)
 		}
 	}
@@ -1643,6 +1643,7 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 	}
 	h.mu.Unlock()
 	if h.orderUpdates != nil && detail.DORAUserID != "" {
+		h.orderUpdates.UpdateRunStatus(detail.ID, "stopped")
 		h.orderUpdates.Unsubscribe(detail.DORAUserID)
 	}
 
@@ -1695,6 +1696,10 @@ func (h *Handler) pauseRun(w http.ResponseWriter, ctx context.Context, id uuid.U
 		detail.UpdatedAt = now
 	}
 	h.mu.Unlock()
+
+	if h.orderUpdates != nil {
+		h.orderUpdates.UpdateRunStatus(id, "paused")
+	}
 
 	detail, _ = h.runDetail(id)
 	if err := h.saveRun(ctx, detail); err != nil {
@@ -1760,6 +1765,10 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 		detail.StoppedAt = nil
 	}
 	h.mu.Unlock()
+
+	if h.orderUpdates != nil {
+		h.orderUpdates.UpdateRunStatus(id, "running")
+	}
 
 	detail, _ = h.runDetail(id)
 	if err := h.saveRun(ctx, detail); err != nil {
@@ -1858,7 +1867,7 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		return err
 	}
 	if h.orderUpdates != nil && detail.DORAUserID != "" && apiKeyDecrypted != nil {
-		if err := h.orderUpdates.EnsureSubscribed(ctx, detail.DORAUserID, string(apiKeyDecrypted)); err != nil {
+		if err := h.orderUpdates.EnsureSubscribed(ctx, detail.DORAUserID, string(apiKeyDecrypted), detail.ID, detail.Status); err != nil {
 			slog.Warn("EnsureSubscribed failed", "user_id", detail.DORAUserID, "err", err)
 		}
 	}

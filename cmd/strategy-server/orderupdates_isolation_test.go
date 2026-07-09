@@ -54,8 +54,8 @@ func TestOrderUpdates_AreIsolatedPerUser(t *testing.T) {
 	require.NoError(t, err)
 	defer subB.Close()
 
-	require.NoError(t, mgr.EnsureSubscribed(t.Context(), "alice", "k-alice"))
-	require.NoError(t, mgr.EnsureSubscribed(t.Context(), "bob", "k-bob"))
+	require.NoError(t, mgr.EnsureSubscribed(t.Context(), "alice", "k-alice", runA, "running"))
+	require.NoError(t, mgr.EnsureSubscribed(t.Context(), "bob", "k-bob", runB, "running"))
 
 	// Deliver Bob's update to Bob's stream, Alice's to Alice's. Each
 	// goroutine only ever reads its own channel, so the only way a

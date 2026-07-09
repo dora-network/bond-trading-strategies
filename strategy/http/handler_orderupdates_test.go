@@ -21,18 +21,38 @@ import (
 // the interface is unexported (it's a Handler-side seam), and a fake
 // per test file is the lighter touch.
 type orderUpdatesManagerSpy struct {
-	ensureCalls      []ensureCall
-	unsubscribeCalls []string
+	ensureCalls       []ensureCall
+	updateStatusCalls []updateStatusCall
+	unsubscribeCalls  []string
 }
 
 type ensureCall struct {
 	doraUserID string
 	apiKey     string
+	runID      uuid.UUID
+	status     string
 }
 
-func (s *orderUpdatesManagerSpy) EnsureSubscribed(_ context.Context, doraUserID, apiKey string) error {
-	s.ensureCalls = append(s.ensureCalls, ensureCall{doraUserID: doraUserID, apiKey: apiKey})
+type updateStatusCall struct {
+	runID  uuid.UUID
+	status string
+}
+
+func (s *orderUpdatesManagerSpy) EnsureSubscribed(_ context.Context, doraUserID, apiKey string, runID uuid.UUID, status string) error {
+	s.ensureCalls = append(s.ensureCalls, ensureCall{
+		doraUserID: doraUserID,
+		apiKey:     apiKey,
+		runID:      runID,
+		status:     status,
+	})
 	return nil
+}
+
+func (s *orderUpdatesManagerSpy) UpdateRunStatus(runID uuid.UUID, status string) {
+	s.updateStatusCalls = append(s.updateStatusCalls, updateStatusCall{
+		runID:  runID,
+		status: status,
+	})
 }
 
 func (s *orderUpdatesManagerSpy) Unsubscribe(doraUserID string) {
@@ -95,6 +115,16 @@ func TestHandler_OrderUpdatesCallSitesAreIsolatedPerUser(t *testing.T) {
 	require.Len(t, spy.ensureCalls, 1, "exactly one ensure call")
 	assert.Equal(t, "test-user", spy.ensureCalls[0].doraUserID,
 		"ensure must use the authenticated user's id, not someone else's")
+	assert.Equal(t, runID, spy.ensureCalls[0].runID,
+		"ensure must include the correct runID")
+	assert.Equal(t, "running", spy.ensureCalls[0].status,
+		"ensure must include status=running")
+
+	require.Len(t, spy.updateStatusCalls, 1, "exactly one UpdateRunStatus call")
+	assert.Equal(t, runID, spy.updateStatusCalls[0].runID,
+		"UpdateRunStatus must reference the same run")
+	assert.Equal(t, "stopped", spy.updateStatusCalls[0].status,
+		"UpdateRunStatus must mark status=stopped")
 
 	require.Len(t, spy.unsubscribeCalls, 1, "exactly one unsubscribe call")
 	assert.Equal(t, "test-user", spy.unsubscribeCalls[0],
