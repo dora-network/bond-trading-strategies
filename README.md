@@ -203,9 +203,10 @@ curl -X POST http://localhost:8081/v1/backtests \
 JSON-encoded `Event` objects for the authenticated DORA user. Event
 types: `backtest.started`, `backtest.completed`, `backtest.failed`,
 `run.started`, `run.paused`, `run.resumed`, `run.stopped`,
-`run.stop_loss`. The `dora.*` namespace is reserved for v2 events
-relayed from DORA (orders, trades) — clients should ignore unknown
-`type` values.
+`run.stop_loss`, `dora.order_update`. The `dora.*` namespace is for v2
+events relayed from DORA (orders, trades) — `dora.order_update` is the
+first v2 event live today; clients should ignore unknown `type` values.
+]
 
 Query parameters:
 - `Last-Event-ID` (UUIDv7): replay events with `id > Last-Event-ID` from the log, capped at 1000 events or 24h.
