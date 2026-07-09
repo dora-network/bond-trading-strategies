@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -36,21 +36,21 @@ type ManagerStream interface {
 // with exponential backoff on transient failures. Concurrency-safe.
 //
 // On a successful message, the Stream updates the in-memory `since`
-// pointer from each entry's `updated_at`; the next reconnect dials
-// with `?since=<that timestamp>`.
+// cursor from each entry's `updated_at`; the next reconnect dials
+// with `?since=<that timestamp>`. The cursor is keyed by doraUserID
+// so one user's reconnect never carries another user's timestamp.
 type Stream struct {
 	wsBaseURL string
 	log       *slog.Logger
-	lastSince atomic.Pointer[time.Time]
+	mu        sync.Mutex
+	since     map[string]*time.Time // keyed by doraUserID
 }
 
-// NewStream constructs a Stream. wsBaseURL is the `wss://...` form,
-// e.g. `wss://staging.dora.co`. The value is read once per dial.
 func NewStream(wsBaseURL string, log *slog.Logger) *Stream {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Stream{wsBaseURL: wsBaseURL, log: log}
+	return &Stream{wsBaseURL: wsBaseURL, log: log, since: make(map[string]*time.Time)}
 }
 
 // Read opens the per-user DORA order-updates stream and returns a
@@ -89,7 +89,7 @@ func (s *Stream) runReadLoop(ctx context.Context, doraUserID, apiKey string, out
 			continue
 		}
 		backoff = initialBackoff
-		s.forwardUntilDone(ctx, msgs, out)
+		s.forwardUntilDone(ctx, doraUserID, msgs, out)
 	}
 }
 
@@ -141,7 +141,7 @@ func (s *Stream) dialOnce(ctx context.Context, doraUserID, apiKey string) (<-cha
 	return msgs, false
 }
 
-func (s *Stream) forwardUntilDone(ctx context.Context, src <-chan []byte, dst chan<- []byte) {
+func (s *Stream) forwardUntilDone(ctx context.Context, doraUserID string, src <-chan []byte, dst chan<- []byte) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -150,7 +150,7 @@ func (s *Stream) forwardUntilDone(ctx context.Context, src <-chan []byte, dst ch
 			if !ok {
 				return
 			}
-			s.extractUpdatedAtAndAdvance(raw)
+			s.extractUpdatedAtAndAdvance(doraUserID, raw)
 			select {
 			case dst <- raw:
 			case <-ctx.Done():
@@ -161,23 +161,24 @@ func (s *Stream) forwardUntilDone(ctx context.Context, src <-chan []byte, dst ch
 }
 
 // wsURL composes the DORA orders stream URL. The `since` cursor is
-// appended by `dialOnce` only when we have one — we keep the URL shape
-// here and the cursor in the manager-side flow. For the Stream level,
-// `since` is always appended because we always have a snapshot after
-// a successful parse.
+// appended when a per-user snapshot exists — keyed by doraUserID so
+// one user's reconnect never carries another user's timestamp.
 func (s *Stream) wsURL(doraUserID, apiKey string) string {
 	base := strings.Replace(s.wsBaseURL, "https://", "wss://", 1)
 	base = strings.Replace(base, "http://", "ws://", 1)
 	url := base + "/v1/user/" + doraUserID + "/orders/all/updates/stream?x-api-key=" + apiKey
-	if since := s.snapshotSince(); since != nil {
+	if since := s.snapshotSince(doraUserID); since != nil {
 		url += "&since=" + since.UTC().Format(time.RFC3339Nano)
 	}
 	return url
 }
 
-// snapshotSince returns a copy of the current since pointer.
-func (s *Stream) snapshotSince() *time.Time {
-	p := s.lastSince.Load()
+// snapshotSince returns a copy of the current since pointer for the
+// given doraUserID, or nil when no cursor has been recorded yet.
+func (s *Stream) snapshotSince(doraUserID string) *time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.since[doraUserID]
 	if p == nil {
 		return nil
 	}
@@ -189,7 +190,7 @@ func (s *Stream) snapshotSince() *time.Time {
 // entries with a top-level `updated_at` field) and updates the
 // in-memory since cursor. Returns false on parse error; the message
 // is still forwarded.
-func (s *Stream) extractUpdatedAtAndAdvance(raw []byte) bool {
+func (s *Stream) extractUpdatedAtAndAdvance(doraUserID string, raw []byte) bool {
 	type entry struct {
 		UpdatedAt time.Time `json:"updated_at"`
 	}
@@ -206,7 +207,9 @@ func (s *Stream) extractUpdatedAtAndAdvance(raw []byte) bool {
 	if max.IsZero() {
 		return false
 	}
-	s.lastSince.Store(&max)
+	s.mu.Lock()
+	s.since[doraUserID] = &max
+	s.mu.Unlock()
 	return true
 }
 
