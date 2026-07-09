@@ -206,7 +206,6 @@ types: `backtest.started`, `backtest.completed`, `backtest.failed`,
 `run.stop_loss`, `dora.order_update`. The `dora.*` namespace is for v2
 events relayed from DORA (orders, trades) — `dora.order_update` is the
 first v2 event live today; clients should ignore unknown `type` values.
-]
 
 Query parameters:
 - `Last-Event-ID` (UUIDv7): replay events with `id > Last-Event-ID` from the log, capped at 1000 events or 24h.
