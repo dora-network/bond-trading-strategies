@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -96,13 +97,11 @@ func (s *Stream) runReadLoop(ctx context.Context, doraUserID, apiKey string, out
 // dialOnce opens a single WebSocket and returns the message channel.
 // authFail=true short-circuits the backoff loop and exits.
 func (s *Stream) dialOnce(ctx context.Context, doraUserID, apiKey string) (<-chan []byte, bool) {
-	url := s.wsURL(doraUserID, apiKey)
-	headers := http.Header{}
-	headers.Set("Authorization", "ApiKey "+apiKey)
-
-	conn, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{
-		HTTPHeader: headers,
-	})
+	// DORA's WS auth is the x-api-key query param (per the dora-api
+	// skill; verified end-to-end via wscat against dev.dora.co). The
+	// Sec-WebSocket-Protocol subprotocol mechanism does NOT work here.
+	u := s.wsURL(doraUserID, apiKey)
+	conn, resp, err := websocket.Dial(ctx, u, nil)
 	if err != nil {
 		if resp != nil {
 			resp.Body.Close()
@@ -114,10 +113,18 @@ func (s *Stream) dialOnce(ctx context.Context, doraUserID, apiKey string) (<-cha
 			"dora_user_id", doraUserID, "err", err)
 		return nil, false
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	// DORA order-update arrays can exceed coder/websocket's 32KiB
+	// default per-message limit; SetReadLimit(-1) disables the cap
+	// (per the library convention - 0 is treated as "1 byte").
+	conn.SetReadLimit(-1)
 
 	msgs := make(chan []byte, msgChanBuf)
 	go func() {
+		// The goroutine owns the connection lifetime. dialOnce cannot
+		// defer close here: it would close the conn before the goroutine
+		// got a chance to read, surfacing as "use of closed network
+		// connection" in the read loop. (Bug fixed 2026-07.)
+		defer conn.Close(websocket.StatusNormalClosure, "")
 		defer close(msgs)
 		for {
 			typ, data, err := conn.Read(ctx)
@@ -166,11 +173,14 @@ func (s *Stream) forwardUntilDone(ctx context.Context, doraUserID string, src <-
 func (s *Stream) wsURL(doraUserID, apiKey string) string {
 	base := strings.Replace(s.wsBaseURL, "https://", "wss://", 1)
 	base = strings.Replace(base, "http://", "ws://", 1)
-	url := base + "/v1/user/" + doraUserID + "/orders/all/updates/stream?x-api-key=" + apiKey
+	u := base + "/v1/user/" + doraUserID + "/orders/all/updates/stream"
+	v := url.Values{}
+	v.Set("x-api-key", apiKey)
+	q := v.Encode()
 	if since := s.snapshotSince(doraUserID); since != nil {
-		url += "&since=" + since.UTC().Format(time.RFC3339Nano)
+		q += "&since=" + url.QueryEscape(since.UTC().Format(time.RFC3339Nano))
 	}
-	return url
+	return u + "?" + q
 }
 
 // snapshotSince returns a copy of the current since pointer for the
