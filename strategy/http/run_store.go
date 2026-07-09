@@ -2,9 +2,11 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -17,6 +19,15 @@ type RunStore interface {
 	// with a false result means the run does not exist OR it belongs to
 	// another user; the handler maps both to 404.
 	CheckRunExists(ctx context.Context, id uuid.UUID, doraUserID string) (bool, error)
+	// LookupRunByID returns the full RunDetail for the given run id, or
+	// (nil, nil) if no row matches. cmd/strategy-server/main.go wraps this
+	// into a RunLookupFunc closure that the notifications/orderupdates
+	// package consumes — package-internal callers do not import strategy/http.
+	//
+	// Errors are reserved for transport / decode failures; "no such run"
+	// is reported as (nil, nil) because the filter's hot path treats
+	// "missing" and "DB blip" differently.
+	LookupRunByID(ctx context.Context, id uuid.UUID) (*RunDetail, error)
 }
 
 type PGRunStore struct {
@@ -113,4 +124,32 @@ func (s *PGRunStore) CheckRunExists(ctx context.Context, id uuid.UUID, doraUserI
 		return false, fmt.Errorf("check strategy run exists %s: %w", id, err)
 	}
 	return ok, nil
+}
+
+// LookupRunByID satisfies RunStore.LookupRunByID. The query descends
+// the strategy_runs primary key on id. (nil, nil) on pgx.ErrNoRows so
+// the consumer can treat "no such run" as a drop rather than an error.
+func (s *PGRunStore) LookupRunByID(ctx context.Context, id uuid.UUID) (*RunDetail, error) {
+	const q = `
+		SELECT id, dora_user_id, strategy_type, status, config,
+		       created_at, updated_at, stopped_at, error, encrypted_api_key
+		FROM strategy_runs
+		WHERE id = $1
+	`
+	var d RunDetail
+	var encKey []byte
+	err := s.pool.QueryRow(ctx, q, id).Scan(
+		&d.ID, &d.DORAUserID, &d.StrategyType, &d.Status, &d.Config,
+		&d.CreatedAt, &d.UpdatedAt, &d.StoppedAt, &d.Error, &encKey,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup strategy run %s: %w", id, err)
+	}
+	if encKey != nil {
+		d.EncryptedAPIKey = encKey
+	}
+	return &d, nil
 }
