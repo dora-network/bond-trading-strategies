@@ -14,12 +14,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/dora-network/bond-trading-strategies/notifications"
 )
 
 const (
 	defaultGraceDelay = 5 * time.Second
 	publishTimeout    = 5 * time.Second
+	pollInterval      = 30 * time.Second
 )
 
 // jsonUnmarshal is a tiny seam so tests can swap the parser if needed.
@@ -34,7 +37,9 @@ var jsonUnmarshal = json.Unmarshal
 //
 //counterfeiter:generate . Manager
 type Manager interface {
-	EnsureSubscribed(ctx context.Context, doraUserID, apiKey string) error
+	EnsureSubscribed(ctx context.Context, doraUserID, apiKey string,
+		runID uuid.UUID, status string) error
+	UpdateRunStatus(runID uuid.UUID, status string)
 	Unsubscribe(doraUserID string)
 	Close()
 }
@@ -54,6 +59,12 @@ func WithStream(s ManagerStream) Option {
 	return func(m *manager) { m.stream = s }
 }
 
+// WithRunCache injects a pre-built RunCache. When unset, NewManager
+// constructs one backed by the lookup fallback.
+func WithRunCache(c *RunCache) Option {
+	return func(m *manager) { m.cache = c }
+}
+
 // NewManager returns a Manager. baseCtx's cancellation stops every
 // open subscription on shutdown.
 func NewManager(
@@ -64,6 +75,7 @@ func NewManager(
 	stream ManagerStream,
 	opts ...Option,
 ) Manager {
+	pollCtx, pollCancel := context.WithCancel(baseCtx)
 	m := &manager{
 		baseCtx:       baseCtx,
 		notifier:      notifier,
@@ -73,9 +85,14 @@ func NewManager(
 		subs:          make(map[string]*subscription),
 		log:           slog.Default(),
 		graceDelay:    defaultGraceDelay,
+		cache:         NewRunCache(lookup),
+		pollCancel:    pollCancel,
 	}
 	for _, opt := range opts {
 		opt(m)
+	}
+	if m.cache != nil {
+		go m.pollCache(pollCtx)
 	}
 	return m
 }
@@ -87,6 +104,8 @@ type manager struct {
 	lookup        RunLookupFunc
 	strategyTypes []string
 	stream        ManagerStream
+	cache         *RunCache
+	pollCancel    context.CancelFunc
 	baseCtx       context.Context
 	log           *slog.Logger
 	graceDelay    time.Duration
@@ -99,12 +118,17 @@ type subscription struct {
 	graceDone chan struct{}
 }
 
-func (m *manager) EnsureSubscribed(ctx context.Context, doraUserID, apiKey string) error {
+func (m *manager) EnsureSubscribed(ctx context.Context, doraUserID, apiKey string,
+	runID uuid.UUID, status string,
+) error {
 	if doraUserID == "" {
 		return errors.New("orderupdates: doraUserID is required")
 	}
 	if apiKey == "" {
 		return errors.New("orderupdates: apiKey is required")
+	}
+	if runID == uuid.Nil {
+		return errors.New("orderupdates: runID is required")
 	}
 
 	m.mu.Lock()
@@ -115,6 +139,7 @@ func (m *manager) EnsureSubscribed(ctx context.Context, doraUserID, apiKey strin
 			<-sub.graceDone
 		}
 		sub.count.Add(1)
+		m.cache.Set(runID, doraUserID, status)
 		return nil
 	}
 
@@ -127,7 +152,17 @@ func (m *manager) EnsureSubscribed(ctx context.Context, doraUserID, apiKey strin
 	sub.count.Store(1)
 	m.subs[doraUserID] = sub
 	go m.runSubscription(subCtx, doraUserID, apiKey)
+	m.cache.Set(runID, doraUserID, status)
 	return nil
+}
+
+// UpdateRunStatus mutates the cached status for a run. The poll
+// loop reconciles any drift from the DB.
+func (m *manager) UpdateRunStatus(runID uuid.UUID, status string) {
+	if m.cache == nil {
+		return
+	}
+	m.cache.UpdateStatus(runID, status)
 }
 
 func (m *manager) Unsubscribe(doraUserID string) {
@@ -187,6 +222,7 @@ func (m *manager) scheduleGraceTeardown(doraUserID string, sub *subscription) {
 }
 
 func (m *manager) Close() {
+	m.pollCancel()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, sub := range m.subs {
@@ -195,11 +231,35 @@ func (m *manager) Close() {
 	m.subs = make(map[string]*subscription)
 }
 
+// pollCache reconciles the in-memory run cache with the DB every
+// pollInterval. Manager.Close() (or the baseCtx) cancels the underlying
+// context to stop the loop. The reconcile is a safety net for missed
+// RunStopped events.
+func (m *manager) pollCache(ctx context.Context) {
+	if m.cache == nil {
+		return
+	}
+	t := time.NewTicker(pollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			m.cache.snapshotAndReconcile(ctx)
+		}
+	}
+}
+
 // runSubscription is the read→decode→filter→publish pipeline. It exits
 // when ctx is cancelled (Close / grace-timer fire) or when Stream.Read
 // returns a closed channel (auth rejected).
 func (m *manager) runSubscription(ctx context.Context, doraUserID, apiKey string) {
-	filter := NewFilter(m.lookup, m.strategyTypes)
+	// Hot path: cache.Lookup satisfies RunLookupFunc and serves 99%+ of
+	// lookups without a DB round-trip. The fallback closure (the lookup
+	// the Manager was built with) is wired into the RunCache and used
+	// only on cold misses and the 30s poll.
+	filter := NewFilter(m.cache.Lookup, m.strategyTypes)
 	for ctx.Err() == nil {
 		msgs := m.stream.Read(ctx, doraUserID, apiKey)
 		for {

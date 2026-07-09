@@ -113,7 +113,7 @@ func TestManager_PublishesForwardedEvent(t *testing.T) {
 		[]string{"mean_reversion"}, stream,
 		orderupdates.WithLogger(silentLogger()))
 
-	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "key"))
+	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "key", runID, "running"))
 
 	select {
 	case <-notifier.got:
@@ -145,7 +145,7 @@ func TestManager_DropsUnknownRun(t *testing.T) {
 		[]string{"mean_reversion"}, stream,
 		orderupdates.WithLogger(silentLogger()))
 
-	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "key"))
+	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "key", uuid.New(), "running"))
 
 	select {
 	case <-notifier.got:
@@ -177,8 +177,8 @@ func TestManager_RefCount_GraceBeforeTearDown(t *testing.T) {
 		orderupdates.WithLogger(silentLogger()))
 
 	// Two subscriptions for the same user share one stream (opens == 1).
-	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "k"))
-	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "k"))
+	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "k", runID, "running"))
+	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "k", runID, "running"))
 	waitForOpens(t, stream, 1)
 
 	// Drop to one ref → no teardown.
@@ -190,7 +190,7 @@ func TestManager_RefCount_GraceBeforeTearDown(t *testing.T) {
 
 	// Re-subscribe before the grace timer fires → timer cancelled,
 	// existing subscription reused (no new stream open).
-	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "k"))
+	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "k", runID, "running"))
 	waitForOpens(t, stream, 1)
 
 	// Drop to zero again and let the grace timer fire.
@@ -198,7 +198,7 @@ func TestManager_RefCount_GraceBeforeTearDown(t *testing.T) {
 	time.Sleep(testTeardownWait)
 
 	// Fresh subscribe after teardown opens a second stream.
-	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "k"))
+	require.NoError(t, m.EnsureSubscribed(ctx, "alice", "k", uuid.New(), "running"))
 	waitForOpens(t, stream, 2)
 }
 
@@ -214,6 +214,89 @@ func TestManager_RejectsEmptyArgs(t *testing.T) {
 		orderupdates.WithLogger(silentLogger()),
 	)
 
-	assert.Error(t, m.EnsureSubscribed(context.Background(), "", "key"))
-	assert.Error(t, m.EnsureSubscribed(context.Background(), "alice", ""))
+	assert.Error(t, m.EnsureSubscribed(context.Background(), "", "key", uuid.New(), "running"))
+	assert.Error(t, m.EnsureSubscribed(context.Background(), "alice", "", uuid.New(), "running"))
+}
+
+// fallbackCounter wraps a fallback closure to count invocations and
+// let tests decide what to return from it.
+type fallbackCounter struct {
+	n  atomic.Int32
+	fn func(context.Context, uuid.UUID) (string, string, bool)
+}
+
+func (c *fallbackCounter) fallback(ctx context.Context, id uuid.UUID) (string, string, bool) {
+	c.n.Add(1)
+	if c.fn != nil {
+		return c.fn(ctx, id)
+	}
+	return "", "", false
+}
+
+func TestManager_EnsureSubscribedPopulatesCacheAndAvoidsFallback(t *testing.T) {
+	t.Parallel()
+	counter := &fallbackCounter{}
+
+	cache := orderupdates.NewRunCache(counter.fallback)
+	mgr := orderupdates.NewManager(
+		context.Background(), newFakeNotifier(), counter.fallback,
+		[]string{"mean_reversion", "copy_trading"}, &fakeStream{},
+		orderupdates.WithLogger(silentLogger()),
+		orderupdates.WithRunCache(cache),
+	)
+
+	runID := uuid.New()
+	require.NoError(t, mgr.EnsureSubscribed(context.Background(), "alice", "k", runID, "running"))
+
+	user, status, found := cache.Lookup(context.Background(), runID)
+	require.True(t, found, "EnsureSubscribed must populate the cache")
+	assert.Equal(t, "alice", user)
+	assert.Equal(t, "running", status)
+
+	require.NoError(t, mgr.EnsureSubscribed(context.Background(), "alice", "k", runID, "running"))
+	assert.Equal(t, int32(0), counter.n.Load(),
+		"cached path must not invoke the fallback closure")
+}
+
+func TestManager_UpdateRunStatusMutatesCache(t *testing.T) {
+	t.Parallel()
+	cache := orderupdates.NewRunCache(nil)
+	mgr := orderupdates.NewManager(
+		context.Background(), newFakeNotifier(), nil,
+		[]string{"mean_reversion"}, &fakeStream{},
+		orderupdates.WithLogger(silentLogger()),
+		orderupdates.WithRunCache(cache),
+	)
+	runID := uuid.New()
+	require.NoError(t, mgr.EnsureSubscribed(context.Background(), "alice", "k", runID, "running"))
+
+	mgr.UpdateRunStatus(runID, "paused")
+	_, status, found := cache.Lookup(context.Background(), runID)
+	require.True(t, found)
+	assert.Equal(t, "paused", status)
+
+	mgr.UpdateRunStatus(runID, "running")
+	_, status, _ = cache.Lookup(context.Background(), runID)
+	assert.Equal(t, "running", status)
+}
+
+func TestManager_PollReconcileDropsStaleEntries(t *testing.T) {
+	t.Parallel()
+	// Fallback simulates the DB returning terminal status for the
+	// cached run. The reconcile should drop the entry. We assert via
+	// Snapshot (no Lookup, which would cold-miss and re-populate via
+	// the fallback when the cache is empty) that the entry was removed.
+	fallback := func(_ context.Context, _ uuid.UUID) (string, string, bool) {
+		return "alice", "stopped", true
+	}
+	cache := orderupdates.NewRunCache(fallback)
+
+	runID := uuid.New()
+	cache.Set(runID, "alice", "running")
+	require.Len(t, cache.Snapshot(), 1, "entry seeded before reconcile")
+
+	cache.SnapshotAndReconcileForTest(context.Background())
+
+	assert.Empty(t, cache.Snapshot(),
+		"poll reconcile must drop entries whose DB status is terminal")
 }

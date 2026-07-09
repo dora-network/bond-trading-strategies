@@ -13,10 +13,6 @@ type runSlot struct {
 	status     string
 }
 
-// fallbackFunc matches the RunLookupFunc signature. It is the
-// on-miss and poll-time entry to the DB.
-type fallbackFunc func(ctx context.Context, runID uuid.UUID) (doraUserID, status string, found bool)
-
 // RunCache is the in-memory hot-path cache for the order-updates
 // Manager. RLock on hit; on miss, RUnlock → fallback → repopulate.
 // The Manager's poll loop calls snapshotAndReconcile to detect
@@ -24,12 +20,12 @@ type fallbackFunc func(ctx context.Context, runID uuid.UUID) (doraUserID, status
 type RunCache struct {
 	mu       sync.RWMutex
 	items    map[uuid.UUID]*runSlot
-	fallback fallbackFunc
+	fallback RunLookupFunc
 }
 
 // NewRunCache constructs an empty cache. fallback may be nil for
 // tests; Lookup degrades to "not found" in that case.
-func NewRunCache(fallback fallbackFunc) *RunCache {
+func NewRunCache(fallback RunLookupFunc) *RunCache {
 	return &RunCache{
 		items:    make(map[uuid.UUID]*runSlot),
 		fallback: fallback,
@@ -106,8 +102,6 @@ func (c *RunCache) Snapshot() map[uuid.UUID]cachedRun {
 // re-queries the fallback for each cached entry; entries that come
 // back with status ∉ {running, paused} or not found are removed.
 // Status or doraUserID drift is corrected by Set.
-//
-//nolint:unused // wired by Manager.pollCache in Task 2.
 func (c *RunCache) snapshotAndReconcile(ctx context.Context) {
 	if c.fallback == nil {
 		return
