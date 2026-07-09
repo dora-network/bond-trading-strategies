@@ -143,6 +143,11 @@ linters:
       - third_party$
       - builtin$
       - examples$
+      # Exclude sibling feature worktrees discovered via parent traversal.
+      # golangci-lint v2 paths patterns match against the reported relative
+      # path of each finding, so "../feat" covers both "../feat/5773-strategy-decisions"
+      # and any other worktree under feat/.
+      - ../feat/
 formatters:
   enable:
     - gofmt

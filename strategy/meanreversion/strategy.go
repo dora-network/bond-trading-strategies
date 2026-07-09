@@ -144,10 +144,11 @@ type Strategy struct {
 	decisionSeq int64
 }
 
-// strategyType is the strategy.Decision.StrategyType value used by
-// the live run loop and the client_order_id format.  Keep in sync
-// with the string written by recordDecision.
-const strategyType = "mean_reversion"
+// StrategyType is the strategy.Decision.StrategyType value used by the
+// live run loop and the client_order_id format. Exported because the
+// cmd/strategy-server wiring passes it into the orderupdates.Filter as
+// the set of allowed client_order_id prefixes.
+const StrategyType = "mean_reversion"
 
 // New creates a new Strategy with the given Config and optional functional options.
 // Supported options: WithLogger.
@@ -501,7 +502,7 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 
 	// Build the client_order_id before submitting so the same value
 	// flows into the DORA request and the recorded decision row.
-	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 
 	if err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, false, clientOrderID,
@@ -613,7 +614,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 	)
 	// Build the client_order_id before submitting so the same value
 	// flows into the DORA request and the recorded decision row.
-	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 	if err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition, clientOrderID,
 	); err != nil {
@@ -1087,7 +1088,7 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 
 	d.RunID = runID
 	d.Seq = seq
-	d.StrategyType = strategyType
+	d.StrategyType = StrategyType
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = time.Now().UTC()
 	}

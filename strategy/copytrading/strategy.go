@@ -353,7 +353,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 
 	// Build the client_order_id before submitting so the same value
 	// flows into the DORA request and the recorded decision row.
-	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 
 	// Place market order
 	err = s.marketAPI.CreateMarketOrder(
@@ -408,10 +408,11 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 // asset, derived from the ledger positions endpoint.
 type positionDirection int
 
-// strategyType is the strategy.Decision.StrategyType value used by
-// the live run loop and the client_order_id format.  Keep in sync
-// with the string written by recordDecision.
-const strategyType = "copy_trading"
+// StrategyType is the strategy.Decision.StrategyType value used by the
+// live run loop and the client_order_id format. Exported because the
+// cmd/strategy-server wiring passes it into the orderupdates.Filter as
+// the set of allowed client_order_id prefixes.
+const StrategyType = "copy_trading"
 
 const (
 	positionFlat positionDirection = iota
@@ -665,7 +666,7 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 
 	d.RunID = runID
 	d.Seq = seq
-	d.StrategyType = strategyType
+	d.StrategyType = StrategyType
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = time.Now().UTC()
 	}
