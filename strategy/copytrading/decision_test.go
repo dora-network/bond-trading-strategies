@@ -35,6 +35,20 @@ func (f *fakeDecisionRecorder) SaveDecision(_ context.Context, d strategy.Decisi
 	return f.err
 }
 
+// MaxSeq returns the highest seq in the recorded decisions. Implements
+// strategy.DecisionRecorder for the fake.
+func (f *fakeDecisionRecorder) MaxSeq(_ context.Context, _ uuid.UUID) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var max int64
+	for _, d := range f.decisions {
+		if d.Seq > max {
+			max = d.Seq
+		}
+	}
+	return max, nil
+}
+
 func (f *fakeDecisionRecorder) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -208,6 +208,16 @@ func WithDecisionStore(store strategy.DecisionRecorder) func(*Strategy) {
 	}
 }
 
+// SetDecisionSeq seeds the in-memory decision counter. Called once at
+// strategy start (after a server restart, after a resumed run) so the
+// counter resumes past the DB frontier and avoids duplicate-key
+// collisions on (run_id, seq). Concurrent-safe via s.mu.
+func (s *Strategy) SetDecisionSeq(seq int64) {
+	s.mu.Lock()
+	s.decisionSeq = seq
+	s.mu.Unlock()
+}
+
 func (s *Strategy) logger() *slog.Logger {
 	if s.log == nil {
 		return slog.Default()

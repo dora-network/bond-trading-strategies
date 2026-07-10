@@ -1863,6 +1863,25 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 	// Attach the per-run decision recorder. nil disables recording.
 	h.attachDecisionStore(strat)
 
+	// Seed the in-memory decision counter from the DB frontier so a
+	// resumed run (e.g. after a server restart) doesn't re-use seqs
+	// already in strategy_decisions. A failure here is degraded but
+	// non-fatal: the strategy runs, and the first duplicate-key
+	// collision surfaces as a save error rather than corrupting state.
+	if h.decisionStore != nil {
+		if maxSeq, err := h.decisionStore.MaxSeq(ctx, detail.ID); err != nil {
+			slog.Warn("cannot seed decision seq; strategy will start from 1 and may collide",
+				"run_id", detail.ID, "err", err)
+		} else {
+			switch s := strat.(type) {
+			case *meanreversion.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *copytrading.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			}
+		}
+	}
+
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}

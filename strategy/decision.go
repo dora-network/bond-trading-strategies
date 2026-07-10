@@ -124,4 +124,11 @@ func BuildClientOrderID(strategyName string, runID uuid.UUID) string {
 // log the error and continue.
 type DecisionRecorder interface {
 	SaveDecision(ctx context.Context, d Decision) error
+	// MaxSeq returns the highest seq already persisted for runID, or 0
+	// if no decisions exist. Called once at strategy start (after a
+	// server restart, after a resume) so the in-memory counter can
+	// resume past the DB frontier; if MaxSeq fails, strategies
+	// continue with seq starting at 1 and the first duplicate-key
+	// collision surfaces as a save error, not a panic.
+	MaxSeq(ctx context.Context, runID uuid.UUID) (int64, error)
 }
