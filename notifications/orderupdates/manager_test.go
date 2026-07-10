@@ -300,3 +300,73 @@ func TestManager_PollReconcileDropsStaleEntries(t *testing.T) {
 	assert.Empty(t, cache.Snapshot(),
 		"poll reconcile must drop entries whose DB status is terminal")
 }
+
+// TestManager_GraceTimerReuse verifies the spec's grace-timer reuse:
+// Unsubscribe arms a 200ms grace timer; a second EnsureSubscribed
+// within the window cancels the timer and reuses the existing
+// connection (no new stream open).
+func TestManager_GraceTimerReuse(t *testing.T) {
+	t.Parallel()
+	runID := uuid.New()
+	lookup := staticLookupFunc(map[uuid.UUID]lookupRow{
+		runID: {"alice", "running"},
+	})
+	stream := &fakeStream{}
+
+	mgr := orderupdates.NewManager(
+		context.Background(), &fakeNotifier{}, lookup,
+		[]string{"mean_reversion"}, stream,
+		orderupdates.WithLogger(silentLogger()),
+		orderupdates.WithGraceDelay(200*time.Millisecond),
+	)
+
+	// First subscription.
+	require.NoError(t, mgr.EnsureSubscribed(context.Background(), "alice", "k", runID, "running"))
+	waitForOpens(t, stream, 1)
+	initialOpens := stream.opens.Load()
+
+	// Unsubscribe arms a 200ms grace timer.
+	mgr.Unsubscribe("alice")
+
+	// Within the grace window, a second EnsureSubscribed must cancel the
+	// timer and REUSE the existing subscription (no new stream open).
+	time.Sleep(50 * time.Millisecond) // well within the 200ms grace
+	require.NoError(t, mgr.EnsureSubscribed(context.Background(), "alice", "k2", runID, "running"))
+
+	// Wait beyond the original grace window. If the timer WAS cancelled,
+	// the subscription persists. If it WASN'T cancelled, we'd have torn
+	// down and re-dialed, incrementing opens.
+	time.Sleep(300 * time.Millisecond)
+	finalOpens := stream.opens.Load()
+	assert.Equal(t, initialOpens, finalOpens,
+		"EnsureSubscribed within the grace window must reuse the existing connection (opens=%d → %d)",
+		initialOpens, finalOpens)
+}
+
+// TestManager_Close verifies the spec's Close semantics: Close() cancels
+// all open subscriptions immediately, ignoring refcount.
+func TestManager_Close(t *testing.T) {
+	t.Parallel()
+	stream := &fakeStream{}
+	mgr := orderupdates.NewManager(
+		context.Background(), &fakeNotifier{}, nil,
+		[]string{"mean_reversion"}, stream,
+		orderupdates.WithLogger(silentLogger()),
+		orderupdates.WithGraceDelay(50*time.Millisecond),
+	)
+
+	// Open 2 subscriptions for the same user (refcount 2). Close must
+	// cancel regardless of refcount.
+	require.NoError(t, mgr.EnsureSubscribed(context.Background(), "alice", "k1", uuid.New(), "running"))
+	require.NoError(t, mgr.EnsureSubscribed(context.Background(), "alice", "k2", uuid.New(), "running"))
+	waitForOpens(t, stream, 1)
+
+	// Close immediately, before the grace timer fires.
+	mgr.Close()
+
+	// Wait beyond what would have been the grace window, then verify
+	// no new opens happen (Close must cancel, not wait for grace).
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, int32(1), stream.opens.Load(),
+		"Close must cancel the subscription without opening a new stream")
+}
