@@ -13,6 +13,7 @@ package orderupdates
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -97,9 +98,11 @@ func (f *Filter) Translate(
 	}
 
 	return notifications.Event{
-		Type:    notifications.EventOrderUpdate,
-		UserID:  doraUserID,
-		RunID:   runID.String(),
-		Payload: val,
+		ID:        uuid.Must(uuid.NewV7()).String(),
+		Type:      notifications.EventOrderUpdate,
+		UserID:    doraUserID,
+		RunID:     runID.String(),
+		Timestamp: time.Now().UTC(),
+		Payload:   val,
 	}, true
 }
