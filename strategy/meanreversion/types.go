@@ -14,6 +14,47 @@ const (
 	ExitReasonForceClose = "force_close"
 )
 
+// Decision reason codes surfaced through the types.Decision.Reason()
+// accessor. Persisted in strategy_decisions.reason by the live run loop.
+const (
+	DecisionReasonWarmingUp = "warming_up"
+	DecisionReasonZEntry    = "z_score_entry"
+)
+
+// Decision is the in-process evaluation output of meanreversion.Strategy.Update.
+// It implements the types.Decision interface via the seven accessor methods
+// below; strategy-specific fields (YTM, Spread, RollingMean, RollingStdDev,
+// ZScore) stay exported because they are read directly by the live run loop
+// and backtest within this package.
+//
+// Fields that collide with interface methods (Time, BondID, Price, Signal,
+// PositionSize, Reason) are unexported — Go forbids a method and a field
+// sharing a name on the same type.
+type Decision struct {
+	time           time.Time
+	bondID         string
+	YTM            decimal.Decimal
+	BenchmarkYield decimal.Decimal
+	Spread         decimal.Decimal
+	RollingMean    decimal.Decimal
+	RollingStdDev  decimal.Decimal
+	ZScore         decimal.Decimal
+	price          decimal.Decimal
+	signal         types.Signal
+	positionSize   decimal.Decimal
+	reason         string
+}
+
+// Accessor methods satisfying types.Decision. Bare names match the interface
+// contract; struct fields above are unexported to avoid the Go name collision.
+func (d Decision) Time() time.Time               { return d.time }
+func (d Decision) BondID() string                { return d.bondID }
+func (d Decision) Price() decimal.Decimal        { return d.price }
+func (d Decision) Signal() types.Signal          { return d.signal }
+func (d Decision) PositionSize() decimal.Decimal { return d.positionSize }
+func (d Decision) StrategyType() string          { return StrategyType }
+func (d Decision) Reason() string                { return d.reason }
+
 // TradeRecord captures a single simulated trade event (entry or exit)
 // produced by the backtester.
 type TradeRecord struct {
