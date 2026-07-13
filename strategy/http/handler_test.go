@@ -1707,6 +1707,17 @@ func (s *memoryRunStore) CheckRunExists(_ context.Context, id uuid.UUID, doraUse
 	return ok && run.DORAUserID == doraUserID, nil
 }
 
+// LookupRunByID satisfies RunStore.LookupRunByID for tests.
+func (s *memoryRunStore) LookupRunByID(_ context.Context, id uuid.UUID) (*strategyhttp.RunDetail, error) {
+	run, ok := s.runs[id]
+	if !ok {
+		return nil, nil
+	}
+	copyRun := *run
+	copyRun.Config = append([]byte(nil), run.Config...)
+	return &copyRun, nil
+}
+
 func (s *memoryRunStore) String() string {
 	return fmt.Sprintf("memoryRunStore(%d)", len(s.runs))
 }
@@ -2499,6 +2510,13 @@ func (s *fakeRunStore) SaveRun(_ context.Context, _ *strategyhttp.RunDetail) err
 func (s *fakeRunStore) CheckRunExists(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
 	s.calls++
 	return s.exists, s.err
+}
+
+// LookupRunByID satisfies RunStore.LookupRunByID. It is never called on
+// the trading-decisions path; the stub exists only to keep the fake
+// compiling now that RunStore grew the method.
+func (s *fakeRunStore) LookupRunByID(_ context.Context, _ uuid.UUID) (*strategyhttp.RunDetail, error) {
+	return nil, nil
 }
 
 // fakeDecisionReader is a minimal DecisionReader for the

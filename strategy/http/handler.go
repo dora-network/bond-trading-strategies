@@ -76,7 +76,8 @@ type Handler struct {
 	decisionReader DecisionReader
 	tradeStream    *streams.TradeStream
 	notifier       notifications.Notifier
-	encryptionKey  []byte // 32-byte AES-256 key for encrypting API keys at rest
+	orderUpdates   orderUpdatesManager // nil disables the order-update feature
+	encryptionKey  []byte              // 32-byte AES-256 key for encrypting API keys at rest
 	mux            *http.ServeMux
 	authedMux      http.Handler
 	mu             sync.RWMutex
@@ -598,6 +599,13 @@ func WithNotifier(n notifications.Notifier) func(*Handler) {
 	}
 }
 
+// WithOrderUpdatesManager wires the per-DORA-user order-updates
+// subscription manager. When unset, the Handler runs as before
+// without subscribing to DORA's order-updates stream.
+func WithOrderUpdatesManager(m orderUpdatesManager) func(*Handler) {
+	return func(h *Handler) { h.orderUpdates = m }
+}
+
 // WithStopLossObserverInterval overrides the stop-loss observer poll
 // interval. The default is 1s; tests use a shorter interval to avoid
 // waiting.
@@ -605,6 +613,17 @@ func WithStopLossObserverInterval(d time.Duration) func(*Handler) {
 	return func(h *Handler) {
 		h.stopLossObserverInterval = d
 	}
+}
+
+// orderUpdatesManager is the contract the Handler consumes from the
+// notifications/orderupdates package. The concrete type lives outside
+// strategy/http; this interface is defined locally to keep the import
+// boundary one-way (strategy/http does not import notifications/orderupdates).
+type orderUpdatesManager interface {
+	EnsureSubscribed(ctx context.Context, doraUserID, apiKey string,
+		runID uuid.UUID, status string) error
+	UpdateRunStatus(runID uuid.UUID, status string)
+	Unsubscribe(doraUserID string)
 }
 
 func WithDORAClient(client doraClient) func(*Handler) {
@@ -1539,6 +1558,11 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.runs[id] = detail
 	h.mu.Unlock()
+	if h.orderUpdates != nil && doraUserID != "" && info != nil && info.APIKey != "" {
+		if err := h.orderUpdates.EnsureSubscribed(r.Context(), doraUserID, info.APIKey, detail.ID, detail.Status); err != nil {
+			slog.Warn("EnsureSubscribed failed", "user_id", doraUserID, "err", err)
+		}
+	}
 
 	h.startStopLossObserver(detail, strat)
 
@@ -1618,6 +1642,10 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 		cancel()
 	}
 	h.mu.Unlock()
+	if h.orderUpdates != nil && detail.DORAUserID != "" {
+		h.orderUpdates.UpdateRunStatus(detail.ID, "stopped")
+		h.orderUpdates.Unsubscribe(detail.DORAUserID)
+	}
 
 	detail, _ = h.runDetail(id)
 	if err := h.saveRun(ctx, detail); err != nil {
@@ -1668,6 +1696,10 @@ func (h *Handler) pauseRun(w http.ResponseWriter, ctx context.Context, id uuid.U
 		detail.UpdatedAt = now
 	}
 	h.mu.Unlock()
+
+	if h.orderUpdates != nil {
+		h.orderUpdates.UpdateRunStatus(id, "paused")
+	}
 
 	detail, _ = h.runDetail(id)
 	if err := h.saveRun(ctx, detail); err != nil {
@@ -1733,6 +1765,10 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 		detail.StoppedAt = nil
 	}
 	h.mu.Unlock()
+
+	if h.orderUpdates != nil {
+		h.orderUpdates.UpdateRunStatus(id, "running")
+	}
 
 	detail, _ = h.runDetail(id)
 	if err := h.saveRun(ctx, detail); err != nil {
@@ -1827,8 +1863,32 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 	// Attach the per-run decision recorder. nil disables recording.
 	h.attachDecisionStore(strat)
 
+	// Seed the in-memory decision counter from the DB frontier so a
+	// resumed run (e.g. after a server restart) doesn't re-use seqs
+	// already in strategy_decisions. A failure here is degraded but
+	// non-fatal: the strategy runs, and the first duplicate-key
+	// collision surfaces as a save error rather than corrupting state.
+	if h.decisionStore != nil {
+		if maxSeq, err := h.decisionStore.MaxSeq(ctx, detail.ID); err != nil {
+			slog.Warn("cannot seed decision seq; strategy will start from 1 and may collide",
+				"run_id", detail.ID, "err", err)
+		} else {
+			switch s := strat.(type) {
+			case *meanreversion.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *copytrading.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			}
+		}
+	}
+
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
+	}
+	if h.orderUpdates != nil && detail.DORAUserID != "" && apiKeyDecrypted != nil {
+		if err := h.orderUpdates.EnsureSubscribed(ctx, detail.DORAUserID, string(apiKeyDecrypted), detail.ID, detail.Status); err != nil {
+			slog.Warn("EnsureSubscribed failed", "user_id", detail.DORAUserID, "err", err)
+		}
 	}
 	h.startStopLossObserver(detail, strat)
 	return nil

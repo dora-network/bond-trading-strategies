@@ -82,7 +82,19 @@ func (s *PGDecisionStore) SaveDecision(ctx context.Context, d strategycore.Decis
 	return nil
 }
 
-// Cursor is the opaque continuation token returned by ListDecisions
+// MaxSeq returns the highest seq already persisted for runID, or 0 if
+// the run has no decisions yet. Called once at strategy start so the
+// in-memory counter can resume past the DB frontier. A unique-row
+// index on (run_id, seq) makes this an O(1) read.
+func (s *PGDecisionStore) MaxSeq(ctx context.Context, runID uuid.UUID) (int64, error) {
+	const q = `SELECT COALESCE(MAX(seq), 0) FROM strategy_decisions WHERE run_id = $1`
+	var maxSeq int64
+	if err := s.pool.QueryRow(ctx, q, runID).Scan(&maxSeq); err != nil {
+		return 0, fmt.Errorf("max seq for run %s: %w", runID, err)
+	}
+	return maxSeq, nil
+}
+
 // when more rows are available. The wire format is versioned so the
 // encoding can evolve without breaking in-flight clients; clients MUST
 // NOT parse the underlying payload.
