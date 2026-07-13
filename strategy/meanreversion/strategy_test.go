@@ -164,7 +164,7 @@ func TestStrategy_HoldBeforeWindowFull(t *testing.T) {
 	for i := range cfg.LookbackWindow - 1 {
 		d, err := s.Update(obs(i, decimal.MustNew(55, 3), decimal.MustNew(5, 2)))
 		require.NoError(t, err)
-		assert.Equal(t, types.SignalHold, d.Signal,
+		assert.Equal(t, types.SignalHold, d.Signal(),
 			"should be HOLD before window is full (step %d)", i)
 	}
 }
@@ -197,8 +197,8 @@ func TestStrategy_BuySignalOnWideSpread(t *testing.T) {
 
 	d, err := s2.Update(obs(10, decimal.MustNew(1, 1), decimal.MustNew(5, 2)))
 	require.NoError(t, err)
-	assert.Equal(t, types.SignalBuy, d.Signal)
-	assert.True(t, d.PositionSize.IsPos())
+	assert.Equal(t, types.SignalBuy, d.Signal())
+	assert.True(t, d.PositionSize().IsPos())
 	assert.True(t, d.ZScore.Cmp(cfg2.EntryZScore) > 0)
 }
 
@@ -222,7 +222,7 @@ func TestStrategy_SellSignalOnTightSpread(t *testing.T) {
 
 	d, err := s.Update(obs(10, decimal.MustNew(2, 2), decimal.MustNew(5, 2)))
 	require.NoError(t, err)
-	assert.Equal(t, types.SignalSell, d.Signal)
+	assert.Equal(t, types.SignalSell, d.Signal())
 	assert.True(t, d.ZScore.Cmp(cfg.EntryZScore.Neg()) < 0)
 }
 
@@ -246,7 +246,7 @@ func TestStrategy_HoldWithinNeutralBand(t *testing.T) {
 
 	d, err := s.Update(obs(10, decimal.MustNew(61, 3), decimal.MustNew(5, 2)))
 	require.NoError(t, err)
-	assert.Equal(t, types.SignalHold, d.Signal)
+	assert.Equal(t, types.SignalHold, d.Signal())
 }
 
 func TestStrategy_ShouldExit_ProfitTake(t *testing.T) {
