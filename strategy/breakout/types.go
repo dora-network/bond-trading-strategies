@@ -32,14 +32,6 @@ const (
 	ExitReasonReversal     = "reversal" // opposite-signal exit
 )
 
-// Exit reason constants for ClosedTrade.
-const (
-	ExitReasonTakeProfit   = "take_profit"
-	ExitReasonStopLoss     = "stop_loss"
-	ExitReasonStrategyExit = "strategy_exit"
-	ExitReasonReversal     = "reversal" // opposite-signal exit
-)
-
 // Decision is the in-process evaluation output of breakout.Strategy.Update.
 // It implements the types.Decision interface via the seven accessor methods
 // below; strategy-specific fields (ShortVol, LongVol, CompressionRatio, ATR,
