@@ -2299,6 +2299,7 @@ type breakoutConfigPayload struct {
 	BreakoutATRMultiple  float64  `json:"breakout_atr_multiple"`
 	ConfirmationBars     int      `json:"confirmation_bars"`
 	StopLossATR          float64  `json:"stop_loss_atr"`
+	TakeProfitATR        float64  `json:"take_profit_atr"`
 	MinLongVolFloor      float64  `json:"min_long_vol_floor"`
 	OrderBookID          string   `json:"order_book_id,omitempty"`
 	Tenor                string   `json:"tenor,omitempty"`
@@ -2360,9 +2361,16 @@ func newBreakoutDefinition(pricesHandler *prices.Handler, log *slog.Logger) Stra
 			{
 				Name:        "stop_loss_atr",
 				Type:        "number",
-				Description: "Stop-loss distance in ATR units. Set to 0 to disable. Reserved for v2 (not yet honoured by the backtest).",
+				Description: "Stop-loss distance in ATR units. Set to 0 to disable. Mirrored in the live Run loop and the backtester.",
 				Required:    false,
 				Default:     mustFloat64(defaults.StopLossATR),
+			},
+			{
+				Name:        "take_profit_atr",
+				Type:        "number",
+				Description: "Take-profit distance in ATR units from entry. Set to 0 to disable. Mirrored in the live Run loop and the backtester.",
+				Required:    false,
+				Default:     mustFloat64(defaults.TakeProfitATR),
 			},
 			{
 				Name:        "min_long_vol_floor",
@@ -2465,6 +2473,9 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	if payload.StopLossATR == 0 {
 		payload.StopLossATR = mustFloat64(defaults.StopLossATR)
 	}
+	if payload.TakeProfitATR == 0 {
+		payload.TakeProfitATR = mustFloat64(defaults.TakeProfitATR)
+	}
 	if payload.MinLongVolFloor == 0 {
 		payload.MinLongVolFloor = mustFloat64(defaults.MinLongVolFloor)
 	}
@@ -2476,6 +2487,9 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	}
 	if payload.StopLossATR < 0 {
 		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr must be non-negative")
+	}
+	if payload.TakeProfitATR < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.take_profit_atr must be non-negative")
 	}
 	if payload.MinLongVolFloor < 0 {
 		return breakout.Config{}, nil, fmt.Errorf("config.min_long_vol_floor must be non-negative")
@@ -2492,6 +2506,10 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	stopLoss, err := decimal.NewFromFloat64(payload.StopLossATR)
 	if err != nil {
 		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr: %w", err)
+	}
+	takeProfit, err := decimal.NewFromFloat64(payload.TakeProfitATR)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.take_profit_atr: %w", err)
 	}
 	minFloor, err := decimal.NewFromFloat64(payload.MinLongVolFloor)
 	if err != nil {
@@ -2549,6 +2567,7 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 		BreakoutATRMultiple:  breakoutATR,
 		ConfirmationBars:     payload.ConfirmationBars,
 		StopLossATR:          stopLoss,
+		TakeProfitATR:        takeProfit,
 		MinLongVolFloor:      minFloor,
 		OrderBookID:          orderBookID,
 		Tenor:                payload.Tenor,

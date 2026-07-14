@@ -92,6 +92,8 @@ func TestBacktest_ReversalClosesOpenPosition(t *testing.T) {
 	t.Parallel()
 	cfg := defaultCfg()
 	cfg.ConfirmationBars = 1
+	cfg.StopLossATR = decimal.Zero   // disable SL so the test isolates reversal behaviour
+	cfg.TakeProfitATR = decimal.Zero // disable TP for the same reason
 	s := breakout.New(cfg, nil)
 
 	// 30 flat at 100, 1 jump up at 110 (BUY), 30 flat at 110 (re-arm),
@@ -120,6 +122,107 @@ func TestBacktest_ReversalClosesOpenPosition(t *testing.T) {
 		"exit price should be the SELL signal tick (90)")
 	assert.Equal(t, breakout.ExitReasonReversal, ct.ExitReason,
 		"SELL signal closes the long before end-of-history; this should be a reversal")
+}
+
+// TestBacktest_StopLossClosesAgainstMove constructs a BUY followed by a
+// large drop. The strategy must close the long with ExitReasonStopLoss
+// (priority: SL > reversal > hold), even if no opposite signal fires.
+func TestBacktest_StopLossClosesAgainstMove(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.StopLossATR = decimal.MustNew(2, 0) // 2.0; entry ATR ≈ 0.33, SL = 110 - 0.66 = 109.34
+	cfg.TakeProfitATR = decimal.Zero        // disabled
+	s := breakout.New(cfg, nil)
+
+	// 30 flat at 100, 1 jump to 110 (BUY), 1 drop to 95 (well below SL).
+	dropTick := cfg.LongVolWindow + 1
+	obs := make([]types.YieldObservation, 0, dropTick+1)
+	for i := 0; i < cfg.LongVolWindow; i++ {
+		obs = append(obs, flatObs(i, 100))
+	}
+	obs = append(obs, flatObs(cfg.LongVolWindow, 110)) // BUY
+	obs = append(obs, flatObs(dropTick, 95))           // SL should fire here
+
+	bt := breakout.NewBacktester(s, nil)
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	require.Len(t, res.ClosedTrades, 1, "stop-loss should close the open position")
+	ct := res.ClosedTrades[0]
+	assert.Equal(t, types.SignalBuy, ct.Signal, "open signal should be BUY")
+	assert.Equal(t, decimal.MustNew(110, 0), ct.EntryPrice)
+	assert.Equal(t, decimal.MustNew(95, 0), ct.ExitPrice,
+		"exit price should be the SL trigger tick (95)")
+	assert.Equal(t, breakout.ExitReasonStopLoss, ct.ExitReason,
+		"95 < 110 - 2*ATR must trigger stop_loss")
+	assert.True(t, ct.PnL.IsNeg(), "long 110→95 must be a loss; got %s", ct.PnL.String())
+}
+
+// TestBacktest_TakeProfitClosesFavourableMove constructs a BUY followed by
+// a large rise. The strategy must close the long with ExitReasonTakeProfit.
+func TestBacktest_TakeProfitClosesFavourableMove(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.StopLossATR = decimal.Zero            // disabled
+	cfg.TakeProfitATR = decimal.MustNew(2, 0) // 2.0; entry ATR ≈ 0.33, TP = 110 + 0.66 = 110.66
+	s := breakout.New(cfg, nil)
+
+	// 30 flat at 100, 1 jump to 110 (BUY), 1 rise to 115 (above TP).
+	riseTick := cfg.LongVolWindow + 1
+	obs := make([]types.YieldObservation, 0, riseTick+1)
+	for i := 0; i < cfg.LongVolWindow; i++ {
+		obs = append(obs, flatObs(i, 100))
+	}
+	obs = append(obs, flatObs(cfg.LongVolWindow, 110)) // BUY
+	obs = append(obs, flatObs(riseTick, 115))          // TP should fire here
+
+	bt := breakout.NewBacktester(s, nil)
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	require.Len(t, res.ClosedTrades, 1, "take-profit should close the open position")
+	ct := res.ClosedTrades[0]
+	assert.Equal(t, types.SignalBuy, ct.Signal, "open signal should be BUY")
+	assert.Equal(t, decimal.MustNew(110, 0), ct.EntryPrice)
+	assert.Equal(t, decimal.MustNew(115, 0), ct.ExitPrice,
+		"exit price should be the TP trigger tick (115)")
+	assert.Equal(t, breakout.ExitReasonTakeProfit, ct.ExitReason,
+		"115 > 110 + 2*ATR must trigger take_profit")
+	assert.True(t, ct.PnL.IsPos(), "long 110→115 must be a profit; got %s", ct.PnL.String())
+}
+
+// TestBacktest_SLPriorityOverReversal asserts that on a tick where BOTH
+// stop-loss and an opposite-signal reversal would fire, the backtest
+// records the stop-loss (priority: SL > TP > reversal > hold).
+func TestBacktest_SLPriorityOverReversal(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.StopLossATR = decimal.MustNew(2, 0)
+	cfg.TakeProfitATR = decimal.Zero
+	s := breakout.New(cfg, nil)
+
+	// 30 flat at 100, 1 jump to 110 (BUY), 1 drop to 90 (below SL AND
+	// would also qualify as the start of a SELL reversal since ShortVol
+	// is now greater than LongVol from the long drop).
+	tick := cfg.LongVolWindow + 1
+	obs := make([]types.YieldObservation, 0, tick+1)
+	for i := 0; i < cfg.LongVolWindow; i++ {
+		obs = append(obs, flatObs(i, 100))
+	}
+	obs = append(obs, flatObs(cfg.LongVolWindow, 110)) // BUY
+	obs = append(obs, flatObs(tick, 90))               // both SL and reversal would close
+
+	bt := breakout.NewBacktester(s, nil)
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	require.Len(t, res.ClosedTrades, 1, "exactly one close should fire")
+	ct := res.ClosedTrades[0]
+	assert.Equal(t, breakout.ExitReasonStopLoss, ct.ExitReason,
+		"SL has priority over reversal when both would fire on the same tick")
 }
 
 // silence unused import warnings if a future test drops a reference

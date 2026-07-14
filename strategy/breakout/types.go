@@ -78,6 +78,11 @@ type TradeRecord struct {
 	Quantity         decimal.Decimal
 	PositionSize     decimal.Decimal
 	CompressionRatio decimal.Decimal
+	// EntryATR is the ATR computed at the trade's open tick. The
+	// Backtester uses this for stop-loss / take-profit distance
+	// calculations rather than the current bar's ATR, so the
+	// threshold is stable for the lifetime of the position.
+	EntryATR decimal.Decimal
 }
 
 // ClosedTrade records a completed round-trip trade and its PnL.

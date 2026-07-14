@@ -55,6 +55,10 @@ type Config struct {
 	// position is closed for a stop-loss. Set to 0 to disable.
 	StopLossATR decimal.Decimal
 
+	// TakeProfitATR is the number of ATR units from entry at which an open
+	// position is closed for a take-profit. Set to 0 to disable.
+	TakeProfitATR decimal.Decimal
+
 	// MinLongVolFloor is the minimum LongVol below which the strategy will
 	// not trade (avoids reacting to a completely flat baseline). 0 disables.
 	MinLongVolFloor decimal.Decimal
@@ -84,6 +88,7 @@ func DefaultConfig() Config {
 		BreakoutATRMultiple:  decimal.MustNew(15, 1), //nolint:mnd // 1.5
 		ConfirmationBars:     2,
 		StopLossATR:          decimal.MustNew(30, 1), //nolint:mnd // 3.0
+		TakeProfitATR:        decimal.Zero,           // disabled by default
 		MinLongVolFloor:      decimal.Zero,
 		InitialBalance:       decimal.One,
 		Leverage:             decimal.One,
@@ -121,7 +126,12 @@ type Strategy struct {
 	openSignal          types.Signal // signal of the currently open position, or Hold when flat
 	balancesInitialized bool
 	bondQty             decimal.Decimal // net bond position (+ = long, - = short)
-	errs                []error
+	// entryPrice and entryATR are captured when executeDecision opens a
+	// position. closePosition uses them to evaluate stop-loss / take-profit
+	// on every tick before checking the opposite-signal reversal.
+	entryPrice decimal.Decimal
+	entryATR   decimal.Decimal
+	errs       []error
 }
 
 // New creates a breakout Strategy with sensible defaults.
@@ -468,6 +478,8 @@ func (s *Strategy) handleTick(ctx context.Context, px prices.AssetPrice, assetID
 	s.mu.Lock()
 	s.lastPrice = px.Price
 	openSig := s.openSignal
+	entryPrice := s.entryPrice
+	entryATR := s.entryATR
 	s.mu.Unlock()
 
 	decision, err := s.Update(obs)
@@ -476,14 +488,26 @@ func (s *Strategy) handleTick(ctx context.Context, px prices.AssetPrice, assetID
 		return
 	}
 
-	// Already in a position: emit a reversal close if the new signal
-	// is the opposite direction. HOLD ticks do not close.
-	if openSig != types.SignalHold && isReversal(openSig, decision.Signal()) {
-		if err := s.closePosition(ctx, assetID); err != nil {
-			s.logger().Error("close position failed", "runID", s.runID, "assetID", assetID, "err", err)
-			s.mu.Lock()
-			s.errs = append(s.errs, err)
-			s.mu.Unlock()
+	// Already in a position: check SL/TP first (priority over reversal).
+	if openSig != types.SignalHold {
+		if reason, ok := liveCheckSLTP(openSig, entryPrice, entryATR, px.Price, s.cfg); ok {
+			if err := s.closePosition(ctx, assetID, reason); err != nil {
+				s.logger().Error("close position failed", "runID", s.runID, "assetID", assetID, "err", err)
+				s.mu.Lock()
+				s.errs = append(s.errs, err)
+				s.mu.Unlock()
+			}
+			return
+		}
+		// Then: opposite-signal reversal.
+		if isReversal(openSig, decision.Signal()) {
+			if err := s.closePosition(ctx, assetID, DecisionReasonReversal); err != nil {
+				s.logger().Error("close position failed", "runID", s.runID, "assetID", assetID, "err", err)
+				s.mu.Lock()
+				s.errs = append(s.errs, err)
+				s.mu.Unlock()
+			}
+			return
 		}
 		return
 	}
@@ -618,13 +642,17 @@ func (s *Strategy) executeDecision(ctx context.Context, decision Decision, asset
 	} else {
 		s.openSignal = decision.Signal()
 	}
+	// Record entry state so closePosition can evaluate SL / TP later.
+	s.entryPrice = price
+	s.entryATR = decision.ATR
 	s.mu.Unlock()
 	return true, nil
 }
 
 // closePosition reverses the currently open position. Used by handleTick
-// when an opposite-signal reversal fires while a position is open.
-func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
+// when SL/TP or an opposite-signal reversal fires while a position is
+// open. The reason argument is persisted in strategy_decisions.reason.
+func (s *Strategy) closePosition(ctx context.Context, assetID, reason string) error {
 	s.mu.RLock()
 	openSig := s.openSignal
 	qty := s.bondQty.Abs()
@@ -651,6 +679,8 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 			// Live position already flat; clear local state.
 			s.mu.Lock()
 			s.openSignal = types.SignalHold
+			s.entryPrice = decimal.Zero
+			s.entryATR = decimal.Zero
 			s.mu.Unlock()
 			return nil
 		}
@@ -682,8 +712,8 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		Leverage:        s.cfg.Leverage,
 		InverseLeverage: inverseLeverage,
 		Kind:            strategy.DecisionKindClose,
-		Reason:          DecisionReasonReversal,
-		ReasonDetail:    "close: breakout reversal",
+		Reason:          reason,
+		ReasonDetail:    fmt.Sprintf("close: %s", reason),
 		ClientOrderID:   clientOrderID,
 	})
 
@@ -692,8 +722,53 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		s.bondQty = decimal.Zero
 	}
 	s.openSignal = types.SignalHold
+	s.entryPrice = decimal.Zero
+	s.entryATR = decimal.Zero
 	s.mu.Unlock()
 	return nil
+}
+
+// liveCheckSLTP is the live-loop equivalent of the backtest's
+// checkStopLossTakeProfit. Returns the exit reason and true if the
+// current price has crossed the SL or TP band, ("", false) otherwise.
+// Stops at the first hit (SL first, then TP) so a single fast move
+// records the worse outcome.
+func liveCheckSLTP(openSig types.Signal, entryPrice, entryATR, currentPrice decimal.Decimal, cfg Config) (string, bool) {
+	if entryATR.IsZero() {
+		return "", false
+	}
+	switch openSig {
+	case types.SignalBuy:
+		if cfg.StopLossATR.IsPos() {
+			if slHit, ok := exitPriceCrosses(entryPrice, entryATR, cfg.StopLossATR, currentPrice, false); ok && slHit {
+				return ExitReasonStopLoss, true
+			}
+		}
+		if cfg.TakeProfitATR.IsPos() {
+			if tpHit, ok := exitPriceCrosses(entryPrice, entryATR, cfg.TakeProfitATR, currentPrice, true); ok && tpHit {
+				return ExitReasonTakeProfit, true
+			}
+		}
+	case types.SignalSell:
+		if cfg.StopLossATR.IsPos() {
+			if slHit, ok := exitPriceCrosses(entryPrice, entryATR, cfg.StopLossATR, currentPrice, true); ok && slHit {
+				return ExitReasonStopLoss, true
+			}
+		}
+		if cfg.TakeProfitATR.IsPos() {
+			if tpHit, ok := exitPriceCrosses(entryPrice, entryATR, cfg.TakeProfitATR, currentPrice, false); ok && tpHit {
+				return ExitReasonTakeProfit, true
+			}
+		}
+	default:
+		// openSig is Hold; unreachable in production (handleTick
+		// short-circuits before calling this).
+		return "", false
+	}
+	// Reached when the SignalBuy or SignalSell cases don't fire their
+	// inner returns (e.g. multipliers are non-positive or the price
+	// hasn't crossed the band).
+	return "", false
 }
 
 // currentPosition fetches the net bond position from DORA. Used as a
