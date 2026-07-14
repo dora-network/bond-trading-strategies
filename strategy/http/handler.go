@@ -2087,6 +2087,8 @@ func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
 		meanreversion.WithDecisionStore(h.decisionStore)(s)
 	case *copytrading.Strategy:
 		copytrading.WithDecisionStore(h.decisionStore)(s)
+	case *breakout.Strategy:
+		breakout.WithDecisionStore(h.decisionStore)(s)
 	}
 }
 
@@ -2099,6 +2101,7 @@ func defaultStrategies(
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
+		newBreakoutDefinition(pricesHandler, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2292,6 +2295,272 @@ type meanReversionConfigPayload struct {
 	Tenor           string   `json:"tenor,omitempty"`
 	InitialBalance  *float64 `json:"initial_balance,omitempty"`
 	Leverage        *float64 `json:"leverage,omitempty"`
+}
+
+type breakoutConfigPayload struct {
+	ShortVolWindow       int      `json:"short_vol_window"`
+	LongVolWindow        int      `json:"long_vol_window"`
+	CompressionThreshold float64  `json:"compression_threshold"`
+	ATRWindow            int      `json:"atr_window"`
+	BreakoutATRMultiple  float64  `json:"breakout_atr_multiple"`
+	ConfirmationBars     int      `json:"confirmation_bars"`
+	StopLossATR          float64  `json:"stop_loss_atr"`
+	MinLongVolFloor      float64  `json:"min_long_vol_floor"`
+	OrderBookID          string   `json:"order_book_id,omitempty"`
+	Tenor                string   `json:"tenor,omitempty"`
+	InitialBalance       *float64 `json:"initial_balance,omitempty"`
+	Leverage             *float64 `json:"leverage,omitempty"`
+}
+
+//nolint:funlen // strategy definition with 12 config fields
+func newBreakoutDefinition(pricesHandler *prices.Handler, log *slog.Logger) StrategyDefinition {
+	defaults := breakout.DefaultConfig()
+	return StrategyDefinition{
+		Type:   breakout.StrategyType,
+		Status: strategyStatusAvailable,
+		Description: "Volatility-compression / price-breakout strategy. Enters when short-window price volatility drops below a " +
+			"threshold of long-window volatility, then a close breaks above (or below) a k·ATR trigger band.",
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "short_vol_window",
+				Type:        "integer",
+				Description: "Short-window price-volatility observation count. Must be at least 2.",
+				Required:    false,
+				Default:     defaults.ShortVolWindow,
+			},
+			{
+				Name:        "long_vol_window",
+				Type:        "integer",
+				Description: "Long-window price-volatility observation count. Must be greater than short_vol_window.",
+				Required:    false,
+				Default:     defaults.LongVolWindow,
+			},
+			{
+				Name:        "compression_threshold",
+				Type:        "number",
+				Description: "ShortVol/LongVol ratio below which the strategy arms for a breakout. Must be in (0, 1].",
+				Required:    false,
+				Default:     mustFloat64(defaults.CompressionThreshold),
+			},
+			{
+				Name:        "atr_window",
+				Type:        "integer",
+				Description: "Rolling-mean window for ATR (mean absolute price diff). Must be at least 2.",
+				Required:    false,
+				Default:     defaults.ATRWindow,
+			},
+			{
+				Name:        "breakout_atr_multiple",
+				Type:        "number",
+				Description: "Number of ATR units above/below the most recent close that defines the breakout trigger. Must be non-negative.",
+				Required:    false,
+				Default:     mustFloat64(defaults.BreakoutATRMultiple),
+			},
+			{
+				Name:        "confirmation_bars",
+				Type:        "integer",
+				Description: "Number of consecutive closes beyond the trigger band required to fire. Must be at least 1.",
+				Required:    false,
+				Default:     defaults.ConfirmationBars,
+			},
+			{
+				Name:        "stop_loss_atr",
+				Type:        "number",
+				Description: "Stop-loss distance in ATR units. Set to 0 to disable. Reserved for v2 (not yet honoured by the backtest).",
+				Required:    false,
+				Default:     mustFloat64(defaults.StopLossATR),
+			},
+			{
+				Name:        "min_long_vol_floor",
+				Type:        "number",
+				Description: "Minimum LongVol required to trade. Set to 0 to disable. Suppresses entries on a completely flat baseline.",
+				Required:    false,
+				Default:     mustFloat64(defaults.MinLongVolFloor),
+			},
+			{
+				Name:        "order_book_id",
+				Type:        "string(uuid)",
+				Description: "Order book UUID used to locate the traded asset and place orders.",
+				Required:    false,
+			},
+			{
+				Name:        "tenor",
+				Type:        "string",
+				Description: "Tenor label recorded alongside the run. Not used by the signal (breakout is price-only).",
+				Required:    false,
+			},
+			{
+				Name:        "initial_balance",
+				Type:        "number",
+				Description: "Starting capital for backtests. Omitted for live runs — obtained from DORA positions.",
+				Required:    false,
+				Default:     mustFloat64(defaults.InitialBalance),
+			},
+			{
+				Name:        "leverage",
+				Type:        "number",
+				Description: "Leverage multiplier for live orders. Must be greater than 0.",
+				Required:    false,
+				Default:     mustFloat64(defaults.Leverage),
+			},
+		},
+		SupportsRun:      true,
+		SupportsBacktest: true,
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			forRun := capability == string(capabilityRun)
+			cfg, normalised, err := decodeBreakoutConfig(raw, forRun)
+			if err != nil {
+				return nil, nil, err
+			}
+			opts := []func(*breakout.Strategy){
+				breakout.WithLogger(log),
+			}
+			if tradeWriter != nil {
+				opts = append(opts, breakout.WithBacktestWriter(tradeWriter))
+			}
+			return normalised, breakout.New(cfg, pricesHandler, opts...), nil
+		},
+	}
+}
+
+//nolint:funlen // config decoding with validation
+func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, json.RawMessage, error) {
+	var payload breakoutConfigPayload
+	if err := decodeRawConfig(raw, &payload); err != nil {
+		return breakout.Config{}, nil, err
+	}
+	defaults := breakout.DefaultConfig()
+
+	// Apply defaults and validate windows.
+	if payload.ShortVolWindow == 0 {
+		payload.ShortVolWindow = defaults.ShortVolWindow
+	}
+	if payload.LongVolWindow == 0 {
+		payload.LongVolWindow = defaults.LongVolWindow
+	}
+	if payload.ATRWindow == 0 {
+		payload.ATRWindow = defaults.ATRWindow
+	}
+	if payload.ConfirmationBars == 0 {
+		payload.ConfirmationBars = defaults.ConfirmationBars
+	}
+	if payload.ShortVolWindow < 2 { //nolint:mnd
+		return breakout.Config{}, nil, fmt.Errorf("config.short_vol_window must be at least 2")
+	}
+	if payload.LongVolWindow <= payload.ShortVolWindow {
+		return breakout.Config{}, nil, fmt.Errorf("config.long_vol_window must be greater than short_vol_window")
+	}
+	if payload.ATRWindow < 2 { //nolint:mnd
+		return breakout.Config{}, nil, fmt.Errorf("config.atr_window must be at least 2")
+	}
+	if payload.ConfirmationBars < 1 {
+		return breakout.Config{}, nil, fmt.Errorf("config.confirmation_bars must be at least 1")
+	}
+
+	// Apply defaults and validate thresholds.
+	if payload.CompressionThreshold == 0 {
+		payload.CompressionThreshold = mustFloat64(defaults.CompressionThreshold)
+	}
+	if payload.BreakoutATRMultiple == 0 {
+		payload.BreakoutATRMultiple = mustFloat64(defaults.BreakoutATRMultiple)
+	}
+	if payload.StopLossATR == 0 {
+		payload.StopLossATR = mustFloat64(defaults.StopLossATR)
+	}
+	if payload.MinLongVolFloor == 0 {
+		payload.MinLongVolFloor = mustFloat64(defaults.MinLongVolFloor)
+	}
+	if payload.CompressionThreshold <= 0 || payload.CompressionThreshold > 1 {
+		return breakout.Config{}, nil, fmt.Errorf("config.compression_threshold must be in (0, 1]")
+	}
+	if payload.BreakoutATRMultiple < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.breakout_atr_multiple must be non-negative")
+	}
+	if payload.StopLossATR < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr must be non-negative")
+	}
+	if payload.MinLongVolFloor < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.min_long_vol_floor must be non-negative")
+	}
+
+	compression, err := decimal.NewFromFloat64(payload.CompressionThreshold)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.compression_threshold: %w", err)
+	}
+	breakoutATR, err := decimal.NewFromFloat64(payload.BreakoutATRMultiple)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.breakout_atr_multiple: %w", err)
+	}
+	stopLoss, err := decimal.NewFromFloat64(payload.StopLossATR)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr: %w", err)
+	}
+	minFloor, err := decimal.NewFromFloat64(payload.MinLongVolFloor)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.min_long_vol_floor: %w", err)
+	}
+
+	amount := defaults.InitialBalance
+	if payload.InitialBalance != nil {
+		if *payload.InitialBalance < 0 {
+			return breakout.Config{}, nil, fmt.Errorf("config.initial_balance must be non-negative")
+		}
+		if *payload.InitialBalance == 0 {
+			if !forRun {
+				return breakout.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0 for backtests")
+			}
+		} else {
+			amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
+			if err != nil {
+				return breakout.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+			}
+		}
+	}
+
+	leverage := defaults.Leverage
+	if payload.Leverage != nil {
+		if *payload.Leverage <= 0 {
+			return breakout.Config{}, nil, fmt.Errorf("config.leverage must be greater than 0")
+		}
+		leverage, err = decimal.NewFromFloat64(*payload.Leverage)
+		if err != nil {
+			return breakout.Config{}, nil, fmt.Errorf("config.leverage: %w", err)
+		}
+	}
+
+	var orderBookID uuid.UUID
+	if payload.OrderBookID != "" {
+		orderBookID, err = uuid.Parse(strings.TrimSpace(payload.OrderBookID))
+		if err != nil {
+			return breakout.Config{}, nil, fmt.Errorf("config.order_book_id: %w", err)
+		}
+	}
+
+	payload.Tenor = strings.TrimSpace(payload.Tenor)
+
+	normalised, err := json.Marshal(payload)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("marshal normalised config: %w", err)
+	}
+
+	return breakout.Config{
+		ShortVolWindow:       payload.ShortVolWindow,
+		LongVolWindow:        payload.LongVolWindow,
+		CompressionThreshold: compression,
+		ATRWindow:            payload.ATRWindow,
+		BreakoutATRMultiple:  breakoutATR,
+		ConfirmationBars:     payload.ConfirmationBars,
+		StopLossATR:          stopLoss,
+		MinLongVolFloor:      minFloor,
+		OrderBookID:          orderBookID,
+		Tenor:                payload.Tenor,
+		InitialBalance:       amount,
+		Leverage:             leverage,
+	}, normalised, nil
 }
 
 //nolint:funlen // config decoding with validation
