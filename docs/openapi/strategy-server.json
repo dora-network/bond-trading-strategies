@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Strategy Service API",
-    "version": "1.6.0",
+    "version": "1.7.0",
     "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`."
   },
   "servers": [
@@ -872,7 +872,13 @@
             "type": "number",
             "minimum": 0,
             "default": 3.0,
-            "description": "Stop-loss distance in ATR units. Reserved for v2 (not yet honoured by the backtest)."
+            "description": "Stop-loss distance in ATR units. Mirrored in the live Run loop and the backtester."
+          },
+          "take_profit_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Take-profit distance in ATR units from entry. Set to 0 to disable. Mirrored in the live Run loop and the backtester."
           },
           "min_long_vol_floor": {
             "type": "number",

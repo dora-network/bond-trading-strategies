@@ -83,6 +83,22 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 			lastDecision = decision
 
 			if openTrade != nil {
+				// Priority: stop-loss > take-profit > opposite-signal
+				// reversal > hold. SL/TP are evaluated first because a
+				// fast move against the position can blow past both the
+				// SL threshold and the opposite-signal trigger in the
+				// same bar; the SL/PnL outcome is materially worse, so
+				// we want to record that explicitly.
+				if reason, ok := checkStopLossTakeProfit(openTrade, decision.Price(), b.strategy.cfg); ok {
+					ct, newBalance, err := b.closeAtPrice(openTrade, decision, remainingBalance, reason)
+					if err != nil {
+						return BacktestResult{}, err
+					}
+					remainingBalance = newBalance
+					closedTrades = append(closedTrades, ct)
+					openTrade = nil
+					continue
+				}
 				// Exit on opposite signal.
 				if isReversal(openTrade.Signal, decision.Signal()) {
 					exitPrice := decision.Price()
@@ -172,6 +188,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 				Quantity:         qty,
 				PositionSize:     decision.PositionSize(),
 				CompressionRatio: decision.CompressionRatio,
+				EntryATR:         decision.ATR,
 			})
 			openTrade = &tradeRecords[len(tradeRecords)-1]
 
@@ -247,6 +264,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		ct.PnL = pnl
 		closedTrades = append(closedTrades, ct)
 	}
+	_ = remainingBalance
 
 	summary := summarise(closedTrades)
 	return BacktestResult{
@@ -316,4 +334,131 @@ func summarise(trades []ClosedTrade) summary {
 		}
 	}
 	return s
+}
+
+// checkStopLossTakeProfit returns the exit reason ("stop_loss" or
+// "take_profit") if the current price has crossed the SL or TP band
+// for the open position, or ("", false) if neither band was hit (or
+// both are disabled via a zero multiplier).
+//
+// For a long (BUY): SL is below entry, TP is above.
+// For a short (SELL): SL is above entry, TP is below.
+// Stop-loss is checked before take-profit so a single fast move that
+// blows through both bands records the worse outcome (the SL).
+func checkStopLossTakeProfit(open *TradeRecord, currentPrice decimal.Decimal, cfg Config) (string, bool) {
+	if open.EntryATR.IsZero() {
+		return "", false
+	}
+	switch open.Signal {
+	case types.SignalBuy:
+		if cfg.StopLossATR.IsPos() {
+			if slHit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.StopLossATR, currentPrice, false); ok && slHit {
+				return ExitReasonStopLoss, true
+			}
+		}
+		if cfg.TakeProfitATR.IsPos() {
+			if tpHit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.TakeProfitATR, currentPrice, true); ok && tpHit {
+				return ExitReasonTakeProfit, true
+			}
+		}
+	case types.SignalSell:
+		if cfg.StopLossATR.IsPos() {
+			if slHit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.StopLossATR, currentPrice, true); ok && slHit {
+				return ExitReasonStopLoss, true
+			}
+		}
+		if cfg.TakeProfitATR.IsPos() {
+			if tpHit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.TakeProfitATR, currentPrice, false); ok && tpHit {
+				return ExitReasonTakeProfit, true
+			}
+		}
+	default:
+		// open.Signal is Hold; unreachable in production (the backtest
+		// only opens on Buy or Sell).
+		return "", false
+	}
+	// Reached when the SignalBuy or SignalSell cases don't fire their
+	// inner returns (e.g. multipliers are non-positive or the price
+	// hasn't crossed the band).
+	return "", false
+}
+
+// exitPriceCrosses reports whether the current price has crossed the
+// exit threshold derived from entry price +/- multiplier*entryATR.
+// For longs, "above" is the profitable direction; for shorts, "below".
+// Returns (false, false) if the multiplier is non-positive or the
+// arithmetic errors.
+func exitPriceCrosses(entryPrice, entryATR, multiplier, currentPrice decimal.Decimal, wantAbove bool) (bool, bool) {
+	if !multiplier.IsPos() {
+		return false, false
+	}
+	distance, err := multiplier.Mul(entryATR)
+	if err != nil {
+		return false, false
+	}
+	var threshold decimal.Decimal
+	if wantAbove {
+		threshold, err = entryPrice.Add(distance)
+	} else {
+		threshold, err = entryPrice.Sub(distance)
+	}
+	if err != nil {
+		return false, false
+	}
+	if wantAbove {
+		return currentPrice.Cmp(threshold) >= 0, true
+	}
+	return currentPrice.Cmp(threshold) <= 0, true
+}
+
+// closeAtPrice closes the open trade at the current decision's price
+// and records the exit with the given reason. The remaining balance is
+// returned alongside the ClosedTrade so the caller can update its
+// tracked balance (the helper does not own that state).
+func (b *Backtester) closeAtPrice(
+	open *TradeRecord,
+	decision Decision,
+	balance decimal.Decimal,
+	reason string,
+) (ClosedTrade, decimal.Decimal, error) {
+	exitPrice := decision.Price()
+	exitQty := open.Quantity
+
+	cashFlow, err := exitPrice.Mul(exitQty)
+	if err != nil {
+		return ClosedTrade{}, balance, err
+	}
+	var newBalance decimal.Decimal
+	switch open.Signal {
+	case types.SignalBuy:
+		newBalance, err = balance.Add(cashFlow)
+	case types.SignalSell:
+		newBalance, err = balance.Sub(cashFlow)
+	default:
+		newBalance = balance
+	}
+	if err != nil {
+		return ClosedTrade{}, balance, err
+	}
+
+	ct := ClosedTrade{
+		BondID:                open.BondID,
+		OpenTime:              open.Time,
+		CloseTime:             decision.Time(),
+		Signal:                open.Signal,
+		ExitSignal:            decision.Signal(),
+		EntryPrice:            open.Price,
+		ExitPrice:             exitPrice,
+		Quantity:              exitQty,
+		PositionSize:          open.PositionSize,
+		ExitReason:            reason,
+		EntryCompressionRatio: open.CompressionRatio,
+		ExitCompressionRatio:  decision.CompressionRatio,
+	}
+	pnl, err := computePnL(ct)
+	if err != nil {
+		return ClosedTrade{}, balance, err
+	}
+	ct.PnL = pnl
+	return ct, newBalance, nil
 }
