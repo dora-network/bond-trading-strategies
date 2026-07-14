@@ -17,6 +17,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
@@ -915,6 +916,10 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))
 			withClientOpts(withClient)
 		}
+		if withClient, ok := strat.(*breakout.Strategy); ok {
+			withClientOpts := breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))
+			withClientOpts(withClient)
+		}
 	}
 
 	resultCh, err := h.service.RunBacktest(r.Context(), id, strat, req.Start, req.End)
@@ -1518,6 +1523,8 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))(withClient)
 		case *copytrading.Strategy:
 			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(info.APIKey))(withClient)
+		case *breakout.Strategy:
+			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		}
 	}
 
@@ -1863,6 +1870,8 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		case *copytrading.Strategy:
 			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+		case *breakout.Strategy:
+			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		}
 	}
 
@@ -1883,6 +1892,8 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 			case *meanreversion.Strategy:
 				s.SetDecisionSeq(maxSeq)
 			case *copytrading.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *breakout.Strategy:
 				s.SetDecisionSeq(maxSeq)
 			}
 		}

@@ -22,6 +22,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/ratelimit"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
@@ -188,7 +189,7 @@ func main() {
 			ctx,
 			notifier,
 			lookup,
-			[]string{meanreversion.StrategyType, copytrading.StrategyType},
+			[]string{meanreversion.StrategyType, copytrading.StrategyType, breakout.StrategyType},
 			orderupdates.NewStream(*wsURL, log),
 			orderupdates.WithLogger(log),
 		)
