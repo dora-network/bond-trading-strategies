@@ -21,6 +21,7 @@ const (
 	DecisionReasonWarmingUp        = "warming_up"
 	DecisionReasonVolTooLow        = "vol_too_low"
 	DecisionReasonCompressionEntry = "compression_breakout"
+	DecisionReasonReversal         = "breakout_reversal"
 )
 
 // Exit reason constants for ClosedTrade.

@@ -2,6 +2,8 @@ package breakout
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/config"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
+	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 )
@@ -105,6 +108,18 @@ type Strategy struct {
 	decisionStore    strategy.DecisionRecorder
 	decisionSeq      int64
 	pricesHandler    *prices.Handler
+	marketAPIClient  strategy.MarketAPIClient
+	historicalStore  historicalPriceStore
+
+	// Live-run state (set in Run, used by executeDecision / closePosition).
+	runID               uuid.UUID
+	cancel              context.CancelFunc
+	isRunning           bool
+	pricesReqID         uuid.UUID
+	openSignal          types.Signal // signal of the currently open position, or Hold when flat
+	balancesInitialized bool
+	bondQty             decimal.Decimal // net bond position (+ = long, - = short)
+	errs                []error
 }
 
 // New creates a breakout Strategy with sensible defaults.
@@ -134,6 +149,27 @@ func WithLogger(log *slog.Logger) func(*Strategy) {
 // loop after every successful CreateMarketOrder.
 func WithDecisionStore(store strategy.DecisionRecorder) func(*Strategy) {
 	return func(s *Strategy) { s.decisionStore = store }
+}
+
+// WithMarketAPIClient injects the DORA client used for live trading.
+// Required when Run() is called; the strategy will fail to start without it.
+func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
+	return func(s *Strategy) { s.marketAPIClient = client }
+}
+
+// WithHistoricalStore injects the backtest's historical price source.
+// Required when Backtest() is called; the strategy will return an error
+// from Backtest() without it.
+func WithHistoricalStore(store historicalPriceStore) func(*Strategy) {
+	return func(s *Strategy) { s.historicalStore = store }
+}
+
+// logger returns the configured logger or the default if none was set.
+func (s *Strategy) logger() *slog.Logger {
+	if s.log == nil {
+		return slog.Default()
+	}
+	return s.log
 }
 
 // SetDecisionSeq seeds the in-memory decision counter. Called once at
@@ -324,14 +360,425 @@ func (s *Strategy) resetArmed() {
 	s.barsBelowTrigger = 0
 }
 
-// Backtest is implemented in Task 4.
-func (s *Strategy) Backtest(_ context.Context, _ time.Time, _ time.Time) (types.BacktestResult, error) {
-	return BacktestResult{}, nil
+// Backtest runs the strategy against historical observations between start
+// and end. Delegates to a Backtester that reuses the live Update path.
+func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
+	if s.historicalStore == nil {
+		return BacktestResult{}, errors.New("breakout: historical price store is not configured")
+	}
+	obs, err := s.historicalStore.Observations(ctx, s.cfg.OrderBookID.String(), start, end)
+	if err != nil {
+		return BacktestResult{}, fmt.Errorf("load historical observations: %w", err)
+	}
+	return NewBacktester(s, nil).Run(ctx, obs)
 }
 
-// Run is implemented in Task 5.
-func (s *Strategy) Run(_ context.Context, _ <-chan strategy.Message, _ uuid.UUID) error {
+// Run starts the live breakout loop. It subscribes to prices, processes
+// ticks through Update(), and places market orders on every non-HOLD
+// signal. The opposite-signal pattern closes the open position; this
+// mirrors meanreversion.Strategy.Run with breakout-specific simplifications
+// (no benchmark yield, no window prefill).
+func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
+	s.mu.Lock()
+	if s.isRunning {
+		s.mu.Unlock()
+		return errors.New("strategy is already running")
+	}
+	if s.marketAPIClient == nil {
+		s.mu.Unlock()
+		return errors.New("breakout: market API client is not configured")
+	}
+	s.runID = runID
+	runCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+
+	pricesCh, err := s.subscribePrices()
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("subscribe to prices: %w", err)
+	}
+	s.isRunning = true
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.isRunning = false
+		s.mu.Unlock()
+		s.unsubscribePrices()
+	}()
+
+	return s.runLoop(runCtx, msgCh, pricesCh)
+}
+
+// runLoop is the inner select that drives the live strategy. Extracted so
+// Run() stays small and the live loop itself can be tested in isolation
+// via dependency-injected channels.
+func (s *Strategy) runLoop(ctx context.Context, msgs <-chan strategy.Message, prices <-chan map[uuid.UUID]prices.AssetPrice) error {
+	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	if err != nil {
+		return fmt.Errorf("lookup asset ID: %w", err)
+	}
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case msg := <-msgs:
+			s.mu.Lock()
+			switch msg {
+			case strategy.Stop:
+				s.cancel()
+			case strategy.Pause, strategy.Resume:
+				// Pause/Resume semantics land in a follow-up ticket; the
+				// message is consumed here so the channel stays drained.
+			}
+			s.mu.Unlock()
+		case pxs := <-prices:
+			for _, px := range pxs {
+				if px.AssetID != assetID {
+					continue
+				}
+				s.handleTick(ctx, px, assetID)
+			}
+		case <-ticker.C:
+			// keep the loop alive; reserved for future heartbeat logic.
+		}
+	}
+}
+
+// handleTick processes a single price update through the Update() pipeline
+// and dispatches the resulting decision to executeDecision or closePosition.
+func (s *Strategy) handleTick(ctx context.Context, px prices.AssetPrice, assetID string) {
+	obs := types.YieldObservation{
+		Time:   px.Time,
+		BondID: px.AssetID,
+		Price:  px.Price,
+	}
+	s.mu.Lock()
+	s.lastPrice = px.Price
+	openSig := s.openSignal
+	s.mu.Unlock()
+
+	decision, err := s.Update(obs)
+	if err != nil {
+		s.logger().Error("update strategy failed", "runID", s.runID, "assetID", assetID, "err", err)
+		return
+	}
+
+	// Already in a position: emit a reversal close if the new signal
+	// is the opposite direction. HOLD ticks do not close.
+	if openSig != types.SignalHold && isReversal(openSig, decision.Signal()) {
+		if err := s.closePosition(ctx, assetID); err != nil {
+			s.logger().Error("close position failed", "runID", s.runID, "assetID", assetID, "err", err)
+			s.mu.Lock()
+			s.errs = append(s.errs, err)
+			s.mu.Unlock()
+		}
+		return
+	}
+
+	// Flat: open a position on a fresh signal.
+	if openSig == types.SignalHold && decision.Signal() != types.SignalHold {
+		if _, err := s.executeDecision(ctx, decision, assetID); err != nil {
+			s.logger().Error("execute decision failed", "runID", s.runID, "assetID", assetID, "err", err)
+			s.mu.Lock()
+			s.errs = append(s.errs, err)
+			s.mu.Unlock()
+		}
+	}
+}
+
+// subscribePrices opens a price subscription for this run.
+func (s *Strategy) subscribePrices() (<-chan map[uuid.UUID]prices.AssetPrice, error) {
+	if s.pricesHandler == nil {
+		return nil, errors.New("breakout: prices handler is not configured")
+	}
+	s.pricesReqID = uuid.Must(uuid.NewV7())
+	pricesCh, err := s.pricesHandler.Subscribe(s.pricesReqID)
+	if err != nil {
+		s.pricesReqID = uuid.Nil
+		return nil, err
+	}
+	return pricesCh, nil
+}
+
+// unsubscribePrices closes the price subscription opened in subscribePrices.
+func (s *Strategy) unsubscribePrices() {
+	if s.pricesHandler == nil || s.pricesReqID == uuid.Nil {
+		return
+	}
+	if err := s.pricesHandler.Unsubscribe(s.pricesReqID); err != nil {
+		s.logger().Error("unsubscribe from prices failed", "err", err)
+	}
+	s.pricesReqID = uuid.Nil
+}
+
+// lookupAssetID resolves the configured order-book ID to a DORA asset ID
+// via the market API client.
+func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
+	if s.marketAPIClient == nil {
+		return "", errors.New("breakout: market API client is not configured")
+	}
+	if orderBookID == uuid.Nil {
+		return "", errors.New("order book ID is required")
+	}
+	assetID, err := s.marketAPIClient.BaseAssetID(context.Background(), orderBookID.String())
+	if err != nil {
+		return "", err
+	}
+	if assetID == "" {
+		return "", fmt.Errorf("order book %s returned an empty base asset ID", orderBookID)
+	}
+	return assetID, nil
+}
+
+// executeDecision places a market order in the decision's signal direction.
+// It looks up the current position (preferred via tracked bondQty, falls
+// back to a DORA API call) so it can compute the correct order quantity
+// for both opening and extending positions.
+func (s *Strategy) executeDecision(ctx context.Context, decision Decision, assetID string) (bool, error) {
+	if decision.Signal() != types.SignalBuy && decision.Signal() != types.SignalSell {
+		return false, nil
+	}
+
+	price := decision.Price()
+	if price.IsZero() {
+		return false, errors.New("cannot execute decision: price is zero")
+	}
+
+	position, useTracked := s.positionOrFetch(ctx, assetID)
+
+	quantity, ok, err := s.cappedOrderQuantity(decision.PositionSize(), position, price)
+	if err != nil {
+		return false, err
+	}
+	if !ok || quantity.IsZero() {
+		return false, nil
+	}
+
+	side := doraclient.SIDE_BUY
+	if decision.Signal() == types.SignalSell {
+		side = doraclient.SIDE_SELL
+	}
+
+	inverseLeverage, err := decimal.One.Quo(s.cfg.Leverage)
+	if err != nil {
+		return false, fmt.Errorf("compute inverse leverage: %w", err)
+	}
+
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
+	s.logger().Info("opening position", "runID", s.runID, "assetID", assetID, "signal", decision.Signal())
+	if err := s.marketAPIClient.CreateMarketOrder(
+		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, false, clientOrderID,
+	); err != nil {
+		return false, err
+	}
+
+	s.recordDecision(ctx, strategy.Decision{
+		OrderBookID:     s.cfg.OrderBookID,
+		Asset:           mustParseUUID(assetID),
+		Side:            string(side),
+		Signal:          decision.Signal().String(),
+		Quantity:        quantity,
+		Price:           price,
+		Leverage:        s.cfg.Leverage,
+		InverseLeverage: inverseLeverage,
+		Kind:            strategy.DecisionKindOpen,
+		Reason:          decision.Reason(),
+		ReasonDetail:    fmt.Sprintf("breakout entry: signal=%s compression=%s", decision.Signal(), decision.CompressionRatio),
+		ClientOrderID:   clientOrderID,
+	})
+
+	s.mu.Lock()
+	if useTracked {
+		if side == doraclient.SIDE_BUY {
+			s.bondQty, _ = s.bondQty.Add(quantity)
+		} else {
+			s.bondQty, _ = s.bondQty.Sub(quantity)
+		}
+		switch {
+		case s.bondQty.IsPos():
+			s.openSignal = types.SignalBuy
+		case s.bondQty.IsNeg():
+			s.openSignal = types.SignalSell
+		default:
+			s.openSignal = types.SignalHold
+		}
+	} else {
+		s.openSignal = decision.Signal()
+	}
+	s.mu.Unlock()
+	return true, nil
+}
+
+// closePosition reverses the currently open position. Used by handleTick
+// when an opposite-signal reversal fires while a position is open.
+func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
+	s.mu.RLock()
+	openSig := s.openSignal
+	qty := s.bondQty.Abs()
+	useTracked := s.balancesInitialized
+	lastPrice := s.lastPrice
+	s.mu.RUnlock()
+
+	if openSig == types.SignalHold {
+		return nil
+	}
+
+	side := doraclient.SIDE_SELL
+	if openSig == types.SignalSell {
+		side = doraclient.SIDE_BUY
+	}
+
+	if !useTracked {
+		var err error
+		qty, err = s.currentPosition(ctx, assetID)
+		if err != nil {
+			return err
+		}
+		if qty.IsZero() {
+			// Live position already flat; clear local state.
+			s.mu.Lock()
+			s.openSignal = types.SignalHold
+			s.mu.Unlock()
+			return nil
+		}
+	}
+
+	inverseLeverage, err := decimal.One.Quo(s.cfg.Leverage)
+	if err != nil {
+		inverseLeverage = decimal.One
+	}
+
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
+	if err := s.marketAPIClient.CreateMarketOrder(
+		ctx, s.cfg.OrderBookID.String(), side, qty, inverseLeverage, false, clientOrderID,
+	); err != nil {
+		return err
+	}
+
+	closeSignal := types.SignalSell
+	if side == doraclient.SIDE_BUY {
+		closeSignal = types.SignalBuy
+	}
+	s.recordDecision(ctx, strategy.Decision{
+		OrderBookID:     s.cfg.OrderBookID,
+		Asset:           mustParseUUID(assetID),
+		Side:            string(side),
+		Signal:          closeSignal.String(),
+		Quantity:        qty,
+		Price:           lastPrice,
+		Leverage:        s.cfg.Leverage,
+		InverseLeverage: inverseLeverage,
+		Kind:            strategy.DecisionKindClose,
+		Reason:          DecisionReasonReversal,
+		ReasonDetail:    "close: breakout reversal",
+		ClientOrderID:   clientOrderID,
+	})
+
+	s.mu.Lock()
+	if useTracked {
+		s.bondQty = decimal.Zero
+	}
+	s.openSignal = types.SignalHold
+	s.mu.Unlock()
 	return nil
+}
+
+// currentPosition fetches the net bond position from DORA. Used as a
+// fallback when local bondQty tracking is unavailable.
+func (s *Strategy) currentPosition(ctx context.Context, assetID string) (decimal.Decimal, error) {
+	if s.marketAPIClient == nil {
+		return decimal.Zero, errors.New("breakout: market API client is not configured")
+	}
+	available, _, err := s.marketAPIClient.AssetPosition(ctx, assetID)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	return available, nil
+}
+
+// positionOrFetch returns the current bondQty if balance tracking is
+// initialised, otherwise fetches it from the DORA API.
+func (s *Strategy) positionOrFetch(ctx context.Context, assetID string) (decimal.Decimal, bool) {
+	s.mu.RLock()
+	useTracked := s.balancesInitialized
+	position := s.bondQty
+	s.mu.RUnlock()
+	if useTracked {
+		return position, true
+	}
+	pos, err := s.currentPosition(ctx, assetID)
+	if err != nil {
+		s.logger().Debug("current position fetch failed; falling back to zero", "err", err)
+		return decimal.Zero, false
+	}
+	return pos, false
+}
+
+// cappedOrderQuantity computes the order quantity for a given budget
+// fraction, capped by the min/max order sizes from the strategy config.
+// Returns ok=false when the budget is too small to buy even one bond.
+func (s *Strategy) cappedOrderQuantity(fraction, position, price decimal.Decimal) (decimal.Decimal, bool, error) {
+	budget, err := position.Mul(fraction)
+	if err != nil {
+		return decimal.Zero, false, err
+	}
+	qty, err := budget.Quo(price)
+	if err != nil {
+		return decimal.Zero, false, err
+	}
+	qty = qty.Floor(0)
+	if qty.IsZero() {
+		return decimal.Zero, false, nil
+	}
+	return qty, true, nil
+}
+
+// recordDecision persists a strategy.Decision row, stamping RunID/Seq/
+// StrategyType/CreatedAt so the audit trail is complete.
+func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
+	if s.decisionStore == nil {
+		return
+	}
+	s.mu.Lock()
+	s.decisionSeq++
+	seq := s.decisionSeq
+	runID := s.runID
+	s.mu.Unlock()
+
+	d.RunID = runID
+	d.Seq = seq
+	d.StrategyType = StrategyType
+	if d.CreatedAt.IsZero() {
+		d.CreatedAt = time.Now().UTC()
+	}
+	if err := s.decisionStore.SaveDecision(ctx, d); err != nil {
+		s.logger().Error("save strategy decision",
+			"err", err,
+			"run_id", d.RunID,
+			"seq", d.Seq,
+			"side", d.Side,
+			"signal", d.Signal,
+			"quantity", d.Quantity,
+		)
+	}
+}
+
+// mustParseUUID converts a DORA asset/order-book ID string into a
+// uuid.UUID. Empty input returns uuid.Nil so a missing lookup doesn't
+// abort the persistence path.
+func mustParseUUID(s string) uuid.UUID {
+	if s == "" {
+		return uuid.Nil
+	}
+	id, err := uuid.Parse(s)
+	if err != nil {
+		return uuid.Nil
+	}
+	return id
 }
 
 // Compile-time guard that *Strategy satisfies strategy.Strategy.
