@@ -131,7 +131,12 @@ type Strategy struct {
 	// on every tick before checking the opposite-signal reversal.
 	entryPrice decimal.Decimal
 	entryATR   decimal.Decimal
-	errs       []error
+	// paused is flipped to true when the strategy.Message channel
+	// receives strategy.Pause. While set, the run loop drops price
+	// updates (no Update / no entry / no SL/TP close) and writes a debug
+	// log. strategy.Resume clears it.
+	paused bool
+	errs   []error
 }
 
 // New creates a breakout Strategy with sensible defaults.
@@ -198,6 +203,17 @@ func (s *Strategy) SetDecisionSeq(seq int64) {
 	s.mu.Lock()
 	s.decisionSeq = seq
 	s.mu.Unlock()
+}
+
+// IsPaused reports whether the live run is currently paused (a Pause
+// message has been received and not yet matched by a Resume). The
+// handler's stopLossObserver goroutine uses this to skip emitting
+// stop-loss events for paused strategies; meanreversion's observer
+// already gates on its own s.paused flag.
+func (s *Strategy) IsPaused() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.paused
 }
 
 // Update advances the strategy with one price observation and returns
@@ -449,9 +465,12 @@ func (s *Strategy) runLoop(ctx context.Context, msgs <-chan strategy.Message, pr
 			switch msg {
 			case strategy.Stop:
 				s.cancel()
-			case strategy.Pause, strategy.Resume:
-				// Pause/Resume semantics land in a follow-up ticket; the
-				// message is consumed here so the channel stays drained.
+			case strategy.Pause:
+				s.paused = true
+				s.logger().Debug("breakout run paused", "runID", s.runID)
+			case strategy.Resume:
+				s.paused = false
+				s.logger().Debug("breakout run resumed", "runID", s.runID)
 			}
 			s.mu.Unlock()
 		case pxs := <-prices:
@@ -469,18 +488,36 @@ func (s *Strategy) runLoop(ctx context.Context, msgs <-chan strategy.Message, pr
 
 // handleTick processes a single price update through the Update() pipeline
 // and dispatches the resulting decision to executeDecision or closePosition.
+//
+// Paused ticks are dropped before any state mutation. snapshot openSig /
+// entryPrice / entryATR but DO NOT write s.lastPrice — Update's
+// ingestObservation sets lastPrice at the end, which means Update's
+// prevPrice read sees the previous tick's lastPrice (not the current
+// tick's), keeping |Δprice| ≥ 0 instead of 0 and the breakout trigger
+// above the current price on flat ticks.
 func (s *Strategy) handleTick(ctx context.Context, px prices.AssetPrice, assetID string) {
+	s.mu.RLock()
+	paused := s.paused
+	s.mu.RUnlock()
+	if paused {
+		s.logger().Debug("breakout run paused, dropping tick", "runID", s.runID, "assetID", assetID)
+		return
+	}
+
+	// Snapshot state under the lock; Update() re-acquires the lock so we
+	// must release before calling it. We do NOT set s.lastPrice here —
+	// Update's ingestObservation sets it from the obs.Price.
+	s.mu.Lock()
+	openSig := s.openSignal
+	entryPrice := s.entryPrice
+	entryATR := s.entryATR
+	s.mu.Unlock()
+
 	obs := types.YieldObservation{
 		Time:   px.Time,
 		BondID: px.AssetID,
 		Price:  px.Price,
 	}
-	s.mu.Lock()
-	s.lastPrice = px.Price
-	openSig := s.openSignal
-	entryPrice := s.entryPrice
-	entryATR := s.entryATR
-	s.mu.Unlock()
 
 	decision, err := s.Update(obs)
 	if err != nil {
