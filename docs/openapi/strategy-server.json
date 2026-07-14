@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Strategy Service API",
-    "version": "1.5.0",
+    "version": "1.6.0",
     "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`."
   },
   "servers": [
@@ -751,12 +751,13 @@
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading"]
+            "enum": ["mean_reversion", "copytrading", "breakout"]
           },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
-              { "$ref": "#/components/schemas/CopyTradingConfig" }
+              { "$ref": "#/components/schemas/CopyTradingConfig" },
+              { "$ref": "#/components/schemas/BreakoutConfig" }
             ]
           },
           "start": { "type": "string", "format": "date-time" },
@@ -769,12 +770,13 @@
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading"]
+            "enum": ["mean_reversion", "copytrading", "breakout"]
           },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
-              { "$ref": "#/components/schemas/CopyTradingConfig" }
+              { "$ref": "#/components/schemas/CopyTradingConfig" },
+              { "$ref": "#/components/schemas/BreakoutConfig" }
             ]
           }
         },
@@ -810,6 +812,82 @@
           "tenor": {
             "type": "string",
             "description": "Benchmark Treasury tenor, e.g. 1M, 6M, 2Y, 5Y, 10Y, 30Y."
+          },
+          "initial_balance": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "Starting capital for backtests. Omitted for live runs — obtained from DORA positions."
+          },
+          "leverage": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "Leverage multiplier for live orders."
+          }
+        }
+      },
+      "BreakoutConfig": {
+        "type": "object",
+        "description": "Volatility-compression / price-breakout strategy. Enters when short-window price volatility drops below a threshold of long-window volatility, then a close breaks above (or below) a k·ATR trigger band.",
+        "properties": {
+          "short_vol_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 5,
+            "description": "Short-window price-volatility observation count."
+          },
+          "long_vol_window": {
+            "type": "integer",
+            "minimum": 3,
+            "default": 60,
+            "description": "Long-window price-volatility observation count. Must be greater than short_vol_window."
+          },
+          "compression_threshold": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 0.5,
+            "description": "ShortVol/LongVol ratio below which the strategy arms for a breakout."
+          },
+          "atr_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 14,
+            "description": "Rolling-mean window for ATR (mean absolute price diff)."
+          },
+          "breakout_atr_multiple": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1.5,
+            "description": "Number of ATR units above/below the most recent close that defines the breakout trigger band."
+          },
+          "confirmation_bars": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 2,
+            "description": "Number of consecutive closes beyond the trigger band required to fire."
+          },
+          "stop_loss_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 3.0,
+            "description": "Stop-loss distance in ATR units. Reserved for v2 (not yet honoured by the backtest)."
+          },
+          "min_long_vol_floor": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Minimum LongVol required to trade. Suppresses entries on a completely flat baseline."
+          },
+          "order_book_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "DORA order book UUID used to locate the traded asset and place orders."
+          },
+          "tenor": {
+            "type": "string",
+            "description": "Tenor label recorded alongside the run. Not used by the signal (breakout is price-only)."
           },
           "initial_balance": {
             "type": "number",

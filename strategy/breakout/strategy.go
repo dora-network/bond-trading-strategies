@@ -11,6 +11,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/config"
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
 	"github.com/dora-network/dora-client-go/doraclient"
@@ -110,6 +111,7 @@ type Strategy struct {
 	pricesHandler    *prices.Handler
 	marketAPIClient  strategy.MarketAPIClient
 	historicalStore  historicalPriceStore
+	backtestWriter   stats.BacktestTradeWriter
 
 	// Live-run state (set in Run, used by executeDecision / closePosition).
 	runID               uuid.UUID
@@ -162,6 +164,13 @@ func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 // from Backtest() without it.
 func WithHistoricalStore(store historicalPriceStore) func(*Strategy) {
 	return func(s *Strategy) { s.historicalStore = store }
+}
+
+// WithBacktestWriter injects the destination for per-trade rows the
+// backtest emits (one WriteTradeRecord/WriteClosedTrade call per row).
+// Pass nil to skip persistence.
+func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
+	return func(s *Strategy) { s.backtestWriter = w }
 }
 
 // logger returns the configured logger or the default if none was set.
@@ -370,7 +379,7 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.Ba
 	if err != nil {
 		return BacktestResult{}, fmt.Errorf("load historical observations: %w", err)
 	}
-	return NewBacktester(s, nil).Run(ctx, obs)
+	return NewBacktester(s, s.backtestWriter).Run(ctx, obs)
 }
 
 // Run starts the live breakout loop. It subscribes to prices, processes
