@@ -1023,6 +1023,18 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 		}
 		detail.Result = raw
 		evtType = notifications.EventBacktestCompleted
+	case breakout.BacktestResult:
+		detail.Status = "completed"
+		raw, err := newBreakoutBacktestResult(r)
+		if err != nil {
+			detail.Status = "failed"
+			detail.Error = err.Error()
+			evtType = notifications.EventBacktestFailed
+			evtErr = err.Error()
+			break
+		}
+		detail.Result = raw
+		evtType = notifications.EventBacktestCompleted
 	default:
 		detail.Status = "failed"
 		detail.Error = fmt.Sprintf("unknown backtest result type %T", result)
@@ -2897,6 +2909,25 @@ func newCopyTradingBacktestResult(result copytrading.BacktestResult) (json.RawMe
 	b, err := json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("marshal copytrading backtest result: %w", err)
+	}
+	return b, nil
+}
+
+func newBreakoutBacktestResult(result breakout.BacktestResult) (json.RawMessage, error) {
+	// Per-trade and per-closed-trade rows are persisted to
+	// strategy_backtest_trades and strategy_backtest_closed_trades by the
+	// backtest engine via stats.BacktestTradeWriter. The summary-result
+	// JSON only carries aggregate metrics.
+	out := BreakoutBacktestResult{
+		TotalPnL:    result.TotalPnL.String(),
+		WinCount:    result.WinCount,
+		LossCount:   result.LossCount,
+		MaxDrawdown: result.MaxDrawdown.String(),
+		SharpeRatio: result.SharpeRatio.String(),
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal breakout backtest result: %w", err)
 	}
 	return b, nil
 }
