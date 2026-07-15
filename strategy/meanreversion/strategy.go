@@ -775,10 +775,11 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 					Price:          px.Price,
 				}
 				// Track the most recent clean price for the configured
-				// asset.  Recorded on close decisions as the approximate
+				// asset. Recorded on close decisions as the approximate
 				// fill price (DORA fills at the market mid, which is
-				// approximately the last observed mid).
-				s.lastPrice = px.Price
+				// approximately the last observed mid). s.lastPrice is
+				// also updated inside Update() so a single tick update
+				// is enough — no separate per-tick write needed here.
 				// Read window readiness before Update so the guard and the
 				// z-score in decision are computed from the same window state.
 				// On the tick that makes the window full, decision.ZScore is
@@ -929,6 +930,13 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 // If the rolling window is not yet full (not enough history), the signal will
 // always be SignalHold.
 func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
+	// Update the last-observed price under the same lock that protects
+	// the rolling-window state, so closePosition (which reads
+	// s.lastPrice via a separate RLock) sees a consistent snapshot.
+	// The value is set before we touch the window so the next tick's
+	// close records this tick's price.
+	s.lastPrice = obs.Price
+
 	spread, err := obs.Spread()
 	if err != nil {
 		return Decision{}, err
