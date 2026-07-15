@@ -80,6 +80,18 @@ func (c *DoraClient) BaseAssetID(ctx context.Context, orderBookID string) (strin
 	return book.BaseAssetId, nil
 }
 
+// QuoteAssetID returns the quote asset ID for the given order book.
+func (c *DoraClient) QuoteAssetID(ctx context.Context, orderBookID string) (string, error) {
+	book, err := c.orderBook(ctx, orderBookID)
+	if err != nil {
+		return "", err
+	}
+	if book.QuoteAssetId == "" {
+		return "", fmt.Errorf("get order book %s: missing quote asset ID", orderBookID)
+	}
+	return book.QuoteAssetId, nil
+}
+
 // AssetPosition returns the (available, borrowed) position for the
 // given asset on the bot's DORA account. Resolves the user ID once
 // (cached for the lifetime of the client) and looks up the position.
@@ -154,6 +166,36 @@ func (c *DoraClient) AssetCollateralWeight(ctx context.Context, assetID string) 
 		return decimal.Zero, fmt.Errorf("parse collateral weight for asset %s: %w", assetID, err)
 	}
 	return cw, nil
+}
+
+// GetPortfolioV2 returns the bot's full v2 portfolio (positions across
+// all order books the bot trades) for use by copy-trading's mirrored-
+// trader selection. Returns (nil, nil) when DORA has nothing to report;
+// callers must handle the empty case.
+func (c *DoraClient) GetPortfolioV2(ctx context.Context) (*doraclient.AccountPortfolioV2, error) {
+	if c == nil || c.client == nil {
+		return nil, errors.New("DORA client is not configured")
+	}
+	if c.apiKey == "" {
+		return nil, errors.New("API_KEY is not configured")
+	}
+	authCtx := c.authCtx(ctx)
+	resp, _, err := c.client.DefaultAPI.GetLedgerAccountsSelfV2(authCtx).Execute()
+	if err != nil {
+		return nil, fmt.Errorf("get ledger accounts v2: %w", err)
+	}
+	if resp == nil {
+		return nil, nil
+	}
+	data, ok := resp.GetDataOk()
+	if !ok || data == nil {
+		return nil, nil
+	}
+	portfolio, ok := data.GetPortfolioOk()
+	if !ok || portfolio == nil {
+		return nil, nil
+	}
+	return portfolio, nil
 }
 
 // CreateMarketOrder submits a market order on the given order book and

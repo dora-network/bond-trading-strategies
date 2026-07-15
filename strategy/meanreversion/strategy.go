@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -95,7 +96,7 @@ type Strategy struct {
 	isRunning             bool
 	paused                bool
 	pricesHandler         *prices.Handler
-	marketAPIClient       marketAPIClient
+	marketAPIClient       strategy.MarketAPIClient
 	historyStore          historicalPriceStore
 	benchmarkClient       benchmarkYieldClient
 	pricesReqID           uuid.UUID
@@ -162,7 +163,7 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		cfg:              cfg,
 		window:           window.NewRollingWindow(cfg.LookbackWindow),
 		pricesHandler:    pricesHandler,
-		marketAPIClient:  newDoraClient(),
+		marketAPIClient:  strategy.NewDoraClientWithKey(os.Getenv("DORA_API_KEY")),
 		errs:             make([]error, 0),
 		collateralWeight: decimal.One,
 	}
@@ -183,7 +184,7 @@ func WithLogger(log *slog.Logger) func(*Strategy) {
 // Use this to inject a client that authenticates with a specific API key
 // (e.g. the user's own key decrypted from storage) instead of the default
 // client that reads DORA_API_KEY from the environment.
-func WithMarketAPIClient(client marketAPIClient) func(*Strategy) {
+func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 	return func(s *Strategy) {
 		s.marketAPIClient = client
 	}

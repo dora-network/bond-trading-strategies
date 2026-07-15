@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 )
 
@@ -118,3 +119,5 @@ func (fake *FakeHistoricalPriceStore) recordInvocation(key string, args []interf
 	}
 	fake.invocations[key] = append(fake.invocations[key], args)
 }
+
+var _ breakout.HistoricalPriceStore = new(FakeHistoricalPriceStore)

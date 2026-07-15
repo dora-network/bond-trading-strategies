@@ -11,7 +11,7 @@ import (
 	"github.com/govalues/decimal"
 )
 
-func SetLookupClient(s *Strategy, client marketAPIClient) {
+func SetLookupClient(s *Strategy, client strategyPkg.MarketAPIClient) {
 	s.marketAPIClient = client
 }
 
