@@ -32,6 +32,17 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
+// newBreakoutHistoricalStore wires a Postgres-backed
+// breakout.HistoricalPriceStore. Returns nil when pool is nil so a
+// missing DATABASE_URL leaves the backtest endpoint disabled rather
+// than crashing startup.
+func newBreakoutHistoricalStore(pool *pgxpool.Pool) breakout.HistoricalPriceStore {
+	if pool == nil {
+		return nil
+	}
+	return breakout.NewPostgresHistoricalStore(pool)
+}
+
 //nolint:funlen, mnd // main function with flag setup and orchestration
 func main() {
 	addr := flag.StringP("addr", "a", envOr("ADDR", ":8081"), "HTTP address to listen on")
@@ -207,6 +218,10 @@ func main() {
 		strategyhttp.WithTradesHistoryStore(copytrading.NewPGTradesHistoryStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithTradeStream(tradeStream),
+		// Wire the breakout backtest data source from candles_history.
+		// nil-safe: an empty pool (no DATABASE_URL) leaves the breakout
+		// Backtest disabled rather than crashing startup.
+		strategyhttp.WithHistoricalPriceStore(newBreakoutHistoricalStore(pool)),
 		strategyhttp.WithLogger(log),
 		strategyhttp.WithEncryptionKey(encryptionKey),
 		strategyhttp.WithNotifier(notifier),

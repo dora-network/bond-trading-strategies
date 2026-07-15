@@ -134,7 +134,7 @@ type Strategy struct {
 	decisionSeq      int64
 	pricesHandler    *prices.Handler
 	marketAPIClient  strategy.MarketAPIClient
-	historicalStore  historicalPriceStore
+	historicalStore  HistoricalPriceStore
 	backtestWriter   stats.BacktestTradeWriter
 	tradeStream      *streams.TradeStream
 
@@ -205,7 +205,7 @@ func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 // WithHistoricalStore injects the backtest's historical price source.
 // Required when Backtest() is called; the strategy will return an error
 // from Backtest() without it.
-func WithHistoricalStore(store historicalPriceStore) func(*Strategy) {
+func WithHistoricalStore(store HistoricalPriceStore) func(*Strategy) {
 	return func(s *Strategy) { s.historicalStore = store }
 }
 
