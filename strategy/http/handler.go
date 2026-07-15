@@ -2371,11 +2371,12 @@ func newBreakoutDefinition(
 				Default:     mustFloat64(defaults.BreakoutATRMultiple),
 			},
 			{
-				Name:        "confirmation_bars",
-				Type:        "integer",
-				Description: "Number of consecutive closes beyond the trigger band required to fire. Must be at least 1.",
-				Required:    false,
-				Default:     defaults.ConfirmationBars,
+				Name: "confirmation_bars",
+				Type: "integer",
+				Description: "Consecutive closes beyond the trigger band required to fire. " +
+					"Calibrated for a continuously trading bond market (typical 5-30; min 1).",
+				Required: false,
+				Default:  defaults.ConfirmationBars,
 			},
 			{
 				Name:        "stop_loss_atr",
