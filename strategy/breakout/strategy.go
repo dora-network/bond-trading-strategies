@@ -14,6 +14,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
+	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -63,6 +64,22 @@ type Config struct {
 	// not trade (avoids reacting to a completely flat baseline). 0 disables.
 	MinLongVolFloor decimal.Decimal
 
+	// RequireVolumeConfirmation toggles the OBV (On-Balance Volume)
+	// filter. When true, the strategy only emits BUY when the running
+	// OBV is positive (above OBVTrendThreshold) and only SELL when OBV
+	// is negative (below -OBVTrendThreshold). Disabled by default for
+	// backwards compat with v1. Sourced from the live trade stream
+	// (see WithTradeStream); the backtester does not compute OBV in
+	// v1 because the historical backtest lacks a trade stream.
+	RequireVolumeConfirmation bool
+
+	// OBVTrendThreshold is the absolute OBV threshold the breakout
+	// signal must clear when RequireVolumeConfirmation is enabled. The
+	// direction must match: BUY requires OBV > OBVTrendThreshold, SELL
+	// requires OBV < -OBVTrendThreshold. Default 0 means any non-zero
+	// OBV in the right direction is enough.
+	OBVTrendThreshold decimal.Decimal
+
 	// OrderBookID is the ID of the DORA order book to place orders on.
 	OrderBookID uuid.UUID
 
@@ -81,17 +98,19 @@ type Config struct {
 // small values for fast rolling-window fill.
 func DefaultConfig() Config {
 	return Config{
-		ShortVolWindow:       5,
-		LongVolWindow:        60,
-		CompressionThreshold: decimal.MustNew(5, 1), //nolint:mnd // 0.5
-		ATRWindow:            14,
-		BreakoutATRMultiple:  decimal.MustNew(15, 1), //nolint:mnd // 1.5
-		ConfirmationBars:     2,
-		StopLossATR:          decimal.MustNew(30, 1), //nolint:mnd // 3.0
-		TakeProfitATR:        decimal.Zero,           // disabled by default
-		MinLongVolFloor:      decimal.Zero,
-		InitialBalance:       decimal.One,
-		Leverage:             decimal.One,
+		ShortVolWindow:            5,
+		LongVolWindow:             60,
+		CompressionThreshold:      decimal.MustNew(5, 1), //nolint:mnd // 0.5
+		ATRWindow:                 14,
+		BreakoutATRMultiple:       decimal.MustNew(15, 1), //nolint:mnd // 1.5
+		ConfirmationBars:          2,
+		StopLossATR:               decimal.MustNew(30, 1), //nolint:mnd // 3.0
+		TakeProfitATR:             decimal.Zero,           // disabled by default
+		MinLongVolFloor:           decimal.Zero,
+		OBVTrendThreshold:         decimal.Zero, // disabled by default
+		RequireVolumeConfirmation: false,        // disabled by default
+		InitialBalance:            decimal.One,
+		Leverage:                  decimal.One,
 	}
 }
 
@@ -117,6 +136,7 @@ type Strategy struct {
 	marketAPIClient  strategy.MarketAPIClient
 	historicalStore  historicalPriceStore
 	backtestWriter   stats.BacktestTradeWriter
+	tradeStream      *streams.TradeStream
 
 	// Live-run state (set in Run, used by executeDecision / closePosition).
 	runID               uuid.UUID
@@ -136,7 +156,15 @@ type Strategy struct {
 	// updates (no Update / no entry / no SL/TP close) and writes a debug
 	// log. strategy.Resume clears it.
 	paused bool
-	errs   []error
+	// OBV accumulator (live run only; populated from the trade stream).
+	// obvMu serialises updates from the trade-stream goroutine against
+	// reads from Update's signal-gate path so they don't fight over
+	// the Strategy's main mu.
+	obvMu        sync.RWMutex
+	obvSum       decimal.Decimal // running OBV (signed by price direction)
+	obvPrevPrice decimal.Decimal // last seen price (for the next diff sign)
+	tradeSubID   uuid.UUID
+	errs         []error
 }
 
 // New creates a breakout Strategy with sensible defaults.
@@ -181,6 +209,14 @@ func WithHistoricalStore(store historicalPriceStore) func(*Strategy) {
 	return func(s *Strategy) { s.historicalStore = store }
 }
 
+// WithTradeStream injects the live trade stream. When set, the Run
+// loop subscribes to the configured order book and accumulates OBV
+// from the trade events. Required only when
+// RequireVolumeConfirmation is true; otherwise the stream is ignored.
+func WithTradeStream(ts *streams.TradeStream) func(*Strategy) {
+	return func(s *Strategy) { s.tradeStream = ts }
+}
+
 // WithBacktestWriter injects the destination for per-trade rows the
 // backtest emits (one WriteTradeRecord/WriteClosedTrade call per row).
 // Pass nil to skip persistence.
@@ -214,6 +250,38 @@ func (s *Strategy) IsPaused() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.paused
+}
+
+// OBV returns the current On-Balance Volume accumulator. Used by the
+// live-run signal gate and by tests; nil-safe (returns decimal.Zero
+// when no trades have been observed yet).
+func (s *Strategy) OBV() decimal.Decimal {
+	s.obvMu.RLock()
+	defer s.obvMu.RUnlock()
+	return s.obvSum
+}
+
+// applyTradeEvent integrates a single trade into the running OBV.
+// Direction sign = sign(price - prevPrice): up = +quantity, down =
+// -quantity, flat = 0. Called from the trade-stream reader in Run.
+func (s *Strategy) applyTradeEvent(ev streams.TradeEvent) {
+	s.obvMu.Lock()
+	defer s.obvMu.Unlock()
+	delta := decimal.Zero
+	if s.obvPrevPrice.IsZero() {
+		// First trade ever — full quantity counts.
+		delta = ev.Quantity
+	} else {
+		cmp := ev.Price.Cmp(s.obvPrevPrice)
+		switch {
+		case cmp > 0:
+			delta = ev.Quantity
+		case cmp < 0:
+			delta = ev.Quantity.Neg()
+		}
+	}
+	s.obvSum, _ = s.obvSum.Add(delta)
+	s.obvPrevPrice = ev.Price
 }
 
 // Update advances the strategy with one price observation and returns
@@ -298,7 +366,38 @@ func (s *Strategy) Update(o types.YieldObservation) (Decision, error) {
 	}
 
 	s.evaluateBreakout(&d, o.Price, prevPrice, atr)
+	s.applyVolumeFilter(&d)
 	return d, nil
+}
+
+// applyVolumeFilter suppresses the breakout signal when
+// RequireVolumeConfirmation is enabled and OBV doesn't confirm the
+// trade direction. OBV is the running on-balance volume accumulated
+// from the live trade stream; threshold is OBVTrendThreshold.
+func (s *Strategy) applyVolumeFilter(d *Decision) {
+	if !s.cfg.RequireVolumeConfirmation {
+		return
+	}
+	obv := s.OBV()
+	threshold := s.cfg.OBVTrendThreshold
+	switch d.signal {
+	case types.SignalBuy:
+		if obv.Cmp(threshold) <= 0 {
+			s.logger().Debug("OBV filter suppressed BUY", "obv", obv, "threshold", threshold)
+			d.signal = types.SignalHold
+			d.positionSize = decimal.Zero
+		}
+	case types.SignalSell:
+		// Need OBV < -threshold; i.e. -OBV > threshold.
+		negObv := obv.Neg()
+		if negObv.Cmp(threshold) <= 0 {
+			s.logger().Debug("OBV filter suppressed SELL", "obv", obv, "threshold", threshold)
+			d.signal = types.SignalHold
+			d.positionSize = decimal.Zero
+		}
+	default:
+		// d.signal is Hold; the filter doesn't touch Hold decisions.
+	}
 }
 
 // ingestObservation updates the rolling windows with a new observation:
@@ -440,15 +539,21 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 		s.isRunning = false
 		s.mu.Unlock()
 		s.unsubscribePrices()
+		s.unsubscribeTrades()
 	}()
 
-	return s.runLoop(runCtx, msgCh, pricesCh)
+	return s.runLoop(runCtx, msgCh, pricesCh, s.subscribeTrades())
 }
 
 // runLoop is the inner select that drives the live strategy. Extracted so
 // Run() stays small and the live loop itself can be tested in isolation
 // via dependency-injected channels.
-func (s *Strategy) runLoop(ctx context.Context, msgs <-chan strategy.Message, prices <-chan map[uuid.UUID]prices.AssetPrice) error {
+func (s *Strategy) runLoop(
+	ctx context.Context,
+	msgs <-chan strategy.Message,
+	prices <-chan map[uuid.UUID]prices.AssetPrice,
+	trades <-chan streams.TradeEvent,
+) error {
 	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
 	if err != nil {
 		return fmt.Errorf("lookup asset ID: %w", err)
@@ -480,6 +585,12 @@ func (s *Strategy) runLoop(ctx context.Context, msgs <-chan strategy.Message, pr
 				}
 				s.handleTick(ctx, px, assetID)
 			}
+		case ev, ok := <-trades:
+			if !ok {
+				// Trade channel closed; continue without it.
+				continue
+			}
+			s.applyTradeEvent(ev)
 		case <-ticker.C:
 			// keep the loop alive; reserved for future heartbeat logic.
 		}
@@ -583,6 +694,34 @@ func (s *Strategy) unsubscribePrices() {
 		s.logger().Error("unsubscribe from prices failed", "err", err)
 	}
 	s.pricesReqID = uuid.Nil
+}
+
+// subscribeTrades subscribes to the live trade stream for the configured
+// order book. Returns a nil channel if volume confirmation is disabled
+// or the trade stream wasn't injected — runLoop handles nil channels
+// by simply never selecting that case.
+func (s *Strategy) subscribeTrades() <-chan streams.TradeEvent {
+	if !s.cfg.RequireVolumeConfirmation || s.tradeStream == nil {
+		return nil
+	}
+	subID, ch := s.tradeStream.SubscribeOrderBook(s.cfg.OrderBookID)
+	s.obvMu.Lock()
+	s.tradeSubID = subID
+	s.obvMu.Unlock()
+	s.logger().Info("subscribed to trade stream", "runID", s.runID, "order_book", s.cfg.OrderBookID, "subID", subID)
+	return ch
+}
+
+// unsubscribeTrades closes the trade subscription if one was opened.
+func (s *Strategy) unsubscribeTrades() {
+	s.obvMu.Lock()
+	subID := s.tradeSubID
+	s.tradeSubID = uuid.Nil
+	s.obvMu.Unlock()
+	if subID == uuid.Nil || s.tradeStream == nil {
+		return
+	}
+	s.tradeStream.Unsubscribe(subID)
 }
 
 // lookupAssetID resolves the configured order-book ID to a DORA asset ID
