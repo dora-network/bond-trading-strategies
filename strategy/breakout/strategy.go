@@ -25,12 +25,18 @@ import (
 type Config struct {
 	config.Config
 
-	// ShortVolWindow is the number of observations used for the short-window
-	// price volatility. Typical values: 3-10.
+	// ShortVolWindow is the number of ticks used for the short-window
+	// price volatility. Calibrated for a continuously trading bond
+	// market where the price daemon emits many updates per second;
+	// typical values: 240 (a few minutes of ticks) to 1440 (about an
+	// hour of ticks). 5/60-style daily-bar values would collapse to
+	// seconds/minutes on a CLOB and yield a meaningless variance ratio.
 	ShortVolWindow int
 
-	// LongVolWindow is the number of observations used for the long-window
-	// price volatility baseline. Typical values: 30-90.
+	// LongVolWindow is the number of ticks used for the long-window
+	// price volatility baseline. Calibrated for a continuously trading
+	// bond market; typical values: 1440 (about an hour) to 10080
+	// (a full trading day). Must be greater than ShortVolWindow.
 	LongVolWindow int
 
 	// CompressionThreshold is the ShortVol/LongVol ratio below which the
@@ -98,8 +104,12 @@ type Config struct {
 // small values for fast rolling-window fill.
 func DefaultConfig() Config {
 	return Config{
-		ShortVolWindow:            5,
-		LongVolWindow:             60,
+		// Continuous-market defaults: ~5-20 min of ticks for the short
+		// window, ~1-2 hr of ticks for the long. The ShortVolWindow /
+		// LongVolWindow ratio is roughly 1:6, similar to the daily-bar
+		// 5:60 ratio but with far more data points under each.
+		ShortVolWindow:            240,
+		LongVolWindow:             1440,
 		CompressionThreshold:      decimal.MustNew(5, 1), //nolint:mnd // 0.5
 		ATRWindow:                 14,
 		BreakoutATRMultiple:       decimal.MustNew(15, 1), //nolint:mnd // 1.5
