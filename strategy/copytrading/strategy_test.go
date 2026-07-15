@@ -384,6 +384,18 @@ func (f *fakeMarketAPI) GetAssetPosition(_ context.Context, _ string) (decimal.D
 	return decimal.Zero, decimal.Zero, nil
 }
 
+func (f *fakeMarketAPI) BaseAssetID(_ context.Context, _ string) (string, error) {
+	return "asset-fake", nil
+}
+
+func (f *fakeMarketAPI) AssetPosition(_ context.Context, _ string) (decimal.Decimal, decimal.Decimal, error) {
+	return decimal.Zero, decimal.Zero, nil
+}
+
+func (f *fakeMarketAPI) AssetCollateralWeight(_ context.Context, _ string) (decimal.Decimal, error) {
+	return decimal.One, nil
+}
+
 func (f *fakeMarketAPI) GetPortfolioV2(_ context.Context) (*doraclient.AccountPortfolioV2, error) {
 	return f.portfolio, nil
 }

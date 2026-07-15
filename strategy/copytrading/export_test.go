@@ -16,6 +16,6 @@ func RunWithTrades(s *Strategy, ctx context.Context, msgs <-chan strategy.Messag
 }
 
 // SetMarketAPI injects a market API client for testing.
-func SetMarketAPI(s *Strategy, client marketAPIClient) {
+func SetMarketAPI(s *Strategy, client strategy.MarketAPIClient) {
 	s.marketAPI = client
 }

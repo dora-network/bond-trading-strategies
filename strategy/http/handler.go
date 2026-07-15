@@ -919,7 +919,7 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	info, _ := authctx.AuthInfoFromContext(r.Context())
 	if info != nil && info.APIKey != "" {
 		if withClient, ok := strat.(*meanreversion.Strategy); ok {
-			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))
+			withClientOpts := meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))
 			withClientOpts(withClient)
 		}
 		if withClient, ok := strat.(*breakout.Strategy); ok {
@@ -1526,9 +1526,9 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	if info != nil && info.APIKey != "" {
 		switch withClient := strat.(type) {
 		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))(withClient)
+			meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(info.APIKey))(withClient)
+			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		case *breakout.Strategy:
 			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		}
@@ -1872,9 +1872,9 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		}
 		switch withClient := strat.(type) {
 		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+			meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		case *breakout.Strategy:
 			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		}

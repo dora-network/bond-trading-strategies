@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/assert"
@@ -34,7 +35,7 @@ func TestDoraAPIClient_CreateMarketOrder_ErrorHandling(t *testing.T) {
 	defer os.Setenv("DORA_BASE_URL", originalBaseURL)
 	os.Setenv("DORA_BASE_URL", server.URL)
 
-	client := NewDoraClientWithKey("test-api-key")
+	client := strategy.NewDoraClientWithKey("test-api-key")
 	err := client.CreateMarketOrder(
 		context.Background(),
 		"test-orderbook",
