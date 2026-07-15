@@ -58,7 +58,12 @@ type Config struct {
 	BreakoutATRMultiple decimal.Decimal
 
 	// ConfirmationBars is the number of consecutive closes that must exceed
-	// the trigger level before a signal is emitted. Typical values: 1-3.
+	// the trigger level before a signal is emitted. Calibrated for a
+	// continuously trading bond market where the price feed ticks at
+	// 0.1-5 Hz per active name; 2 consecutive closes (= 0.4-20 s) would
+	// not filter a flash-spike. Typical values: 5-30 (a sustained move
+	// rather than a single-tick blip). The test fixtures use 1 to make
+	// deterministic single-jump triggers explicit.
 	ConfirmationBars int
 
 	// StopLossATR is the number of ATR units from entry at which an open
@@ -119,7 +124,7 @@ func DefaultConfig() Config {
 		// a continuously trading market.
 		ATRWindow:                 240,
 		BreakoutATRMultiple:       decimal.MustNew(15, 1), //nolint:mnd // 1.5
-		ConfirmationBars:          2,
+		ConfirmationBars:          5,
 		StopLossATR:               decimal.MustNew(30, 1), //nolint:mnd // 3.0
 		TakeProfitATR:             decimal.Zero,           // disabled by default
 		MinLongVolFloor:           decimal.Zero,
