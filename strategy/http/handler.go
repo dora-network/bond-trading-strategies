@@ -74,16 +74,17 @@ type Handler struct {
 	// the endpoint can be deployed without wiring a reader until the
 	// operator opts in. Distinct from decisionStore (the write-side
 	// DecisionRecorder) so the read path carries no write concerns.
-	decisionReader DecisionReader
-	tradeStream    *streams.TradeStream
-	notifier       notifications.Notifier
-	orderUpdates   orderUpdatesManager // nil disables the order-update feature
-	encryptionKey  []byte              // 32-byte AES-256 key for encrypting API keys at rest
-	mux            *http.ServeMux
-	authedMux      http.Handler
-	mu             sync.RWMutex
-	backtests      map[uuid.UUID]*BacktestDetail
-	runs           map[uuid.UUID]*RunDetail
+	decisionReader       DecisionReader
+	tradeStream          *streams.TradeStream
+	historicalPriceStore breakout.HistoricalPriceStore
+	notifier             notifications.Notifier
+	orderUpdates         orderUpdatesManager // nil disables the order-update feature
+	encryptionKey        []byte              // 32-byte AES-256 key for encrypting API keys at rest
+	mux                  *http.ServeMux
+	authedMux            http.Handler
+	mu                   sync.RWMutex
+	backtests            map[uuid.UUID]*BacktestDetail
+	runs                 map[uuid.UUID]*RunDetail
 	// runningStrategies maps a live run id to the strategy instance that
 	// was started for it, so the stop-loss observer can query the
 	// strategy's recorded trigger. Populated in createRun and
@@ -485,7 +486,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		h.log = slog.Default()
 	}
 	if h.strategies == nil {
-		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.log)
+		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.historicalPriceStore, h.log)
 	}
 
 	h.mux = http.NewServeMux()
@@ -577,6 +578,16 @@ func WithTradesHistoryStore(store *copytrading.PGTradesHistoryStore) func(*Handl
 func WithTradeStream(ts *streams.TradeStream) func(*Handler) {
 	return func(h *Handler) {
 		h.tradeStream = ts
+	}
+}
+
+// WithHistoricalPriceStore wires a breakout backtest data source so
+// Strategy.Backtest can read candles_history. May be nil; the
+// breakout strategy returns an error from Backtest when no store is
+// configured.
+func WithHistoricalPriceStore(s breakout.HistoricalPriceStore) func(*Handler) {
+	return func(h *Handler) {
+		h.historicalPriceStore = s
 	}
 }
 
@@ -2090,12 +2101,13 @@ func defaultStrategies(
 	pricesHandler *prices.Handler,
 	tradesHistoryStore *copytrading.PGTradesHistoryStore,
 	tradeStream *streams.TradeStream,
+	historicalPriceStore breakout.HistoricalPriceStore,
 	log *slog.Logger,
 ) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
-		newBreakoutDefinition(pricesHandler, tradeStream, log),
+		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2310,7 +2322,12 @@ type breakoutConfigPayload struct {
 }
 
 //nolint:funlen // strategy definition with 12 config fields
-func newBreakoutDefinition(pricesHandler *prices.Handler, tradeStream *streams.TradeStream, log *slog.Logger) StrategyDefinition {
+func newBreakoutDefinition(
+	pricesHandler *prices.Handler,
+	tradeStream *streams.TradeStream,
+	historicalStore breakout.HistoricalPriceStore,
+	log *slog.Logger,
+) StrategyDefinition {
 	defaults := breakout.DefaultConfig()
 	return StrategyDefinition{
 		Type:   breakout.StrategyType,
@@ -2445,6 +2462,12 @@ func newBreakoutDefinition(pricesHandler *prices.Handler, tradeStream *streams.T
 			// at runtime (cmd/strategy-server starts it in main.go).
 			if cfg.RequireVolumeConfirmation && tradeStream != nil {
 				opts = append(opts, breakout.WithTradeStream(tradeStream))
+			}
+			// Wire the historical price store so Strategy.Backtest can
+			// read candles_history. May be nil if no DB is configured;
+			// Backtest will then return an error.
+			if historicalStore != nil {
+				opts = append(opts, breakout.WithHistoricalStore(historicalStore))
 			}
 			return normalised, breakout.New(cfg, pricesHandler, opts...), nil
 		},
