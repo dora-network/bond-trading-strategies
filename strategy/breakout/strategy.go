@@ -44,9 +44,12 @@ type Config struct {
 	// Typical values: 0.3-0.6 (lower = stricter).
 	CompressionThreshold decimal.Decimal
 
-	// ATRWindow is the number of observations used for the rolling average
+	// ATRWindow is the number of ticks used for the rolling average
 	// true range (here: mean absolute price diff, since we only have close
-	// prices from YieldObservation). Typical values: 10-20.
+	// prices from YieldObservation). Calibrated for a continuously
+	// trading bond market; typical values: 240 (a few minutes of ticks)
+	// to 1440 (about an hour of ticks). 14-style daily-bar values would
+	// collapse to seconds/minutes on a CLOB and yield a noisy average.
 	ATRWindow int
 
 	// BreakoutATRMultiple is the number of ATR units above/below the most
@@ -108,10 +111,13 @@ func DefaultConfig() Config {
 		// window, ~1-2 hr of ticks for the long. The ShortVolWindow /
 		// LongVolWindow ratio is roughly 1:6, similar to the daily-bar
 		// 5:60 ratio but with far more data points under each.
-		ShortVolWindow:            240,
-		LongVolWindow:             1440,
-		CompressionThreshold:      decimal.MustNew(5, 1), //nolint:mnd // 0.5
-		ATRWindow:                 14,
+		ShortVolWindow:       240,
+		LongVolWindow:        1440,
+		CompressionThreshold: decimal.MustNew(5, 1), //nolint:mnd // 0.5
+		// ATR window matches ShortVolWindow at 240 ticks (~5-20 min of
+		// CLOB activity) so the average is statistically meaningful on
+		// a continuously trading market.
+		ATRWindow:                 240,
 		BreakoutATRMultiple:       decimal.MustNew(15, 1), //nolint:mnd // 1.5
 		ConfirmationBars:          2,
 		StopLossATR:               decimal.MustNew(30, 1), //nolint:mnd // 3.0
