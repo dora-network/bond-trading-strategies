@@ -23,12 +23,10 @@ import (
 // (previously a placeholder when sourced from candles_history) so any
 // downstream consumer reading observation.YTM gets a real value.
 //
-// The "orderBookID" parameter on the HistoricalPriceStore interface is
-// treated as the asset id at the SQL layer — breakout's config
-// exposes only OrderBookID, and in practice (per the integration test
-// fixture) the same UUID is used for both. A future production wire-up
-// may want to look up asset_id from order_book_id via the DORA REST
-// API before querying price_history; out of scope for v1.
+// The parameter is assetID (not orderBookID). The caller
+// (Strategy.Backtest) is responsible for resolving OrderBookID to
+// assetID via the shared LookupAssetID helper before invoking
+// Observations.
 type PostgresHistoricalStore struct {
 	pool *pgxpool.Pool
 }
@@ -45,7 +43,7 @@ func NewPostgresHistoricalStore(pool *pgxpool.Pool) *PostgresHistoricalStore {
 // ascending. Used by Strategy.Backtest to feed the Backtester.
 func (s *PostgresHistoricalStore) Observations(
 	ctx context.Context,
-	orderBookID string,
+	assetID string,
 	start, end time.Time,
 ) ([]types.YieldObservation, error) {
 	const q = `
@@ -56,15 +54,15 @@ func (s *PostgresHistoricalStore) Observations(
 		  AND timestamp <= $3
 		ORDER BY timestamp ASC
 	`
-	rows, err := s.pool.Query(ctx, q, orderBookID, start.UTC(), end.UTC())
+	rows, err := s.pool.Query(ctx, q, assetID, start.UTC(), end.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("query price_history: %w", err)
 	}
 	defer rows.Close()
 
-	obID, err := uuid.Parse(orderBookID)
+	obID, err := uuid.Parse(assetID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid asset id %q: %w", orderBookID, err)
+		return nil, fmt.Errorf("invalid asset id %q: %w", assetID, err)
 	}
 
 	var obs []types.YieldObservation

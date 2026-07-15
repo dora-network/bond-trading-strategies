@@ -286,20 +286,7 @@ func (s *Strategy) unsubscribePrices() {
 }
 
 func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
-	if s.marketAPIClient == nil {
-		return "", errors.New("DORA order book lookup client is not configured")
-	}
-	if orderBookID == uuid.Nil {
-		return "", errors.New("order book ID is required")
-	}
-	assetID, err := s.marketAPIClient.BaseAssetID(context.Background(), orderBookID.String())
-	if err != nil {
-		return "", err
-	}
-	if assetID == "" {
-		return "", fmt.Errorf("order book %s returned an empty base asset ID", orderBookID)
-	}
-	return assetID, nil
+	return strategy.LookupAssetID(context.Background(), s.marketAPIClient, orderBookID)
 }
 
 func (s *Strategy) currentPosition(ctx context.Context, assetID string) (decimal.Decimal, error) {

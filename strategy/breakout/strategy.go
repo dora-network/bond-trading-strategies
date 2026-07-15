@@ -521,7 +521,11 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.Ba
 	if s.historicalStore == nil {
 		return BacktestResult{}, errors.New("breakout: historical price store is not configured")
 	}
-	obs, err := s.historicalStore.Observations(ctx, s.cfg.OrderBookID.String(), start, end)
+	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	if err != nil {
+		return BacktestResult{}, fmt.Errorf("lookup asset ID: %w", err)
+	}
+	obs, err := s.historicalStore.Observations(ctx, assetID, start, end)
 	if err != nil {
 		return BacktestResult{}, fmt.Errorf("load historical observations: %w", err)
 	}
@@ -746,22 +750,9 @@ func (s *Strategy) unsubscribeTrades() {
 }
 
 // lookupAssetID resolves the configured order-book ID to a DORA asset ID
-// via the market API client.
+// via the shared strategy.LookupAssetID helper.
 func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
-	if s.marketAPIClient == nil {
-		return "", errors.New("breakout: market API client is not configured")
-	}
-	if orderBookID == uuid.Nil {
-		return "", errors.New("order book ID is required")
-	}
-	assetID, err := s.marketAPIClient.BaseAssetID(context.Background(), orderBookID.String())
-	if err != nil {
-		return "", err
-	}
-	if assetID == "" {
-		return "", fmt.Errorf("order book %s returned an empty base asset ID", orderBookID)
-	}
-	return assetID, nil
+	return strategy.LookupAssetID(context.Background(), s.marketAPIClient, orderBookID)
 }
 
 // executeDecision places a market order in the decision's signal direction.
