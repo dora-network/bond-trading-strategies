@@ -15,6 +15,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	strategyfakes "github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/streams"
 )
 
 // runDrive seeds the strategy's per-tick state so a BUY would normally
@@ -74,10 +75,13 @@ func runDrive(t *testing.T) (*Strategy, chan strategy.Message, chan map[uuid.UUI
 
 	msgs := make(chan strategy.Message, 4)
 	pricesCh := make(chan map[uuid.UUID]prices.AssetPrice, 4)
+	// trades is nil; runLoop treats a nil trade channel as a no-op so
+	// the pause/resume tests don't need a live trade stream.
+	var trades chan streams.TradeEvent
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		_ = s.runLoop(ctx, msgs, pricesCh)
+		_ = s.runLoop(ctx, msgs, pricesCh, trades)
 	}()
 
 	cleanup := func() {
@@ -121,12 +125,6 @@ func awaitOpen(t *testing.T, s *Strategy, want types.Signal) {
 	s.mu.RLock()
 	got := s.openSignal
 	s.mu.RUnlock()
-	// Print diagnostics on failure to help debug.
-	s.mu.RLock()
-	paused := s.paused
-	lastPrice := s.lastPrice
-	s.mu.RUnlock()
-	t.Logf("awaitOpen timed out: want=%v got=%v paused=%v lastPrice=%v", want, got, paused, lastPrice)
 	t.Fatalf("openSignal: want %v, got %v after timeout", want, got)
 }
 

@@ -72,8 +72,17 @@ func nextDelay(d time.Duration) time.Duration {
 	return next + time.Duration(jitterN)
 }
 
+type subKind uint8
+
+const (
+	subKindTrader subKind = iota
+	subKindOrderBook
+)
+
 type subscriber struct {
-	followedTrader uuid.UUID
+	kind           subKind
+	followedTrader uuid.UUID // populated when kind == subKindTrader
+	orderBookID    uuid.UUID // populated when kind == subKindOrderBook
 	ch             chan TradeEvent
 }
 
@@ -334,21 +343,31 @@ func (ts *TradeStream) routeTrade(data []byte, orderBookID uuid.UUID) {
 		}
 
 		ts.mu.Lock()
-		matched := false
+		delivered := 0
 		for _, sub := range ts.subscribers {
-			if sub.followedTrader == traderID {
-				matched = true
-				select {
-				case sub.ch <- event:
-				default:
-					slog.Warn("subscriber channel full, dropping trade", "subscriber", sub.followedTrader)
+			switch sub.kind {
+			case subKindTrader:
+				if sub.followedTrader != traderID {
+					continue
 				}
+			case subKindOrderBook:
+				if sub.orderBookID != orderBookID {
+					continue
+				}
+			default:
+				continue
+			}
+			select {
+			case sub.ch <- event:
+				delivered++
+			default:
+				slog.Warn("subscriber channel full, dropping trade", "subscriber_kind", sub.kind, "order_book", orderBookID)
 			}
 		}
 		ts.mu.Unlock()
 
-		if matched {
-			slog.Info("routed trade to subscriber", "trader", traderID, "order_book", orderBookID, "side", side)
+		if delivered > 0 {
+			slog.Info("routed trade to subscriber", "trader", traderID, "order_book", orderBookID, "side", side, "delivered", delivered)
 		} else {
 			slog.Debug("no subscriber for trade", "trader", traderID, "order_book", orderBookID)
 		}
@@ -363,6 +382,7 @@ func (ts *TradeStream) Subscribe(followedTrader uuid.UUID) (uuid.UUID, <-chan Tr
 
 	subscriberID := uuid.New()
 	s := &subscriber{
+		kind:           subKindTrader,
 		followedTrader: followedTrader,
 		ch:             make(chan TradeEvent, 100), //nolint:mnd
 	}
@@ -370,6 +390,29 @@ func (ts *TradeStream) Subscribe(followedTrader uuid.UUID) (uuid.UUID, <-chan Tr
 	slog.Info("trade stream subscriber added",
 		"subscriber_id", subscriberID,
 		"followed_trader", followedTrader,
+		"total_subscribers", len(ts.subscribers),
+	)
+	return subscriberID, s.ch
+}
+
+// SubscribeOrderBook registers a subscriber that receives every trade on
+// the given order book, regardless of trader. Useful for strategies that
+// need the full tape (e.g. breakout's volume-confirmation indicator)
+// rather than a single trader's flow.
+func (ts *TradeStream) SubscribeOrderBook(orderBookID uuid.UUID) (uuid.UUID, <-chan TradeEvent) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+
+	subscriberID := uuid.New()
+	s := &subscriber{
+		kind:        subKindOrderBook,
+		orderBookID: orderBookID,
+		ch:          make(chan TradeEvent, 100), //nolint:mnd
+	}
+	ts.subscribers[subscriberID] = s
+	slog.Info("trade stream order-book subscriber added",
+		"subscriber_id", subscriberID,
+		"order_book", orderBookID,
 		"total_subscribers", len(ts.subscribers),
 	)
 	return subscriberID, s.ch

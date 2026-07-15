@@ -80,6 +80,79 @@ func TestTradeStream_SubscribeNotMatched(t *testing.T) {
 	}
 }
 
+// TestTradeStream_SubscribeOrderBookRoutesByBook verifies that
+// SubscribeOrderBook delivers every trade on the order book regardless
+// of trader, and that two different books' subs don't cross-contaminate.
+func TestTradeStream_SubscribeOrderBookRoutesByBook(t *testing.T) {
+	ts := NewTradeStream()
+
+	bookA := uuid.New()
+	bookB := uuid.New()
+
+	subA, chA := ts.SubscribeOrderBook(bookA)
+	subB, chB := ts.SubscribeOrderBook(bookB)
+	defer func() {
+		ts.Unsubscribe(subA)
+		ts.Unsubscribe(subB)
+	}()
+
+	// Trade on bookA: chA should fire, chB should not.
+	bookATrade := map[string]any{
+		"user_id":        uuid.New().String(),
+		"asset_0":        uuid.New().String(),
+		"transaction_id": uuid.New().String(),
+		"side":           "buy",
+		"price":          "100.5",
+		"quantity_0":     "10",
+	}
+	entryA := map[string]any{
+		"Val":  bookATrade,
+		"Time": time.Now().UTC().Format(time.RFC3339),
+	}
+	dataA, _ := json.Marshal(entryA)
+	ts.routeTrade(dataA, bookA)
+
+	select {
+	case event := <-chA:
+		require.Equal(t, bookA, event.OrderBookID)
+	case <-time.After(time.Second):
+		t.Fatal("chA: expected event for book A")
+	}
+	select {
+	case <-chB:
+		t.Fatal("chB: should not receive event for book A")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Trade on bookB: chB should fire, chA should not.
+	bookBTrade := map[string]any{
+		"user_id":        uuid.New().String(),
+		"asset_0":        uuid.New().String(),
+		"transaction_id": uuid.New().String(),
+		"side":           "sell",
+		"price":          "200.0",
+		"quantity_0":     "5",
+	}
+	entryB := map[string]any{
+		"Val":  bookBTrade,
+		"Time": time.Now().UTC().Format(time.RFC3339),
+	}
+	dataB, _ := json.Marshal(entryB)
+	ts.routeTrade(dataB, bookB)
+
+	select {
+	case event := <-chB:
+		require.Equal(t, bookB, event.OrderBookID)
+	case <-time.After(time.Second):
+		t.Fatal("chB: expected event for book B")
+	}
+	select {
+	case <-chA:
+		t.Fatal("chA: should not receive event for book B")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestTradeStream_MultipleSubscribers(t *testing.T) {
 	ts := NewTradeStream()
 

@@ -2095,7 +2095,7 @@ func defaultStrategies(
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
-		newBreakoutDefinition(pricesHandler, log),
+		newBreakoutDefinition(pricesHandler, tradeStream, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2292,23 +2292,25 @@ type meanReversionConfigPayload struct {
 }
 
 type breakoutConfigPayload struct {
-	ShortVolWindow       int      `json:"short_vol_window"`
-	LongVolWindow        int      `json:"long_vol_window"`
-	CompressionThreshold float64  `json:"compression_threshold"`
-	ATRWindow            int      `json:"atr_window"`
-	BreakoutATRMultiple  float64  `json:"breakout_atr_multiple"`
-	ConfirmationBars     int      `json:"confirmation_bars"`
-	StopLossATR          float64  `json:"stop_loss_atr"`
-	TakeProfitATR        float64  `json:"take_profit_atr"`
-	MinLongVolFloor      float64  `json:"min_long_vol_floor"`
-	OrderBookID          string   `json:"order_book_id,omitempty"`
-	Tenor                string   `json:"tenor,omitempty"`
-	InitialBalance       *float64 `json:"initial_balance,omitempty"`
-	Leverage             *float64 `json:"leverage,omitempty"`
+	ShortVolWindow            int      `json:"short_vol_window"`
+	LongVolWindow             int      `json:"long_vol_window"`
+	CompressionThreshold      float64  `json:"compression_threshold"`
+	ATRWindow                 int      `json:"atr_window"`
+	BreakoutATRMultiple       float64  `json:"breakout_atr_multiple"`
+	ConfirmationBars          int      `json:"confirmation_bars"`
+	StopLossATR               float64  `json:"stop_loss_atr"`
+	TakeProfitATR             float64  `json:"take_profit_atr"`
+	MinLongVolFloor           float64  `json:"min_long_vol_floor"`
+	RequireVolumeConfirmation bool     `json:"require_volume_confirmation"`
+	OBVTrendThreshold         float64  `json:"obv_trend_threshold"`
+	OrderBookID               string   `json:"order_book_id,omitempty"`
+	Tenor                     string   `json:"tenor,omitempty"`
+	InitialBalance            *float64 `json:"initial_balance,omitempty"`
+	Leverage                  *float64 `json:"leverage,omitempty"`
 }
 
 //nolint:funlen // strategy definition with 12 config fields
-func newBreakoutDefinition(pricesHandler *prices.Handler, log *slog.Logger) StrategyDefinition {
+func newBreakoutDefinition(pricesHandler *prices.Handler, tradeStream *streams.TradeStream, log *slog.Logger) StrategyDefinition {
 	defaults := breakout.DefaultConfig()
 	return StrategyDefinition{
 		Type:   breakout.StrategyType,
@@ -2380,6 +2382,20 @@ func newBreakoutDefinition(pricesHandler *prices.Handler, log *slog.Logger) Stra
 				Default:     mustFloat64(defaults.MinLongVolFloor),
 			},
 			{
+				Name:        "require_volume_confirmation",
+				Type:        "boolean",
+				Description: "If true, BUY needs OBV > obv_trend_threshold; SELL needs OBV < -obv_trend_threshold. Default false for v1 compat.",
+				Required:    false,
+				Default:     defaults.RequireVolumeConfirmation,
+			},
+			{
+				Name:        "obv_trend_threshold",
+				Type:        "number",
+				Description: "OBV threshold when require_volume_confirmation is on. BUY > this, SELL < -this. Default 0 means any non-zero OBV works.",
+				Required:    false,
+				Default:     mustFloat64(defaults.OBVTrendThreshold),
+			},
+			{
 				Name:        "order_book_id",
 				Type:        "string(uuid)",
 				Description: "Order book UUID used to locate the traded asset and place orders.",
@@ -2423,6 +2439,12 @@ func newBreakoutDefinition(pricesHandler *prices.Handler, log *slog.Logger) Stra
 			}
 			if tradeWriter != nil {
 				opts = append(opts, breakout.WithBacktestWriter(tradeWriter))
+			}
+			// Wire the live trade stream when volume confirmation is
+			// enabled; ignored otherwise. tradeStream is always non-nil
+			// at runtime (cmd/strategy-server starts it in main.go).
+			if cfg.RequireVolumeConfirmation && tradeStream != nil {
+				opts = append(opts, breakout.WithTradeStream(tradeStream))
 			}
 			return normalised, breakout.New(cfg, pricesHandler, opts...), nil
 		},
@@ -2479,6 +2501,13 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	if payload.MinLongVolFloor == 0 {
 		payload.MinLongVolFloor = mustFloat64(defaults.MinLongVolFloor)
 	}
+	// payload.RequireVolumeConfirmation is a bool — no zero-default needed.
+	if payload.OBVTrendThreshold == 0 {
+		payload.OBVTrendThreshold = mustFloat64(defaults.OBVTrendThreshold)
+	}
+	if payload.OBVTrendThreshold < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.obv_trend_threshold must be non-negative")
+	}
 	if payload.CompressionThreshold <= 0 || payload.CompressionThreshold > 1 {
 		return breakout.Config{}, nil, fmt.Errorf("config.compression_threshold must be in (0, 1]")
 	}
@@ -2510,6 +2539,10 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	takeProfit, err := decimal.NewFromFloat64(payload.TakeProfitATR)
 	if err != nil {
 		return breakout.Config{}, nil, fmt.Errorf("config.take_profit_atr: %w", err)
+	}
+	obvThreshold, err := decimal.NewFromFloat64(payload.OBVTrendThreshold)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.obv_trend_threshold: %w", err)
 	}
 	minFloor, err := decimal.NewFromFloat64(payload.MinLongVolFloor)
 	if err != nil {
@@ -2560,19 +2593,21 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	}
 
 	return breakout.Config{
-		ShortVolWindow:       payload.ShortVolWindow,
-		LongVolWindow:        payload.LongVolWindow,
-		CompressionThreshold: compression,
-		ATRWindow:            payload.ATRWindow,
-		BreakoutATRMultiple:  breakoutATR,
-		ConfirmationBars:     payload.ConfirmationBars,
-		StopLossATR:          stopLoss,
-		TakeProfitATR:        takeProfit,
-		MinLongVolFloor:      minFloor,
-		OrderBookID:          orderBookID,
-		Tenor:                payload.Tenor,
-		InitialBalance:       amount,
-		Leverage:             leverage,
+		ShortVolWindow:            payload.ShortVolWindow,
+		LongVolWindow:             payload.LongVolWindow,
+		CompressionThreshold:      compression,
+		ATRWindow:                 payload.ATRWindow,
+		BreakoutATRMultiple:       breakoutATR,
+		ConfirmationBars:          payload.ConfirmationBars,
+		StopLossATR:               stopLoss,
+		TakeProfitATR:             takeProfit,
+		MinLongVolFloor:           minFloor,
+		RequireVolumeConfirmation: payload.RequireVolumeConfirmation,
+		OBVTrendThreshold:         obvThreshold,
+		OrderBookID:               orderBookID,
+		Tenor:                     payload.Tenor,
+		InitialBalance:            amount,
+		Leverage:                  leverage,
 	}, normalised, nil
 }
 
