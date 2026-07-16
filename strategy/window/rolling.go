@@ -1,6 +1,8 @@
 package window
 
-import "github.com/govalues/decimal"
+import (
+	"github.com/govalues/decimal"
+)
 
 // minWindowSize is the minimum number of values required for sample
 // variance to be defined (n-1 divisor).
@@ -18,6 +20,13 @@ type Rolling struct {
 	count int // number of elements currently in the buffer
 	mean  decimal.Decimal
 	m2    decimal.Decimal // sum of squared deviations from the mean (Welford)
+	// sum is the exact running total of all values currently in the
+	// window. Maintained incrementally (add on insert, subtract on
+	// evict) so Sum() returns an exact value rather than
+	// Mean() * count, which suffers from Welford rounding error.
+	// Critical for correctness of the OBV filter, which checks
+	// obv > 0 / obv < 0 with threshold = 0.
+	sum decimal.Decimal
 }
 
 // NewRollingWindow creates an empty window with the given lookback size.
@@ -32,8 +41,10 @@ func NewRollingWindow(size int) *Rolling {
 	}
 }
 
-// Add inserts a new value, evicting the oldest value once the buffer is full.
-// It updates the rolling mean and Welford M2 incrementally.
+// Add inserts a new value, evicting the oldest value once the buffer
+// is full. It updates the rolling mean and Welford M2 incrementally,
+// and maintains an exact running sum for callers (e.g. the OBV
+// filter) that need Sum() without Welford rounding error.
 func (w *Rolling) Add(value decimal.Decimal) error {
 	if w.count < w.size {
 		// Buffer not yet full — straightforward online update.
@@ -65,6 +76,7 @@ func (w *Rolling) Add(value decimal.Decimal) error {
 		}
 		w.buf[w.head] = value
 		w.head = (w.head + 1) % w.size
+		w.sum, _ = w.sum.Add(value)
 		return nil
 	}
 
@@ -114,11 +126,14 @@ func (w *Rolling) Add(value decimal.Decimal) error {
 
 	w.buf[w.head] = value
 	w.head = (w.head + 1) % w.size
+	// Subtract the evicted value, add the new one.
+	w.sum, _ = w.sum.Add(value)
+	w.sum, _ = w.sum.Sub(oldest)
 	return nil
 }
 
-// Ready reports whether the window contains enough data (i.e. is full) to
-// produce statistically meaningful signals.
+// Ready reports whether the window contains enough data (i.e. is
+// full) to produce statistically meaningful signals.
 func (w *Rolling) Ready() bool {
 	return w.count == w.size
 }
@@ -127,6 +142,14 @@ func (w *Rolling) Ready() bool {
 // Returns 0 if the window is empty.
 func (w *Rolling) Mean() decimal.Decimal {
 	return w.mean
+}
+
+// Sum returns the exact running total of all values currently in the
+// window. Unlike Mean() * count (which suffers from Welford
+// rounding error), this is exact because sum is maintained
+// incrementally. Returns 0 if the window is empty.
+func (w *Rolling) Sum() decimal.Decimal {
+	return w.sum
 }
 
 // Variance returns the sample variance (divides by n−1).

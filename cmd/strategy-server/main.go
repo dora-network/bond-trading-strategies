@@ -43,6 +43,17 @@ func newBreakoutHistoricalStore(pool *pgxpool.Pool) breakout.HistoricalPriceStor
 	return breakout.NewPostgresHistoricalStore(pool)
 }
 
+// newBreakoutTradeHistoryStore wires a Postgres-backed
+// breakout.TradeHistoryStore. Returns nil when pool is nil so a
+// missing DATABASE_URL leaves the OBV backtest feature disabled
+// rather than crashing startup.
+func newBreakoutTradeHistoryStore(pool *pgxpool.Pool) breakout.TradeHistoryStore {
+	if pool == nil {
+		return nil
+	}
+	return breakout.NewPGTradeHistoryStore(pool)
+}
+
 //nolint:funlen, mnd // main function with flag setup and orchestration
 func main() {
 	addr := flag.StringP("addr", "a", envOr("ADDR", ":8081"), "HTTP address to listen on")
@@ -222,6 +233,7 @@ func main() {
 		// nil-safe: an empty pool (no DATABASE_URL) leaves the breakout
 		// Backtest disabled rather than crashing startup.
 		strategyhttp.WithHistoricalPriceStore(newBreakoutHistoricalStore(pool)),
+		strategyhttp.WithTradeHistoryStore(newBreakoutTradeHistoryStore(pool)),
 		strategyhttp.WithLogger(log),
 		strategyhttp.WithEncryptionKey(encryptionKey),
 		strategyhttp.WithNotifier(notifier),

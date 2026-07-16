@@ -81,18 +81,29 @@ type Config struct {
 	// RequireVolumeConfirmation toggles the OBV (On-Balance Volume)
 	// filter. When true, the strategy only emits BUY when the running
 	// OBV is positive (above OBVTrendThreshold) and only SELL when OBV
-	// is negative (below -OBVTrendThreshold). Disabled by default for
-	// backwards compat with v1. Sourced from the live trade stream
-	// (see WithTradeStream); the backtester does not compute OBV in
-	// v1 because the historical backtest lacks a trade stream.
-	RequireVolumeConfirmation bool
+	// is negative (below -OBVTrendThreshold). Disabled by default.
+	// Sourced from the live trade stream (see WithTradeStream) for live
+	// runs, or from the historical trade store (see
+	// WithTradeHistoryStore) for backtests.
 
 	// OBVTrendThreshold is the absolute OBV threshold the breakout
-	// signal must clear when RequireVolumeConfirmation is enabled. The
+	// signal must clear when OBVWindow &gt; 0. The
 	// direction must match: BUY requires OBV > OBVTrendThreshold, SELL
 	// requires OBV < -OBVTrendThreshold. Default 0 means any non-zero
 	// OBV in the right direction is enough.
 	OBVTrendThreshold decimal.Decimal
+
+	// OBVWindow is the number of recent trades to include in the
+	// windowed On-Balance Volume used by the volume confirmation
+	// filter. OBVWindow = 0 disables the filter ("do not need to
+	// verify volume"); OBVWindow > 0 verifies with the windowed OBV
+	// (sum of signed quantities in the last OBVWindow trades).
+	// Cumulative OBV (the full trade history) is not supported
+	// because it reflects long-term positioning rather than recent
+	// volume shifts, which gave misleading signals in testing.
+	// Recommended: match ShortVolWindow so the volume check uses
+	// the same recent-trades scope as the volatility check.
+	OBVWindow int
 
 	// OrderBookID is the ID of the DORA order book to place orders on.
 	OrderBookID uuid.UUID
@@ -118,20 +129,19 @@ func DefaultConfig() Config {
 		// 5:60 ratio but with far more data points under each.
 		ShortVolWindow:       240,
 		LongVolWindow:        1440,
-		CompressionThreshold: decimal.MustNew(5, 1), //nolint:mnd // 0.5
+		CompressionThreshold: decimal.MustNew(3, 1), //nolint:mnd // 0.3
 		// ATR window matches ShortVolWindow at 240 ticks (~5-20 min of
 		// CLOB activity) so the average is statistically meaningful on
 		// a continuously trading market.
-		ATRWindow:                 240,
-		BreakoutATRMultiple:       decimal.MustNew(15, 1), //nolint:mnd // 1.5
-		ConfirmationBars:          5,
-		StopLossATR:               decimal.MustNew(30, 1), //nolint:mnd // 3.0
-		TakeProfitATR:             decimal.Zero,           // disabled by default
-		MinLongVolFloor:           decimal.Zero,
-		OBVTrendThreshold:         decimal.Zero, // disabled by default
-		RequireVolumeConfirmation: false,        // disabled by default
-		InitialBalance:            decimal.One,
-		Leverage:                  decimal.One,
+		ATRWindow:           240,
+		BreakoutATRMultiple: decimal.MustNew(15, 1), //nolint:mnd // 1.5
+		ConfirmationBars:    5,
+		StopLossATR:         decimal.MustNew(20, 0), //nolint:mnd // 20x — wider stop for higher-volatility regimes
+		TakeProfitATR:       decimal.Zero,           // disabled by default
+		MinLongVolFloor:     decimal.Zero,
+		OBVTrendThreshold:   decimal.Zero, // disabled by default
+		InitialBalance:      decimal.One,
+		Leverage:            decimal.One,
 	}
 }
 
@@ -159,6 +169,7 @@ type Strategy struct {
 	historicalStore       HistoricalPriceStore
 	backtestWriter        stats.BacktestTradeWriter
 	tradeStream           *streams.TradeStream
+	tradeHistoryStore     TradeHistoryStore
 
 	// Live-run state (set in Run, used by executeDecision / closePosition).
 	runID               uuid.UUID
@@ -182,9 +193,16 @@ type Strategy struct {
 	// obvMu serialises updates from the trade-stream goroutine against
 	// reads from Update's signal-gate path so they don't fight over
 	// the Strategy's main mu.
+	//
+	// obvSum is the running cumulative OBV (used when OBVWindow == 0).
+	// obvWindow is a rolling window of signed (BUY=+, SELL=-)
+	// quantities for windowed OBV (used when OBVWindow > 0). The
+	// sum of obvWindow gives the running windowed OBV. Reuses the
+	// window.Rolling type already used by the volatility windows.
 	obvMu        sync.RWMutex
-	obvSum       decimal.Decimal // running OBV (signed by price direction)
-	obvPrevPrice decimal.Decimal // last seen price (for the next diff sign)
+	obvSum       decimal.Decimal // running cumulative OBV
+	obvPrevPrice decimal.Decimal // last seen price (cumulative fallback only)
+	obvWindow    *window.Rolling // rolling window of signed quantities
 	tradeSubID   uuid.UUID
 	errs         []error
 }
@@ -200,6 +218,12 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		longVolWin:    window.NewRollingWindow(cfg.LongVolWindow),
 		atrWin:        window.NewRollingWindow(cfg.ATRWindow),
 		pricesHandler: pricesHandler,
+	}
+	// Initialize the OBV ring buffer when windowed mode is requested.
+	// A nil obvWindow means cumulative OBV (price-comparison). A
+	// non-nil obvWindow means windowed OBV (side-based).
+	if cfg.OBVWindow > 0 {
+		s.obvWindow = window.NewRollingWindow(cfg.OBVWindow)
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -246,6 +270,16 @@ func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
 	return func(s *Strategy) { s.backtestWriter = w }
 }
 
+// WithTradeHistoryStore injects the historical trade source used by the
+// backtester to accumulate OBV for the RequireVolumeConfirmation filter.
+// The backtester loads trades from the store and interleaves them with
+// the observation stream by timestamp so OBV is correct at every signal
+// point. Required only when RequireVolumeConfirmation is true on a
+// backtest; otherwise the store is ignored.
+func WithTradeHistoryStore(store TradeHistoryStore) func(*Strategy) {
+	return func(s *Strategy) { s.tradeHistoryStore = store }
+}
+
 // logger returns the configured logger or the default if none was set.
 func (s *Strategy) logger() *slog.Logger {
 	if s.log == nil {
@@ -274,32 +308,67 @@ func (s *Strategy) IsPaused() bool {
 	return s.paused
 }
 
-// OBV returns the current On-Balance Volume accumulator. Used by the
-// live-run signal gate and by tests; nil-safe (returns decimal.Zero
-// when no trades have been observed yet).
+// OBV returns the current On-Balance Volume. When obvWindow is set
+// (windowed mode), returns the sum of the rolling window of signed
+// quantities. When obvWindow is nil (cumulative mode), returns the
+// running cumulative OBV from the start of the trade history.
+// Used by the live-run signal gate and by tests; nil-safe (returns
+// decimal.Zero when no trades have been observed yet).
 func (s *Strategy) OBV() decimal.Decimal {
 	s.obvMu.RLock()
 	defer s.obvMu.RUnlock()
+	if s.obvWindow != nil {
+		return s.obvWindow.Sum()
+	}
 	return s.obvSum
 }
 
 // applyTradeEvent integrates a single trade into the running OBV.
-// Direction sign = sign(price - prevPrice): up = +quantity, down =
-// -quantity, flat = 0. Called from the trade-stream reader in Run.
+// When obvWindow is set (windowed mode), pushes the signed quantity
+// (BUY=+, SELL=-) into the rolling window and evicts the oldest
+// entry. When obvWindow is nil (cumulative mode), accumulates
+// the signed quantity into obvSum; falls back to price-comparison
+// OBV (Granville's algorithm) when Side is missing or unrecognized.
+// Called from the trade-stream reader in Run and from the backtester
+// via ingestTradesUpTo.
 func (s *Strategy) applyTradeEvent(ev streams.TradeEvent) {
 	s.obvMu.Lock()
 	defer s.obvMu.Unlock()
-	delta := decimal.Zero
-	if s.obvPrevPrice.IsZero() {
-		// First trade ever — full quantity counts.
+
+	// Windowed mode: push signed quantity into the rolling buffer.
+	// No price-comparison fallback — windowed OBV always uses
+	// side-based sign. Trades with missing/unrecognized Side are
+	// skipped (no price-comparison context in a window).
+	if s.obvWindow != nil {
+		switch ev.Side {
+		case "BUY":
+			_ = s.obvWindow.Add(ev.Quantity)
+		case "SELL":
+			_ = s.obvWindow.Add(ev.Quantity.Neg())
+		}
+		return
+	}
+
+	// Cumulative mode: accumulate into obvSum.
+	var delta decimal.Decimal
+	switch ev.Side {
+	case "BUY":
 		delta = ev.Quantity
-	} else {
-		cmp := ev.Price.Cmp(s.obvPrevPrice)
-		switch {
-		case cmp > 0:
+	case "SELL":
+		delta = ev.Quantity.Neg()
+	default:
+		// Fallback: price-comparison OBV (Granville's algorithm) for
+		// trades with missing or unrecognized side. First trade ever
+		// counts full quantity; subsequent trades use the price diff.
+		if s.obvPrevPrice.IsZero() {
 			delta = ev.Quantity
-		case cmp < 0:
-			delta = ev.Quantity.Neg()
+		} else {
+			switch ev.Price.Cmp(s.obvPrevPrice) {
+			case 1:
+				delta = ev.Quantity
+			case -1:
+				delta = ev.Quantity.Neg()
+			}
 		}
 	}
 	s.obvSum, _ = s.obvSum.Add(delta)
@@ -394,12 +463,14 @@ func (s *Strategy) Update(o types.YieldObservation) (Decision, error) {
 	return d, nil
 }
 
-// applyVolumeFilter suppresses the breakout signal when
-// RequireVolumeConfirmation is enabled and OBV doesn't confirm the
-// trade direction. OBV is the running on-balance volume accumulated
-// from the live trade stream; threshold is OBVTrendThreshold.
+// applyVolumeFilter suppresses the breakout signal when windowed OBV
+// doesn't confirm the trade direction. OBVWindow = 0 means "do not
+// need to verify volume" (filter is off, early return); OBVWindow > 0
+// means verify with the windowed OBV. OBV is the sum of signed
+// quantities in the last OBVWindow trades; threshold is
+// OBVTrendThreshold.
 func (s *Strategy) applyVolumeFilter(d *Decision) {
-	if !s.cfg.RequireVolumeConfirmation {
+	if s.cfg.OBVWindow == 0 {
 		return
 	}
 	obv := s.OBV()
@@ -731,7 +802,7 @@ func (s *Strategy) unsubscribePrices() {
 // or the trade stream wasn't injected — runLoop handles nil channels
 // by simply never selecting that case.
 func (s *Strategy) subscribeTrades() <-chan streams.TradeEvent {
-	if !s.cfg.RequireVolumeConfirmation || s.tradeStream == nil {
+	if s.cfg.OBVWindow == 0 || s.tradeStream == nil {
 		return nil
 	}
 	subID, ch := s.tradeStream.SubscribeOrderBook(s.cfg.OrderBookID)
