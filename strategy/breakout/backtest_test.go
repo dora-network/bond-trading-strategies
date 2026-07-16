@@ -2,6 +2,7 @@ package breakout_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/govalues/decimal"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 )
 
@@ -225,4 +227,80 @@ func TestBacktest_SLPriorityOverReversal(t *testing.T) {
 		"SL has priority over reversal when both would fire on the same tick")
 }
 
-// silence unused import warnings if a future test drops a reference
+// recordingWriter is a minimal in-memory stats.BacktestTradeWriter used to
+// verify that Backtester.Run persists trade records and closed trades.
+
+type recordingWriter struct {
+	mu     sync.Mutex
+	trades []stats.TradeRecordInsert
+	closed []stats.ClosedTradeInsert
+}
+
+func (w *recordingWriter) WriteTradeRecord(_ context.Context, rec stats.TradeRecordInsert) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.trades = append(w.trades, rec)
+	return nil
+}
+
+func (w *recordingWriter) WriteClosedTrade(_ context.Context, trade stats.ClosedTradeInsert) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = append(w.closed, trade)
+	return nil
+}
+
+func (w *recordingWriter) Flush(_ context.Context) error { return nil }
+
+// TestBacktest_PersistsTradesAndClosedTrades verifies that when a writer
+// is provided, the backtester calls WriteTradeRecord and WriteClosedTrade
+// for each simulated event, populating the breakout-specific signal
+// fields (compression_ratio, entry_atr, entry/exit_compression_ratio)
+// needed to verify the breakout signal.
+func TestBacktest_PersistsTradesAndClosedTrades(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.InitialBalance = decimal.MustNew(10000, 0)
+	cfg.Leverage = decimal.One
+	s := breakout.New(cfg, nil)
+
+	const flatAt100 = 30
+	const risingTail = 10
+	obs := make([]types.YieldObservation, 0, flatAt100+risingTail)
+	for i := range flatAt100 {
+		obs = append(obs, flatObs(i, 100))
+	}
+	obs = append(obs, flatObs(flatAt100, 110)) // BUY
+	for i := range risingTail {
+		obs = append(obs, flatObs(flatAt100+1+i, 110+int64(i)))
+	}
+
+	w := &recordingWriter{}
+	bt := breakout.NewBacktester(s, w)
+	_, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+	require.Len(t, w.trades, 2, "one entry + one exit trade record should be written")
+	assert.Equal(t, "BUY", w.trades[0].Signal, "entry trade record signal should be BUY")
+	assert.Equal(t, decimal.MustNew(110, 0), w.trades[0].Price,
+		"entry trade record price should match the breakout tick (110)")
+	assert.Equal(t, "BUY", w.trades[1].Signal,
+		"exit trade record reuses the open signal (BUY), recording the close price")
+	// For a flat series, ShortVol/LongVol = 0/0 → compressionRatio = 0
+	// (maximum compression), which is the correct armed ratio. The
+	// important thing is the field is populated (non-nil) and stable
+	// between entry and exit.
+	assert.True(t, w.trades[0].CompressionRatio.Sign() >= 0,
+		"armed compression ratio must be recorded, got %s", w.trades[0].CompressionRatio)
+	assert.True(t, w.trades[0].CompressionRatio.Equal(w.trades[1].CompressionRatio),
+		"armed ratio must be stable between entry and exit, got entry=%s exit=%s",
+		w.trades[0].CompressionRatio, w.trades[1].CompressionRatio)
+	assert.True(t, w.trades[0].EntryATR.IsPos(),
+		"breakout entry must carry a non-zero ATR for signal verification, got %s",
+		w.trades[0].EntryATR)
+	// PositionSize should now hold the computed bond quantity, not the fraction.
+	expectedQty := w.trades[0].Quantity
+	assert.True(t, w.trades[0].PositionSize.Equal(expectedQty),
+		"position_size should equal the computed bond quantity (%s), got %s",
+		expectedQty, w.trades[0].PositionSize)
+}

@@ -141,23 +141,24 @@ func DefaultConfig() Config {
 // breakoutLevel, run/cancel) is added in Tasks 3 and 5 when the live
 // signal logic and run loop need it.
 type Strategy struct {
-	mu               sync.RWMutex
-	cfg              Config
-	log              *slog.Logger
-	shortVolWin      *window.Rolling
-	longVolWin       *window.Rolling
-	atrWin           *window.Rolling
-	lastPrice        decimal.Decimal
-	compressionArmed bool
-	barsAboveTrigger int
-	barsBelowTrigger int
-	decisionStore    strategy.DecisionRecorder
-	decisionSeq      int64
-	pricesHandler    *prices.Handler
-	marketAPIClient  strategy.MarketAPIClient
-	historicalStore  HistoricalPriceStore
-	backtestWriter   stats.BacktestTradeWriter
-	tradeStream      *streams.TradeStream
+	mu                    sync.RWMutex
+	cfg                   Config
+	log                   *slog.Logger
+	shortVolWin           *window.Rolling
+	longVolWin            *window.Rolling
+	atrWin                *window.Rolling
+	lastPrice             decimal.Decimal
+	compressionArmed      bool
+	armedCompressionRatio decimal.Decimal
+	barsAboveTrigger      int
+	barsBelowTrigger      int
+	decisionStore         strategy.DecisionRecorder
+	decisionSeq           int64
+	pricesHandler         *prices.Handler
+	marketAPIClient       strategy.MarketAPIClient
+	historicalStore       HistoricalPriceStore
+	backtestWriter        stats.BacktestTradeWriter
+	tradeStream           *streams.TradeStream
 
 	// Live-run state (set in Run, used by executeDecision / closePosition).
 	runID               uuid.UUID
@@ -374,8 +375,10 @@ func (s *Strategy) Update(o types.YieldObservation) (Decision, error) {
 		return Decision{}, err
 	}
 	d.CompressionRatio = ratio
-
 	if ratio.Cmp(cfg.CompressionThreshold) < 0 {
+		if !s.compressionArmed {
+			s.armedCompressionRatio = ratio
+		}
 		s.compressionArmed = true
 		d.CompressionArmed = true
 	}
@@ -495,6 +498,7 @@ func (s *Strategy) evaluateBreakout(d *Decision, price, prevPrice, atr decimal.D
 			d.signal = types.SignalBuy
 			d.reason = DecisionReasonCompressionEntry
 			d.positionSize = decimal.One
+			d.ArmedCompressionRatio = s.armedCompressionRatio
 			s.resetArmed()
 		}
 	case price.Cmp(triggerLow) < 0:
@@ -503,6 +507,7 @@ func (s *Strategy) evaluateBreakout(d *Decision, price, prevPrice, atr decimal.D
 			d.signal = types.SignalSell
 			d.reason = DecisionReasonCompressionEntry
 			d.positionSize = decimal.One
+			d.ArmedCompressionRatio = s.armedCompressionRatio
 			s.resetArmed()
 		}
 	}
@@ -1028,7 +1033,8 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 		d.CreatedAt = time.Now().UTC()
 	}
 	if err := s.decisionStore.SaveDecision(ctx, d); err != nil {
-		s.logger().Error("save strategy decision",
+		s.logger().Error(
+			"save strategy decision",
 			"err", err,
 			"run_id", d.RunID,
 			"seq", d.Seq,

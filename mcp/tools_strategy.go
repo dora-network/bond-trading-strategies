@@ -91,6 +91,18 @@ func configProperties() map[string]any {
 	nonNegInt := func(desc string) map[string]any {
 		return map[string]any{"type": "integer", "description": desc, "minimum": 0}
 	}
+	intMin := func(min int, desc string) map[string]any {
+		return map[string]any{"type": "integer", "description": desc, "minimum": min}
+	}
+	nonNegNum := func(desc string) map[string]any {
+		return map[string]any{"type": "number", "description": desc, "minimum": 0}
+	}
+	ratio := func(desc string) map[string]any {
+		return map[string]any{
+			"type": "number", "description": desc,
+			"minimum": 0, "exclusiveMinimum": true, "maximum": 1,
+		}
+	}
 	return map[string]any{
 		// copytrading
 		"followed_trader":         map[string]any{"type": "string", "format": "uuid", "description": "UUID of the trader to copy."},
@@ -114,6 +126,18 @@ func configProperties() map[string]any {
 		"tenor":             map[string]any{"type": "string", "description": "Benchmark tenor code (e.g. 10Y)."},
 		//nolint:lll // description spans two strategies' rules
 		"initial_balance": num("Starting capital allocated to the strategy. Omit or 0 uses the default (10000 for copytrading); must be > 0 for mean_reversion."),
+		// breakout
+		"short_vol_window":            intMin(2, "Short-window price volatility count. Must be at least 2."),        //nolint:mnd
+		"long_vol_window":             intMin(3, "Long-window price volatility count. Must be > short_vol_window."), //nolint:mnd
+		"compression_threshold":       ratio("ShortVol/LongVol ratio below which the strategy arms for a breakout, in (0,1]."),
+		"atr_window":                  intMin(2, "Rolling-mean window for ATR. Must be at least 2."), //nolint:mnd
+		"breakout_atr_multiple":       nonNegNum("ATR units above/below the most recent close that defines the trigger band."),
+		"confirmation_bars":           intMin(1, "Consecutive closes beyond the trigger band required to fire. Must be at least 1."),
+		"stop_loss_atr":               num("Stop-loss distance in ATR units. 0 disables."),
+		"take_profit_atr":             num("Take-profit distance in ATR units from entry. 0 disables."),
+		"require_volume_confirmation": map[string]any{"type": "boolean", "description": "When true, signal requires running OBV confirmation."},
+		"obv_trend_threshold":         num("OBV threshold for require_volume_confirmation. Direction-mapped."),
+		"min_long_vol_floor":          num("Minimum LongVol required to trade. Suppresses entries on a flat baseline."),
 	}
 }
 
@@ -130,7 +154,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	client := newStrategyClient(strategyBaseURL, apiKey)
 
 	s.AddTool(
-		mcp.NewTool("strategy_list",
+		mcp.NewTool(
+			"strategy_list",
 			mcp.WithDescription("List strategies exposed by strategy-server, including availability and supported capabilities."),
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -143,7 +168,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_dora_orderbooks",
+		mcp.NewTool(
+			"strategy_dora_orderbooks",
 			mcp.WithDescription("List DORA order books exposed by strategy-server for the configured DORA API key."),
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -156,7 +182,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_dora_user",
+		mcp.NewTool(
+			"strategy_dora_user",
 			mcp.WithDescription("Get the current DORA user ID exposed by strategy-server for the configured DORA API key."),
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -169,7 +196,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_copy_traders_list",
+		mcp.NewTool(
+			"strategy_copy_traders_list",
 			mcp.WithDescription("List available copy traders. Placeholder that filters DORA users whose names start with TRADER_ or MM_ until DORA exposes a dedicated endpoint."), //nolint:lll
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -182,7 +210,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_tenors",
+		mcp.NewTool(
+			"strategy_tenors",
 			mcp.WithDescription("List available benchmark tenors exposed by strategy-server."),
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -195,10 +224,12 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_run_create",
+		mcp.NewTool(
+			"strategy_run_create",
 			mcp.WithDescription("Create a strategy run via strategy-server."),
 			mcp.WithString("strategy_type", mcp.Required(), mcp.Description("Strategy type, e.g. mean_reversion or copytrading.")),
-			mcp.WithObject("config", mcp.Required(),
+			mcp.WithObject(
+				"config", mcp.Required(),
 				mcp.Description("Strategy config object accepted by strategy-server. Field types below correspond to strategy-server's typed payload."),
 				mcp.Properties(configProperties()),
 			),
@@ -216,7 +247,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_run_get",
+		mcp.NewTool(
+			"strategy_run_get",
 			mcp.WithDescription("Get one strategy run by ID from strategy-server as raw JSON. Prefer strategy_run_describe for natural-language questions about a run."), //nolint:lll
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy run ID.")),
 		),
@@ -230,7 +262,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_run_list",
+		mcp.NewTool(
+			"strategy_run_list",
 			mcp.WithDescription("List strategy runs from strategy-server as raw JSON. Prefer strategy_run_status for natural-language questions about what is running, paused, or stopped."), //nolint:lll
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -243,7 +276,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_run_status",
+		mcp.NewTool(
+			"strategy_run_status",
 			mcp.WithDescription("Answer questions about current strategy runs with a concise natural-language summary. Use this for prompts like 'what runs are active?' or 'what is paused?'. Optionally filter by status: running, paused, or stopped."), //nolint:lll
 			mcp.WithString("status", mcp.Description("Optional status filter: running, paused, or stopped.")),
 		),
@@ -261,7 +295,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_run_describe",
+		mcp.NewTool(
+			"strategy_run_describe",
 			mcp.WithDescription("Answer questions about one strategy run in natural language, including status, timestamps, config, and any recorded error. Use this for prompts like 'tell me about run <id>' or 'why is this run paused?'."), //nolint:lll
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy run ID.")),
 		),
@@ -275,7 +310,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_run_pause",
+		mcp.NewTool(
+			"strategy_run_pause",
 			mcp.WithDescription("Pause a strategy run via strategy-server."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy run ID.")),
 		),
@@ -289,7 +325,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_run_resume",
+		mcp.NewTool(
+			"strategy_run_resume",
 			mcp.WithDescription("Resume a strategy run via strategy-server."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy run ID.")),
 		),
@@ -303,7 +340,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_run_stop",
+		mcp.NewTool(
+			"strategy_run_stop",
 			mcp.WithDescription("Stop a strategy run via strategy-server."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy run ID.")),
 		),
@@ -317,10 +355,12 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_backtest_create",
+		mcp.NewTool(
+			"strategy_backtest_create",
 			mcp.WithDescription("Create an asynchronous strategy backtest via strategy-server."),
 			mcp.WithString("strategy_type", mcp.Required(), mcp.Description("Strategy type, e.g. mean_reversion or copytrading.")),
-			mcp.WithObject("config", mcp.Required(),
+			mcp.WithObject(
+				"config", mcp.Required(),
 				mcp.Description("Strategy config object accepted by strategy-server. Field types below correspond to strategy-server's typed payload."),
 				mcp.Properties(configProperties()),
 			),
@@ -342,7 +382,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_backtest_get",
+		mcp.NewTool(
+			"strategy_backtest_get",
 			mcp.WithDescription("Get summarised results from one strategy backtest by ID from strategy-server."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy backtest ID.")),
 		),
@@ -356,7 +397,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_backtest_list",
+		mcp.NewTool(
+			"strategy_backtest_list",
 			mcp.WithDescription("List strategy backtests from strategy-server. Supports optional status, date range, and pagination filters."),
 			mcp.WithString("status", mcp.Description("Filter by status (e.g. running,failed,completed).")),
 			mcp.WithString("from", mcp.Description("Earliest created_at in RFC3339 format.")),
@@ -373,20 +415,23 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 		}),
 	)
 
-	registerBacktestSubResourceTool(s, "strategy_backtest_trades", "trade records",
+	registerBacktestSubResourceTool(
+		s, "strategy_backtest_trades", "trade records",
 		func(ctx context.Context, id string, page, limit int) (map[string]any, error) {
 			return client.getBacktestTrades(ctx, id, page, limit)
 		},
 	)
 
-	registerBacktestSubResourceTool(s, "strategy_backtest_closed_trades", "closed trades",
+	registerBacktestSubResourceTool(
+		s, "strategy_backtest_closed_trades", "closed trades",
 		func(ctx context.Context, id string, page, limit int) (map[string]any, error) {
 			return client.getBacktestClosedTrades(ctx, id, page, limit)
 		},
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_backtest_metadata",
+		mcp.NewTool(
+			"strategy_backtest_metadata",
 			mcp.WithDescription("Get the backtest metadata (ID, status, timestamps) by ID from strategy-server. Use this to check status or get the backtest ID — not the P&L result summary."), //nolint:lll
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy backtest ID.")),
 		),
@@ -400,7 +445,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_backtest_cancel",
+		mcp.NewTool(
+			"strategy_backtest_cancel",
 			mcp.WithDescription("Cancel a strategy backtest via strategy-server."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy backtest ID.")),
 		),
@@ -414,7 +460,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("list_trading_decisions",
+		mcp.NewTool(
+			"list_trading_decisions",
 			mcp.WithDescription("List the trading decisions recorded for a live strategy run, newest first. Requires run_id. Optional from/to (RFC3339 or YYYY-MM-DD), limit (default 50, max 200), and cursor (opaque, from a previous call). The user is derived from the auth token, not the URL."), //nolint:lll // description required for MCP clients
 			mcp.WithString("run_id", mcp.Required(), mcp.Description("Strategy run ID.")),
 			mcp.WithString("from", mcp.Description("Inclusive lower bound on created_at; RFC3339 or YYYY-MM-DD.")),
@@ -516,7 +563,8 @@ func registerBacktestSubResourceTool(
 	fetch func(context.Context, string, int, int) (map[string]any, error),
 ) {
 	s.AddTool(
-		mcp.NewTool(name,
+		mcp.NewTool(
+			name,
 			mcp.WithDescription(fmt.Sprintf("Get paginated %s from a completed backtest. Default page=1, limit=10, max limit=50.", label)),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Strategy backtest ID.")),
 			mcp.WithNumber("page", mcp.Description("Page number (default 1).")),

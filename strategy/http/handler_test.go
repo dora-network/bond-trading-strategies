@@ -373,7 +373,8 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 			return resultCh, nil
 		},
 	}
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithNow(func() time.Time { return now }),
 		strategyhttp.WithDORAClient(doraClientFunc{
 			getUserID: func(context.Context) (string, error) {
@@ -457,7 +458,8 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 			return resultCh, nil
 		},
 	}
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithNow(func() time.Time { return now }),
 		strategyhttp.WithDORAClient(doraClientFunc{
 			getUserID: func(context.Context) (string, error) {
@@ -544,7 +546,8 @@ func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
 		},
 	}
 	store := &memoryBacktestStore{}
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithNow(func() time.Time { return now }),
 		strategyhttp.WithBacktestStore(store),
 		strategyhttp.WithDORAClient(doraClientFunc{
@@ -701,7 +704,8 @@ func TestHandlerCancelBacktest(t *testing.T) {
 			return resultCh, nil
 		},
 	}
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithDORAClient(doraClientFunc{
 			getUserID: func(context.Context) (string, error) {
 				return "user-test-1", nil
@@ -757,7 +761,8 @@ func TestHandlerListBacktests(t *testing.T) {
 		},
 	}
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithNow(func() time.Time {
 			now = now.Add(time.Second)
 			return now
@@ -817,7 +822,8 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 		},
 	}
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithNow(func() time.Time {
 			now = now.Add(time.Second)
 			return now
@@ -847,7 +853,8 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 	assert.Equal(t, "test-user", created.DORAUserID)
 	cfg, _ := body["config"].(map[string]any)
 	orderBookID, _ := cfg["order_book_id"].(string)
-	assert.JSONEq(t, fmt.Sprintf(`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"order_book_id":%q,"tenor":"10Y","initial_balance":5.5,"leverage":2}`,
+	assert.JSONEq(t, fmt.Sprintf(
+		`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"order_book_id":%q,"tenor":"10Y","initial_balance":5.5,"leverage":2}`,
 		orderBookID,
 	), string(created.Config))
 
@@ -912,7 +919,8 @@ func TestHandlerListRuns(t *testing.T) {
 		},
 	}
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithNow(func() time.Time {
 			now = now.Add(time.Second)
 			return now
@@ -959,7 +967,8 @@ func TestHandlerRejectsDuplicateOrderBookRun(t *testing.T) {
 		},
 	}
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithNow(func() time.Time {
 			now = now.Add(time.Second)
 			return now
@@ -1010,7 +1019,8 @@ func TestHandlerAllowsDifferentOrderBookRun(t *testing.T) {
 		},
 	}
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithNow(func() time.Time {
 			now = now.Add(time.Second)
 			return now
@@ -1064,7 +1074,8 @@ func TestHandlerAllowsRunAfterPreviousStopped(t *testing.T) {
 		},
 	}
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithNow(func() time.Time {
 			now = now.Add(time.Second)
 			return now
@@ -1903,6 +1914,18 @@ func tradeRecordInsertToResponse(strategyType string, r stats.TradeRecordInsert)
 			rec.TradeID = r.TradeID.String()
 		}
 		return json.Marshal(rec)
+	case "breakout":
+		rec := strategyhttp.BreakoutTradeRecord{
+			Time:             r.Time,
+			BondID:           bondID,
+			Signal:           r.Signal,
+			Price:            r.Price.String(),
+			Quantity:         r.Quantity.String(),
+			PositionSize:     r.PositionSize.String(),
+			CompressionRatio: r.CompressionRatio.String(),
+			EntryATR:         r.EntryATR.String(),
+		}
+		return json.Marshal(rec)
 	default:
 		rec := strategyhttp.MeanReversionTradeRecord{
 			Time:         r.Time,
@@ -1940,6 +1963,23 @@ func closedTradeInsertToResponse(strategyType string, r stats.ClosedTradeInsert)
 		}
 		if r.CloseTradeID != uuid.Nil {
 			ct.CloseTradeID = r.CloseTradeID.String()
+		}
+		return json.Marshal(ct)
+	case "breakout":
+		ct := strategyhttp.BreakoutClosedTrade{
+			BondID:                bondID,
+			OpenTime:              r.OpenTime,
+			CloseTime:             r.CloseTime,
+			Signal:                r.OpenSignal,
+			ExitSignal:            r.CloseSignal,
+			EntryPrice:            r.EntryPrice.String(),
+			ExitPrice:             r.ExitPrice.String(),
+			Quantity:              r.Quantity.String(),
+			PositionSize:          r.PositionSize.String(),
+			PnL:                   r.PnL.String(),
+			ExitReason:            r.ExitReason,
+			EntryCompressionRatio: r.EntryCompressionRatio.String(),
+			ExitCompressionRatio:  r.ExitCompressionRatio.String(),
 		}
 		return json.Marshal(ct)
 	default:
@@ -2437,7 +2477,8 @@ func TestHandler_EmitsRunStartedEvent(t *testing.T) {
 		},
 	}
 	notifier := &notificationsfakes.FakeNotifier{}
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 		strategyhttp.WithNotifier(notifier),
@@ -2477,7 +2518,8 @@ func TestHandler_EmitsRunStopLossEvent(t *testing.T) {
 		},
 	}
 	notifier := &notificationsfakes.FakeNotifier{}
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 		strategyhttp.WithNotifier(notifier),
