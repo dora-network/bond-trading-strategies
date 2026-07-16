@@ -2340,12 +2340,12 @@ type breakoutConfigPayload struct {
 	TakeProfitATR        float64 `json:"take_profit_atr"`
 	MinLongVolFloor      float64 `json:"min_long_vol_floor"`
 
-	OBVTrendThreshold float64  `json:"obv_trend_threshold"`
-	OBVWindow         int      `json:"obv_window"`
-	OrderBookID       string   `json:"order_book_id,omitempty"`
-	Tenor             string   `json:"tenor,omitempty"`
-	InitialBalance    *float64 `json:"initial_balance,omitempty"`
-	Leverage          *float64 `json:"leverage,omitempty"`
+	OBVTrendThreshold float64 `json:"obv_trend_threshold"`
+	OBVWindow         int     `json:"obv_window"`
+	OrderBookID       string  `json:"order_book_id,omitempty"`
+
+	InitialBalance *float64 `json:"initial_balance,omitempty"`
+	Leverage       *float64 `json:"leverage,omitempty"`
 }
 
 //nolint:funlen // strategy definition with 12 config fields
@@ -2445,12 +2445,6 @@ func newBreakoutDefinition(
 				Name:        "order_book_id",
 				Type:        "string(uuid)",
 				Description: "Order book UUID used to locate the traded asset and place orders.",
-				Required:    false,
-			},
-			{
-				Name:        "tenor",
-				Type:        "string",
-				Description: "Tenor label recorded alongside the run. Not used by the signal (breakout is price-only).",
 				Required:    false,
 			},
 			{
@@ -2646,8 +2640,6 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 		}
 	}
 
-	payload.Tenor = strings.TrimSpace(payload.Tenor)
-
 	normalised, err := json.Marshal(payload)
 	if err != nil {
 		return breakout.Config{}, nil, fmt.Errorf("marshal normalised config: %w", err)
@@ -2666,7 +2658,6 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 		OBVTrendThreshold:    obvThreshold,
 		OBVWindow:            payload.OBVWindow,
 		OrderBookID:          orderBookID,
-		Tenor:                payload.Tenor,
 		InitialBalance:       amount,
 		Leverage:             leverage,
 	}, normalised, nil

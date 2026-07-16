@@ -108,9 +108,6 @@ type Config struct {
 	// OrderBookID is the ID of the DORA order book to place orders on.
 	OrderBookID uuid.UUID
 
-	// Tenor is the tenor to use for the benchmark yield.
-	Tenor string
-
 	// InitialBalance is the starting capital allocated to this strategy.
 	InitialBalance decimal.Decimal
 

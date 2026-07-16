@@ -3,6 +3,7 @@ package breakout
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -22,10 +23,11 @@ import (
 // characteristics before live deployment.
 //
 // Exit logic: a position is closed when the strategy emits the opposite
-// signal (a BUY is closed by a SELL and vice versa). Take-profit and
-// stop-loss exits (StopLossATR * ATR from entry) are out of scope for v1
-// and land in a follow-up ticket. Positions still open at end of history
-// are strategy-exited at the last observation's price (ExitReasonStrategyExit).
+// signal (a BUY is closed by a SELL and vice versa), or when the price
+// crosses the stop-loss or take-profit band (StopLossATR / TakeProfitATR
+// units from entry). Stop-loss has priority over reversal when both fire
+// on the same bar. Positions still open at end of history are
+// strategy-exited at the last observation's price (ExitReasonStrategyExit).
 //
 // The optional writer receives one WriteTradeRecord / WriteClosedTrade
 // call per row produced by the simulation; pass nil to skip persistence.
@@ -286,14 +288,19 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		}
 	}
 
-	summary := summarise(closedTrades)
+	start, end := obs[0].Time, obs[len(obs)-1].Time
+	metrics, err := computeSummary(closedTrades, start, end)
+	if err != nil {
+		return BacktestResult{}, fmt.Errorf("compute summary: %w", err)
+	}
 	return BacktestResult{
 		ClosedTrades: closedTrades,
 		TradeRecords: tradeRecords,
-		TotalPnL:     summary.TotalPnL,
-		WinCount:     summary.WinCount,
-		MaxDrawdown:  summary.MaxDrawdown,
-		SharpeRatio:  summary.SharpeRatio,
+		TotalPnL:     metrics.TotalPnL,
+		WinCount:     metrics.WinCount,
+		LossCount:    metrics.LossCount,
+		MaxDrawdown:  metrics.MaxDrawdown,
+		SharpeRatio:  metrics.SharpeRatio,
 	}, nil
 }
 
@@ -444,31 +451,20 @@ func computePnL(ct ClosedTrade) (decimal.Decimal, error) {
 	}
 }
 
-// summary holds the aggregate metrics derived from a slice of closed trades.
-type summary struct {
-	TotalPnL    decimal.Decimal
-	WinCount    int
-	LossCount   int
-	MaxDrawdown decimal.Decimal
-	SharpeRatio decimal.Decimal
-}
-
-// summarise aggregates closed trades into a summary. PnL is the only
-// meaningful metric for v1 — MaxDrawdown and SharpeRatio require a
-// time-series of equity points which the breakout backtest does not
-// yet track. Both are returned as zero (matching stats.Summarise with
-// an empty point series).
-func summarise(trades []ClosedTrade) summary {
-	s := summary{}
-	for _, t := range trades {
-		s.TotalPnL, _ = s.TotalPnL.Add(t.PnL)
-		if t.PnL.IsPos() {
-			s.WinCount++
-		} else if t.PnL.IsNeg() {
-			s.LossCount++
+// computeSummary converts breakout ClosedTrade values to stats.PnLPoint
+// and delegates to stats.Summarise, which builds an equity curve from
+// daily-PnL buckets and computes TotalPnL, WinCount, LossCount,
+// MaxDrawdown (peak-to-trough of the equity curve), and SharpeRatio
+// (annualised, based on daily PnL).
+func computeSummary(closed []ClosedTrade, start, end time.Time) (stats.Summary, error) {
+	points := make([]stats.PnLPoint, len(closed))
+	for i, ct := range closed {
+		points[i] = stats.PnLPoint{
+			PnL:       ct.PnL,
+			CloseTime: ct.CloseTime,
 		}
 	}
-	return s
+	return stats.Summarise(points, start, end)
 }
 
 // checkStopLossTakeProfit returns the exit reason ("stop_loss" or
