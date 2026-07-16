@@ -52,11 +52,16 @@ type Decision struct {
 	// Compression / breakout context (read by the breakout backtest).
 	ShortVol         decimal.Decimal // σ(price, ShortVolWindow)
 	LongVol          decimal.Decimal // σ(price, LongVolWindow)
-	CompressionRatio decimal.Decimal // ShortVol / LongVol
+	CompressionRatio decimal.Decimal // ShortVol / LongVol at the current tick
 	ATR              decimal.Decimal // ATR(ATRWindow) of absolute price diffs
 	BreakoutLevel    decimal.Decimal // mid ± k·ATR; 0 if no breakout in progress
 	CompressionArmed bool            // true once compressionRatio crossed threshold
 	BarsAboveTrigger int             // count of consecutive closes beyond BreakoutLevel
+	// ArmedCompressionRatio is the ratio at the tick that armed the
+	// strategy (crossed below CompressionThreshold). Stable through the
+	// confirmation window; the backtester records this in
+	// TradeRecord.CompressionRatio for signal verification.
+	ArmedCompressionRatio decimal.Decimal
 }
 
 // Accessor methods satisfying types.Decision. Bare names match the interface

@@ -49,6 +49,10 @@ type TradeRecordInsert struct {
 	Spread       decimal.Decimal
 	PositionSize decimal.Decimal
 	ZScore       decimal.Decimal
+
+	// breakout-only fields. Zero if not a breakout trade.
+	CompressionRatio decimal.Decimal
+	EntryATR         decimal.Decimal
 }
 
 // ClosedTradeInsert is the row shape for strategy_backtest_closed_trades.
@@ -79,4 +83,8 @@ type ClosedTradeInsert struct {
 	ExitZScore   decimal.Decimal
 	PositionSize decimal.Decimal
 	ExitReason   string
+
+	// breakout-only fields. Zero if not a breakout trade.
+	EntryCompressionRatio decimal.Decimal
+	ExitCompressionRatio  decimal.Decimal
 }

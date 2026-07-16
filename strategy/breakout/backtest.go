@@ -3,9 +3,11 @@ package breakout
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 )
 
@@ -25,11 +27,6 @@ import (
 //
 // The optional writer receives one WriteTradeRecord / WriteClosedTrade
 // call per row produced by the simulation; pass nil to skip persistence.
-// Writer integration is a placeholder for v1 — the stats.BacktestTradeWriter
-// interface in this package accepts the breakout record shapes (the
-// stats package's TradeRecordInsert / ClosedTradeInsert shapes are
-// meanreversion-specific and cannot be reused here without a wider
-// refactor of stats).
 type Backtester struct {
 	strategy *Strategy
 	writer   stats.BacktestTradeWriter
@@ -110,8 +107,8 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 						Signal:           openTrade.Signal,
 						Price:            exitPrice,
 						Quantity:         exitQty,
-						PositionSize:     openTrade.PositionSize,
-						CompressionRatio: decision.CompressionRatio,
+						PositionSize:     exitQty,
+						CompressionRatio: decision.ArmedCompressionRatio,
 					})
 
 					// Cash flow: opposite of entry.
@@ -181,13 +178,16 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 			}
 
 			tradeRecords = append(tradeRecords, TradeRecord{
-				Time:             decision.Time(),
-				BondID:           decision.BondID(),
-				Signal:           decision.Signal(),
-				Price:            entryPrice,
-				Quantity:         qty,
-				PositionSize:     decision.PositionSize(),
-				CompressionRatio: decision.CompressionRatio,
+				Time:     decision.Time(),
+				BondID:   decision.BondID(),
+				Signal:   decision.Signal(),
+				Price:    entryPrice,
+				Quantity: qty,
+				// PositionSize holds the computed bond quantity so the
+				// API consumer sees the actual order size, not the
+				// fraction of capital deployed.
+				PositionSize:     qty,
+				CompressionRatio: decision.ArmedCompressionRatio,
 				EntryATR:         decision.ATR,
 			})
 			openTrade = &tradeRecords[len(tradeRecords)-1]
@@ -239,8 +239,8 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 			Signal:           openTrade.Signal,
 			Price:            exitPrice,
 			Quantity:         exitQty,
-			PositionSize:     openTrade.PositionSize,
-			CompressionRatio: lastDecision.CompressionRatio,
+			PositionSize:     exitQty,
+			CompressionRatio: lastDecision.ArmedCompressionRatio,
 		})
 
 		ct := ClosedTrade{
@@ -266,6 +266,13 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 	}
 	_ = remainingBalance
 
+	if b.writer != nil {
+		streamTrades(ctx, b.writer, tradeRecords, closedTrades)
+		if err := b.writer.Flush(ctx); err != nil {
+			slog.Error("flush backtest writer", "err", err)
+		}
+	}
+
 	summary := summarise(closedTrades)
 	return BacktestResult{
 		ClosedTrades: closedTrades,
@@ -276,6 +283,54 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		MaxDrawdown:  summary.MaxDrawdown,
 		SharpeRatio:  summary.SharpeRatio,
 	}, nil
+}
+
+// streamTrades writes all trade records and closed trades to the writer,
+// converting breakout types to stats insert types. Mirrors the
+// meanreversion backtester's streamTrades.
+func streamTrades(
+	ctx context.Context,
+	w stats.BacktestTradeWriter,
+	records []TradeRecord,
+	closed []ClosedTrade,
+) {
+	for _, r := range records {
+		rec := stats.TradeRecordInsert{
+			BacktestID:       uuid.Nil,
+			Time:             r.Time,
+			BondID:           r.BondID,
+			Signal:           r.Signal.String(),
+			Price:            r.Price,
+			Quantity:         r.Quantity,
+			PositionSize:     r.PositionSize,
+			CompressionRatio: r.CompressionRatio,
+			EntryATR:         r.EntryATR,
+		}
+		if err := w.WriteTradeRecord(ctx, rec); err != nil {
+			slog.Error("write trade record", "err", err)
+		}
+	}
+	for _, c := range closed {
+		rec := stats.ClosedTradeInsert{
+			BacktestID:            uuid.Nil,
+			OpenTime:              c.OpenTime,
+			CloseTime:             c.CloseTime,
+			BondID:                c.BondID,
+			OpenSignal:            c.Signal.String(),
+			CloseSignal:           c.ExitSignal.String(),
+			Quantity:              c.Quantity,
+			EntryPrice:            c.EntryPrice,
+			ExitPrice:             c.ExitPrice,
+			PnL:                   c.PnL,
+			PositionSize:          c.PositionSize,
+			ExitReason:            c.ExitReason,
+			EntryCompressionRatio: c.EntryCompressionRatio,
+			ExitCompressionRatio:  c.ExitCompressionRatio,
+		}
+		if err := w.WriteClosedTrade(ctx, rec); err != nil {
+			slog.Error("write closed trade", "err", err)
+		}
+	}
 }
 
 // isReversal reports whether a new signal would close an existing

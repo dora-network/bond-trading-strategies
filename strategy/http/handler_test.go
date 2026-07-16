@@ -1912,6 +1912,18 @@ func tradeRecordInsertToResponse(strategyType string, r stats.TradeRecordInsert)
 			rec.TradeID = r.TradeID.String()
 		}
 		return json.Marshal(rec)
+	case "breakout":
+		rec := strategyhttp.BreakoutTradeRecord{
+			Time:             r.Time,
+			BondID:           bondID,
+			Signal:           r.Signal,
+			Price:            r.Price.String(),
+			Quantity:         r.Quantity.String(),
+			PositionSize:     r.PositionSize.String(),
+			CompressionRatio: r.CompressionRatio.String(),
+			EntryATR:         r.EntryATR.String(),
+		}
+		return json.Marshal(rec)
 	default:
 		rec := strategyhttp.MeanReversionTradeRecord{
 			Time:         r.Time,
@@ -1949,6 +1961,23 @@ func closedTradeInsertToResponse(strategyType string, r stats.ClosedTradeInsert)
 		}
 		if r.CloseTradeID != uuid.Nil {
 			ct.CloseTradeID = r.CloseTradeID.String()
+		}
+		return json.Marshal(ct)
+	case "breakout":
+		ct := strategyhttp.BreakoutClosedTrade{
+			BondID:                bondID,
+			OpenTime:              r.OpenTime,
+			CloseTime:             r.CloseTime,
+			Signal:                r.OpenSignal,
+			ExitSignal:            r.CloseSignal,
+			EntryPrice:            r.EntryPrice.String(),
+			ExitPrice:             r.ExitPrice.String(),
+			Quantity:              r.Quantity.String(),
+			PositionSize:          r.PositionSize.String(),
+			PnL:                   r.PnL.String(),
+			ExitReason:            r.ExitReason,
+			EntryCompressionRatio: r.EntryCompressionRatio.String(),
+			ExitCompressionRatio:  r.ExitCompressionRatio.String(),
 		}
 		return json.Marshal(ct)
 	default:
