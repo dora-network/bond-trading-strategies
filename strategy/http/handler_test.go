@@ -158,7 +158,7 @@ func TestHandlerListsStrategies(t *testing.T) {
 	breakout, ok := byType["breakout"]
 	require.True(t, ok, "breakout should be in the strategies list")
 	assert.Equal(t, "available", breakout.Status)
-	require.Len(t, breakout.ConfigFields, 15)
+	require.Len(t, breakout.ConfigFields, 14)
 	assert.Equal(t, "short_vol_window", breakout.ConfigFields[0].Name)
 	assert.Equal(t, "long_vol_window", breakout.ConfigFields[1].Name)
 	assert.Equal(t, "compression_threshold", breakout.ConfigFields[2].Name)
@@ -171,9 +171,8 @@ func TestHandlerListsStrategies(t *testing.T) {
 	assert.Equal(t, "obv_trend_threshold", breakout.ConfigFields[9].Name)
 	assert.Equal(t, "obv_window", breakout.ConfigFields[10].Name)
 	assert.Equal(t, "order_book_id", breakout.ConfigFields[11].Name)
-	assert.Equal(t, "tenor", breakout.ConfigFields[12].Name)
-	assert.Equal(t, "initial_balance", breakout.ConfigFields[13].Name)
-	assert.Equal(t, "leverage", breakout.ConfigFields[14].Name)
+	assert.Equal(t, "initial_balance", breakout.ConfigFields[12].Name)
+	assert.Equal(t, "leverage", breakout.ConfigFields[13].Name)
 	assert.True(t, breakout.SupportsRun)
 	assert.True(t, breakout.SupportsBacktest)
 
