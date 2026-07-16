@@ -127,17 +127,17 @@ func configProperties() map[string]any {
 		//nolint:lll // description spans two strategies' rules
 		"initial_balance": num("Starting capital allocated to the strategy. Omit or 0 uses the default (10000 for copytrading); must be > 0 for mean_reversion."),
 		// breakout
-		"short_vol_window":            intMin(2, "Short-window price volatility count. Must be at least 2."),        //nolint:mnd
-		"long_vol_window":             intMin(3, "Long-window price volatility count. Must be > short_vol_window."), //nolint:mnd
-		"compression_threshold":       ratio("ShortVol/LongVol ratio below which the strategy arms for a breakout, in (0,1]."),
-		"atr_window":                  intMin(2, "Rolling-mean window for ATR. Must be at least 2."), //nolint:mnd
-		"breakout_atr_multiple":       nonNegNum("ATR units above/below the most recent close that defines the trigger band."),
-		"confirmation_bars":           intMin(1, "Consecutive closes beyond the trigger band required to fire. Must be at least 1."),
-		"stop_loss_atr":               num("Stop-loss distance in ATR units. 0 disables."),
-		"take_profit_atr":             num("Take-profit distance in ATR units from entry. 0 disables."),
-		"require_volume_confirmation": map[string]any{"type": "boolean", "description": "When true, signal requires running OBV confirmation."},
-		"obv_trend_threshold":         num("OBV threshold for require_volume_confirmation. Direction-mapped."),
-		"min_long_vol_floor":          num("Minimum LongVol required to trade. Suppresses entries on a flat baseline."),
+		"short_vol_window":      intMin(2, "Short-window price volatility count. Must be at least 2."),        //nolint:mnd
+		"long_vol_window":       intMin(3, "Long-window price volatility count. Must be > short_vol_window."), //nolint:mnd
+		"compression_threshold": ratio("ShortVol/LongVol ratio below which the strategy arms for a breakout, in (0,1]."),
+		"atr_window":            intMin(2, "Rolling-mean window for ATR. Must be at least 2."), //nolint:mnd
+		"breakout_atr_multiple": nonNegNum("ATR units above/below the most recent close that defines the trigger band."),
+		"confirmation_bars":     intMin(1, "Consecutive closes beyond the trigger band required to fire. Must be at least 1."),
+		"stop_loss_atr":         num("Stop-loss distance in ATR units. 0 disables."),
+		"take_profit_atr":       num("Take-profit distance in ATR units from entry. 0 disables."),
+		"obv_trend_threshold":   num("OBV threshold for the volume confirmation filter. Direction-mapped."),
+		"min_long_vol_floor":    num("Minimum LongVol required to trade. Suppresses entries on a flat baseline."),
+		"obv_window":            intMin(0, "Recent trades for windowed OBV. 0 = no verification. >0 = verify with last N trades."),
 	}
 }
 

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 )
@@ -68,11 +70,22 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 	}
 	remainingBalance := effectiveCapital
 
+	// Load and interleave trade history for OBV computation when
+	// volume confirmation is enabled. The backtest clock advances with
+	// each observation; trades are ingested in chronological order so
+	// OBV is correct at every signal point.
+	trades := b.loadTrades(ctx, obs)
+	tradeIdx := 0
+
 	for _, o := range obs {
 		select {
 		case <-ctx.Done():
 			return BacktestResult{}, errors.New("backtest cancelled by user")
 		default:
+			// Apply any trades with time <= current observation before
+			// updating the strategy so OBV reflects all activity up to
+			// this point.
+			tradeIdx = b.ingestTradesUpTo(trades, tradeIdx, o.Time)
 			decision, err := b.strategy.Update(o)
 			if err != nil {
 				return BacktestResult{}, err
@@ -279,15 +292,82 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		TradeRecords: tradeRecords,
 		TotalPnL:     summary.TotalPnL,
 		WinCount:     summary.WinCount,
-		LossCount:    summary.LossCount,
 		MaxDrawdown:  summary.MaxDrawdown,
 		SharpeRatio:  summary.SharpeRatio,
 	}, nil
 }
 
-// streamTrades writes all trade records and closed trades to the writer,
-// converting breakout types to stats insert types. Mirrors the
-// meanreversion backtester's streamTrades.
+// loadTrades loads all trades for the backtest date range into a sorted
+// slice when volume confirmation is enabled and a trade store is
+// configured. Returns nil when neither applies, so the backtest loop
+// can call ingestTradesUpTo unconditionally.
+
+func (b *Backtester) loadTrades(
+	ctx context.Context,
+	obs []types.YieldObservation,
+) []Trade {
+	if b.strategy.cfg.OBVWindow == 0 || b.strategy.tradeHistoryStore == nil {
+		b.strategy.logger().Info("backtest trade history NOT wired",
+			"obvWindow", b.strategy.cfg.OBVWindow,
+			"storeNil", b.strategy.tradeHistoryStore == nil)
+		return nil
+	}
+	if len(obs) == 0 {
+		return nil
+	}
+	b.strategy.logger().Info("backtest trade history wired, loading trades",
+		"orderBookID", b.strategy.cfg.OrderBookID,
+		"start", obs[0].Time, "end", obs[len(obs)-1].Time)
+	ch, errCh := b.strategy.tradeHistoryStore.StreamTrades(
+		ctx, b.strategy.cfg.OrderBookID, obs[0].Time, obs[len(obs)-1].Time,
+	)
+	var trades []Trade
+	chClosed := false
+	for !chClosed {
+		select {
+		case t, ok := <-ch:
+			if !ok {
+				chClosed = true
+				continue
+			}
+			trades = append(trades, t)
+		case err := <-errCh:
+			if err != nil {
+				b.strategy.logger().Error("backtest trade stream error", "err", err)
+			}
+		}
+	}
+	// Drain any remaining error after ch is closed.
+	select {
+	case err := <-errCh:
+		if err != nil {
+			b.strategy.logger().Error("backtest trade stream error", "err", err)
+		}
+	default:
+	}
+	return trades
+}
+
+// ingestTradesUpTo advances `idx` through `trades`, applying every
+// trade with time <= cutoff to the Strategy's OBV accumulator via
+// applyTradeEvent. Returns the updated index. The store is assumed
+// to return trades in chronological order.
+func (b *Backtester) ingestTradesUpTo(
+	trades []Trade,
+	idx int,
+	cutoff time.Time,
+) int {
+	for idx < len(trades) && !trades[idx].Time.After(cutoff) {
+		b.strategy.applyTradeEvent(streams.TradeEvent{
+			Price:    trades[idx].Price,
+			Quantity: trades[idx].Quantity,
+			Side:     trades[idx].Side,
+		})
+		idx++
+	}
+	return idx
+}
+
 func streamTrades(
 	ctx context.Context,
 	w stats.BacktestTradeWriter,

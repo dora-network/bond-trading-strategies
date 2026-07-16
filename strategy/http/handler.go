@@ -77,6 +77,7 @@ type Handler struct {
 	decisionReader       DecisionReader
 	tradeStream          *streams.TradeStream
 	historicalPriceStore breakout.HistoricalPriceStore
+	tradeHistoryStore    breakout.TradeHistoryStore
 	notifier             notifications.Notifier
 	orderUpdates         orderUpdatesManager // nil disables the order-update feature
 	encryptionKey        []byte              // 32-byte AES-256 key for encrypting API keys at rest
@@ -489,7 +490,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		h.log = slog.Default()
 	}
 	if h.strategies == nil {
-		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.historicalPriceStore, h.log)
+		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.historicalPriceStore, h.tradeHistoryStore, h.log)
 	}
 
 	h.mux = http.NewServeMux()
@@ -591,6 +592,17 @@ func WithTradeStream(ts *streams.TradeStream) func(*Handler) {
 func WithHistoricalPriceStore(s breakout.HistoricalPriceStore) func(*Handler) {
 	return func(h *Handler) {
 		h.historicalPriceStore = s
+	}
+}
+
+// WithTradeHistoryStore wires a breakout backtest trade source so the
+// OBV (On-Balance Volume) filter can be evaluated in backtests when
+// RequireVolumeConfirmation is true. Reads from trades_history. May be
+// nil; the backtester simply skips OBV accumulation when no store is
+// configured.
+func WithTradeHistoryStore(s breakout.TradeHistoryStore) func(*Handler) {
+	return func(h *Handler) {
+		h.tradeHistoryStore = s
 	}
 }
 
@@ -2120,12 +2132,13 @@ func defaultStrategies(
 	tradesHistoryStore *copytrading.PGTradesHistoryStore,
 	tradeStream *streams.TradeStream,
 	historicalPriceStore breakout.HistoricalPriceStore,
+	tradeHistoryStore breakout.TradeHistoryStore,
 	log *slog.Logger,
 ) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
-		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, log),
+		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, tradeHistoryStore, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2322,21 +2335,22 @@ type meanReversionConfigPayload struct {
 }
 
 type breakoutConfigPayload struct {
-	ShortVolWindow            int      `json:"short_vol_window"`
-	LongVolWindow             int      `json:"long_vol_window"`
-	CompressionThreshold      float64  `json:"compression_threshold"`
-	ATRWindow                 int      `json:"atr_window"`
-	BreakoutATRMultiple       float64  `json:"breakout_atr_multiple"`
-	ConfirmationBars          int      `json:"confirmation_bars"`
-	StopLossATR               float64  `json:"stop_loss_atr"`
-	TakeProfitATR             float64  `json:"take_profit_atr"`
-	MinLongVolFloor           float64  `json:"min_long_vol_floor"`
-	RequireVolumeConfirmation bool     `json:"require_volume_confirmation"`
-	OBVTrendThreshold         float64  `json:"obv_trend_threshold"`
-	OrderBookID               string   `json:"order_book_id,omitempty"`
-	Tenor                     string   `json:"tenor,omitempty"`
-	InitialBalance            *float64 `json:"initial_balance,omitempty"`
-	Leverage                  *float64 `json:"leverage,omitempty"`
+	ShortVolWindow       int     `json:"short_vol_window"`
+	LongVolWindow        int     `json:"long_vol_window"`
+	CompressionThreshold float64 `json:"compression_threshold"`
+	ATRWindow            int     `json:"atr_window"`
+	BreakoutATRMultiple  float64 `json:"breakout_atr_multiple"`
+	ConfirmationBars     int     `json:"confirmation_bars"`
+	StopLossATR          float64 `json:"stop_loss_atr"`
+	TakeProfitATR        float64 `json:"take_profit_atr"`
+	MinLongVolFloor      float64 `json:"min_long_vol_floor"`
+
+	OBVTrendThreshold float64  `json:"obv_trend_threshold"`
+	OBVWindow         int      `json:"obv_window"`
+	OrderBookID       string   `json:"order_book_id,omitempty"`
+	Tenor             string   `json:"tenor,omitempty"`
+	InitialBalance    *float64 `json:"initial_balance,omitempty"`
+	Leverage          *float64 `json:"leverage,omitempty"`
 }
 
 //nolint:funlen // strategy definition with 12 config fields
@@ -2344,6 +2358,7 @@ func newBreakoutDefinition(
 	pricesHandler *prices.Handler,
 	tradeStream *streams.TradeStream,
 	historicalStore breakout.HistoricalPriceStore,
+	tradeHistoryStore breakout.TradeHistoryStore,
 	log *slog.Logger,
 ) StrategyDefinition {
 	defaults := breakout.DefaultConfig()
@@ -2418,18 +2433,18 @@ func newBreakoutDefinition(
 				Default:     mustFloat64(defaults.MinLongVolFloor),
 			},
 			{
-				Name:        "require_volume_confirmation",
-				Type:        "boolean",
-				Description: "If true, BUY needs OBV > obv_trend_threshold; SELL needs OBV < -obv_trend_threshold. Default false for v1 compat.",
-				Required:    false,
-				Default:     defaults.RequireVolumeConfirmation,
-			},
-			{
 				Name:        "obv_trend_threshold",
 				Type:        "number",
-				Description: "OBV threshold when require_volume_confirmation is on. BUY > this, SELL < -this. Default 0 means any non-zero OBV works.",
+				Description: "OBV threshold for the volume confirmation filter. BUY > this, SELL < -this. Default 0 means any non-zero OBV works.",
 				Required:    false,
 				Default:     mustFloat64(defaults.OBVTrendThreshold),
+			},
+			{
+				Name:        "obv_window",
+				Type:        "integer",
+				Description: "Recent trades to include in windowed OBV. 0 = no volume verification. >0 = verify with last N trades.",
+				Required:    false,
+				Default:     defaults.OBVWindow,
 			},
 			{
 				Name:        "order_book_id",
@@ -2476,10 +2491,10 @@ func newBreakoutDefinition(
 			if tradeWriter != nil {
 				opts = append(opts, breakout.WithBacktestWriter(tradeWriter))
 			}
-			// Wire the live trade stream when volume confirmation is
-			// enabled; ignored otherwise. tradeStream is always non-nil
-			// at runtime (cmd/strategy-server starts it in main.go).
-			if cfg.RequireVolumeConfirmation && tradeStream != nil {
+			// Wire the live trade stream when the volume filter is active
+			// (OBVWindow > 0); ignored otherwise. tradeStream is always
+			// non-nil at runtime (cmd/strategy-server starts it in main.go).
+			if cfg.OBVWindow > 0 && tradeStream != nil {
 				opts = append(opts, breakout.WithTradeStream(tradeStream))
 			}
 			// Wire the historical price store so Strategy.Backtest can
@@ -2487,6 +2502,13 @@ func newBreakoutDefinition(
 			// Backtest will then return an error.
 			if historicalStore != nil {
 				opts = append(opts, breakout.WithHistoricalStore(historicalStore))
+			}
+			// Wire the historical trade store so the backtester can
+			// compute OBV for the volume confirmation filter. May be
+			// nil if no DB is configured; the backtester simply skips
+			// OBV accumulation when no store is wired.
+			if tradeHistoryStore != nil {
+				opts = append(opts, breakout.WithTradeHistoryStore(tradeHistoryStore))
 			}
 			return normalised, breakout.New(cfg, pricesHandler, opts...), nil
 		},
@@ -2543,12 +2565,14 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	if payload.MinLongVolFloor == 0 {
 		payload.MinLongVolFloor = mustFloat64(defaults.MinLongVolFloor)
 	}
-	// payload.RequireVolumeConfirmation is a bool — no zero-default needed.
 	if payload.OBVTrendThreshold == 0 {
 		payload.OBVTrendThreshold = mustFloat64(defaults.OBVTrendThreshold)
 	}
 	if payload.OBVTrendThreshold < 0 {
 		return breakout.Config{}, nil, fmt.Errorf("config.obv_trend_threshold must be non-negative")
+	}
+	if payload.OBVWindow < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.obv_window must be non-negative")
 	}
 	if payload.CompressionThreshold <= 0 || payload.CompressionThreshold > 1 {
 		return breakout.Config{}, nil, fmt.Errorf("config.compression_threshold must be in (0, 1]")
@@ -2635,21 +2659,21 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	}
 
 	return breakout.Config{
-		ShortVolWindow:            payload.ShortVolWindow,
-		LongVolWindow:             payload.LongVolWindow,
-		CompressionThreshold:      compression,
-		ATRWindow:                 payload.ATRWindow,
-		BreakoutATRMultiple:       breakoutATR,
-		ConfirmationBars:          payload.ConfirmationBars,
-		StopLossATR:               stopLoss,
-		TakeProfitATR:             takeProfit,
-		MinLongVolFloor:           minFloor,
-		RequireVolumeConfirmation: payload.RequireVolumeConfirmation,
-		OBVTrendThreshold:         obvThreshold,
-		OrderBookID:               orderBookID,
-		Tenor:                     payload.Tenor,
-		InitialBalance:            amount,
-		Leverage:                  leverage,
+		ShortVolWindow:       payload.ShortVolWindow,
+		LongVolWindow:        payload.LongVolWindow,
+		CompressionThreshold: compression,
+		ATRWindow:            payload.ATRWindow,
+		BreakoutATRMultiple:  breakoutATR,
+		ConfirmationBars:     payload.ConfirmationBars,
+		StopLossATR:          stopLoss,
+		TakeProfitATR:        takeProfit,
+		MinLongVolFloor:      minFloor,
+		OBVTrendThreshold:    obvThreshold,
+		OBVWindow:            payload.OBVWindow,
+		OrderBookID:          orderBookID,
+		Tenor:                payload.Tenor,
+		InitialBalance:       amount,
+		Leverage:             leverage,
 	}, normalised, nil
 }
 
