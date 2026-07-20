@@ -54,6 +54,11 @@ const (
 	defaultStopLossObserverInterval = time.Second
 )
 
+// twapOrderUpdatesBuffer is the channel buffer size for the per-run
+// TWAP order-update event channel. 16 events cover a reasonable burst
+// of fills from a single TWAP run before the run loop reads.
+const twapOrderUpdatesBuffer = 16
+
 type Handler struct {
 	service            strategycore.Service
 	now                func() time.Time
@@ -69,7 +74,10 @@ type Handler struct {
 	// the decision that triggered it. nil disables recording; backtests
 	// never opt in and therefore never write to strategy_decisions.
 	decisionStore strategycore.DecisionRecorder
-	// decisionReader serves the read-only /v1/trading-decisions/{run_id}
+	// stateStore is used by execution strategies (TWAP) to checkpoint
+	// progress for crash recovery. nil disables persistence; the
+	// strategy runs but won't recover state across restarts.
+	stateStore strategycore.StateStore
 	// endpoint. The route is registered unconditionally in NewHandler;
 	// when decisionReader is nil the handler short-circuits to 503 so
 	// the endpoint can be deployed without wiring a reader until the
@@ -567,6 +575,15 @@ func WithDecisionStore(store strategycore.DecisionRecorder) func(*Handler) {
 func WithDecisionReader(reader DecisionReader) func(*Handler) {
 	return func(h *Handler) {
 		h.decisionReader = reader
+	}
+}
+
+// WithStateStore sets the per-run state checkpoint store used by
+// execution strategies (TWAP) to persist progress for crash recovery.
+// The same *PGRunStore satisfies both RunStore and strategy.StateStore.
+func WithStateStore(store strategycore.StateStore) func(*Handler) {
+	return func(h *Handler) {
+		h.stateStore = store
 	}
 }
 
@@ -1560,6 +1577,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	// market order is written to strategy_decisions. nil disables
 	// recording; the helper is a no-op for unknown strategy types.
 	h.attachDecisionStore(strat)
+	h.attachStateStore(strat)
 
 	var encryptedAPIKey []byte
 	if info != nil && info.APIKey != "" && len(h.encryptionKey) > 0 {
@@ -1907,6 +1925,7 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 
 	// Attach the per-run decision recorder. nil disables recording.
 	h.attachDecisionStore(strat)
+	h.attachStateStore(strat)
 
 	// Seed the in-memory decision counter from the DB frontier so a
 	// resumed run (e.g. after a server restart) doesn't re-use seqs
@@ -1931,6 +1950,9 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		}
 	}
 
+	if twapStrat, ok := strat.(*twap.Strategy); ok && h.notifier != nil && detail.DORAUserID != "" {
+		h.startTWAPOrderUpdater(detail, twapStrat)
+	}
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}
@@ -1941,6 +1963,108 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 	}
 	h.startStopLossObserver(detail, strat)
 	return nil
+}
+
+// startTWAPOrderUpdater spawns a goroutine that subscribes to the
+// notifications bus for the run's DORA user, filters events for this
+// run, parses the payload, and forwards OrderFillEvents to the TWAP
+// subscription closes.
+func (h *Handler) startTWAPOrderUpdater(detail *RunDetail, strat *twap.Strategy) {
+	ch := make(chan twap.OrderFillEvent, twapOrderUpdatesBuffer)
+	strat.SetOrderUpdatesChannel(ch)
+	parentCtx := context.Background()
+	if h.service != nil {
+		parentCtx = h.service.BaseContext()
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
+	h.mu.Lock()
+	h.stopLossObservers[detail.ID] = cancel
+	h.mu.Unlock()
+
+	go func() {
+		defer cancel()
+		defer close(ch)
+		sub, err := h.notifier.Subscribe(ctx, detail.DORAUserID)
+		if err != nil {
+			slog.Error("twap: subscribe to order updates failed",
+				"run_id", detail.ID, "err", err)
+			return
+		}
+		defer func() {
+			if closer, ok := sub.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case evt, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				if evt.Type != notifications.EventOrderUpdate {
+					continue
+				}
+				if evt.RunID != detail.ID.String() {
+					continue
+				}
+				payload, _ := evt.Payload.(map[string]any)
+				if payload == nil {
+					continue
+				}
+				parsed, perr := parseOrderFillEvent(payload)
+				if perr != nil {
+					slog.Debug("twap: skip order update (missing fields)",
+						"run_id", detail.ID, "err", perr)
+					continue
+				}
+				select {
+				case ch <- parsed:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+}
+
+// parseOrderFillEvent extracts the TWAP fields from a DORA order
+// update event payload. The payload is a map[string]any decoded from
+// the notifications bus.
+func parseOrderFillEvent(payload map[string]any) (twap.OrderFillEvent, error) {
+	clientOrderID, _ := payload["client_order_id"].(string)
+	if clientOrderID == "" {
+		return twap.OrderFillEvent{}, fmt.Errorf("missing client_order_id")
+	}
+	status, _ := payload["status"].(string)
+	if status == "" {
+		return twap.OrderFillEvent{}, fmt.Errorf("missing status")
+	}
+	filledQty, err := parseDecimalField(payload["filled_quantity"])
+	if err != nil {
+		return twap.OrderFillEvent{}, fmt.Errorf("parse filled_quantity: %w", err)
+	}
+	return twap.OrderFillEvent{
+		ClientOrderID:  clientOrderID,
+		Status:         status,
+		FilledQuantity: filledQty,
+	}, nil
+}
+
+// parseDecimalField extracts a decimal value from a payload field that
+// may be a string or a number.
+func parseDecimalField(v any) (decimal.Decimal, error) {
+	switch x := v.(type) {
+	case string:
+		return decimal.Parse(x)
+	case float64:
+		return decimal.NewFromFloat64(x)
+	case nil:
+		return decimal.Zero, nil
+	default:
+		return decimal.Zero, fmt.Errorf("unsupported type %T", v)
+	}
 }
 
 func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strategycore.Strategy) (uuid.UUID, error) {
@@ -2123,6 +2247,19 @@ func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
 		breakout.WithDecisionStore(h.decisionStore)(s)
 	case *twap.Strategy:
 		twap.WithDecisionStore(h.decisionStore)(s)
+	}
+}
+
+// attachStateStore wires the handler's configured StateStore into a
+// freshly-built strategy so the live run loop checkpoints progress for
+// crash recovery. Currently only TWAP uses it; no-op for other types
+// or when the handler has no store configured.
+func (h *Handler) attachStateStore(strat strategycore.Strategy) {
+	if h.stateStore == nil {
+		return
+	}
+	if s, ok := strat.(*twap.Strategy); ok {
+		twap.WithStateStore(h.stateStore)(s)
 	}
 }
 

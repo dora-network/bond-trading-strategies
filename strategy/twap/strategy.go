@@ -68,6 +68,17 @@ func WithOrderUpdates(ch <-chan OrderFillEvent) func(*Strategy) {
 	return func(s *Strategy) { s.orderUpdates = ch }
 }
 
+// SetOrderUpdatesChannel sets the channel the run loop reads for fill
+// events. Called by the handler after strategy construction and before
+// Run() so the goroutine that produces events can be wired to the
+// already-running loop. The run loop closes the channel on shutdown
+// when it transitions orderUpdates to nil.
+func (s *Strategy) SetOrderUpdatesChannel(ch <-chan OrderFillEvent) {
+	s.mu.Lock()
+	s.orderUpdates = ch
+	s.mu.Unlock()
+}
+
 // Backtest returns a no-op result since TWAP is execution-only.
 func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
 	return types.ErrorResult{}, nil
