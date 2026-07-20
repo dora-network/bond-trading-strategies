@@ -132,3 +132,17 @@ type DecisionRecorder interface {
 	// collision surfaces as a save error, not a panic.
 	MaxSeq(ctx context.Context, runID uuid.UUID) (int64, error)
 }
+
+// StateStore persists and loads per-run strategy state as opaque JSON.
+// Execution strategies (e.g. TWAP) use it to checkpoint progress so
+// they can recover and rebalance after a server restart without
+// over-executing. Satisfied by *http.PGRunStore in production.
+//
+// Implementations MUST be safe for concurrent use. A failed SaveState
+// is degraded-but-correct: the strategy continues, and the next
+// checkpoint overwrites the stale row. LoadState returns (nil, nil)
+// when no state has been persisted for the run.
+type StateStore interface {
+	SaveState(ctx context.Context, runID uuid.UUID, state []byte) error
+	LoadState(ctx context.Context, runID uuid.UUID) ([]byte, error)
+}

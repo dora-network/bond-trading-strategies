@@ -27,6 +27,7 @@ type Strategy struct {
 	cancel          context.CancelFunc
 	marketAPIClient strategy.MarketAPIClient
 	decisionStore   strategy.DecisionRecorder
+	stateStore      strategy.StateStore
 	decisionSeq     int64
 }
 
@@ -50,6 +51,12 @@ func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 // WithDecisionStore injects the decision recorder.
 func WithDecisionStore(rec strategy.DecisionRecorder) func(*Strategy) {
 	return func(s *Strategy) { s.decisionStore = rec }
+}
+
+// WithStateStore injects the per-run state checkpoint store. Used to
+// persist and recover TWAP execution progress across server restarts.
+func WithStateStore(store strategy.StateStore) func(*Strategy) {
+	return func(s *Strategy) { s.stateStore = store }
 }
 
 // Backtest returns a no-op result since TWAP is execution-only.
