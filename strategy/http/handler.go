@@ -23,6 +23,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/twap"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -1570,6 +1571,8 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		case *twap.Strategy:
 			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
+		case *vwap.Strategy:
+			vwap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		}
 	}
 
@@ -2276,6 +2279,7 @@ func defaultStrategies(
 		newTWAPDefinition(log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
 		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, tradeHistoryStore, log),
+		newVWAPDefinition(tradeHistoryStore, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2440,6 +2444,78 @@ func newTWAPDefinition(log *slog.Logger) StrategyDefinition {
 				return nil, nil, err
 			}
 			return normalised, twap.New(cfg, log), nil
+		},
+	}
+}
+
+func newVWAPDefinition(tradeHistoryStore breakout.TradeHistoryStore, log *slog.Logger) StrategyDefinition {
+	defaults := vwap.DefaultConfig()
+	return StrategyDefinition{
+		Type:             "vwap",
+		Status:           strategyStatusAvailable,
+		Description:      "Volume-weighted average price execution strategy. Bucket schedule derived from historical trade volume.",
+		SupportsRun:      true,
+		SupportsBacktest: false,
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "order_book_id",
+				Type:        "string(uuid)",
+				Description: "Order book UUID where orders will be placed.",
+				Required:    true,
+			},
+			{
+				Name:        "total_amount",
+				Type:        "number",
+				Description: "Total quantity to trade across the execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "side",
+				Type:        "string",
+				Description: "Trade side: 'buy' or 'sell'.",
+				Required:    true,
+			},
+			{
+				Name:        "start_time",
+				Type:        "string",
+				Description: "ISO 8601 start time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "end_time",
+				Type:        "string",
+				Description: "ISO 8601 end time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "window_days",
+				Type:        "integer",
+				Description: "Days of historical trade data used for ADV buckets. Default 30.",
+				Required:    false,
+				Default:     defaults.WindowDays,
+			},
+			{
+				Name:        "bucket_minutes",
+				Type:        "integer",
+				Description: "Granularity of each VWAP bucket. Default 5.",
+				Required:    false,
+				Default:     defaults.BucketMinutes,
+			},
+		},
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			cfg, normalised, err := decodeVWAPConfig(raw)
+			if err != nil {
+				return nil, nil, err
+			}
+			s := vwap.New(cfg, log)
+			if tradeHistoryStore != nil {
+				vwap.WithTradeHistoryStore(tradeHistoryStore)(s)
+			}
+			return normalised, s, nil
 		},
 	}
 }
@@ -3000,6 +3076,21 @@ func decodeTWAPConfig(raw json.RawMessage) (twap.Config, json.RawMessage, error)
 	normalised, err := json.Marshal(cfg)
 	if err != nil {
 		return twap.Config{}, nil, fmt.Errorf("marshal normalised twap config: %w", err)
+	}
+	return cfg, normalised, nil
+}
+
+func decodeVWAPConfig(raw json.RawMessage) (vwap.Config, json.RawMessage, error) {
+	var cfg vwap.Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return vwap.Config{}, nil, fmt.Errorf("decode vwap config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return vwap.Config{}, nil, err
+	}
+	normalised, err := json.Marshal(cfg)
+	if err != nil {
+		return vwap.Config{}, nil, fmt.Errorf("marshal normalised vwap config: %w", err)
 	}
 	return cfg, normalised, nil
 }

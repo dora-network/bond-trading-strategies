@@ -1,4 +1,4 @@
-package twap
+package vwap
 
 import (
 	"encoding/json"
@@ -8,30 +8,16 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/exec"
 )
 
-// RunState is the persisted checkpoint for a TWAP run. It is written
-// to strategy_runs.state after every chunk and read on restart so the
-// strategy can resume without over-executing. OrderEntry lives in
-// the shared strategy/exec package so persisted state is
-// interchangeable with VWAP, and the RunState type implements
+// RunState is the persisted checkpoint for a VWAP run. Implements
 // exec.RunStateView so the shared Executor can mutate it.
 type RunState struct {
-	// TotalFilled is the cumulative filled quantity across orders
-	// that have reached a terminal status.
-	TotalFilled decimal.Decimal `json:"total_filled"`
-	// TotalSubmitted is the cumulative quantity submitted to DORA
-	// across all orders (open, partial, filled, or cancelled). Used
-	// for the rebalance formula so in-flight and failed orders are
-	// not re-placed: nextChunkSize = (TotalAmount - TotalSubmitted)
-	// / (NumChunks - ChunksProcessed).
-	TotalSubmitted decimal.Decimal `json:"total_submitted"`
-	// ChunksProcessed is the number of chunk time-slots consumed,
-	// whether the order succeeded, failed, or was skipped.
+	TotalFilled     decimal.Decimal   `json:"total_filled"`
+	TotalSubmitted  decimal.Decimal   `json:"total_submitted"`
 	ChunksProcessed int               `json:"chunks_processed"`
 	Orders          []exec.OrderEntry `json:"orders"`
 }
 
-// OrderFillEvent aliases exec.OrderFillEvent so the handler can share
-// the order-update wiring path with VWAP.
+// OrderFillEvent aliases exec.OrderFillEvent.
 type OrderFillEvent = exec.OrderFillEvent
 
 // Compile-time assertion that RunState satisfies exec.RunStateView.
@@ -87,8 +73,7 @@ func (s *RunState) ForEachOrders(fn func(o exec.OrderEntry, idx int)) {
 	}
 }
 
-// UnmarshalState deserialises state from persisted JSON. Returns a
-// zero-value RunState if the input is nil or empty.
+// UnmarshalState deserialises state from persisted JSON.
 func UnmarshalState(raw []byte) (RunState, error) {
 	if len(raw) == 0 {
 		return RunState{}, nil

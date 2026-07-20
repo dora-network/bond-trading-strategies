@@ -1,4 +1,4 @@
-package twap
+package vwap
 
 import (
 	"testing"
@@ -18,14 +18,14 @@ func TestRunState_RoundTrip(t *testing.T) {
 		Orders: []exec.OrderEntry{
 			{
 				OrderID:           "01900000-0000-0000-0000-000000000001",
-				ClientOrderID:     "twap.run1.uuid1",
+				ClientOrderID:     "vwap.run1.uuid1",
 				RequestedQuantity: decimal.MustNew(2000, 0),
 				FilledQuantity:    decimal.MustNew(2000, 0),
 				Status:            "FILLED",
 			},
 			{
 				OrderID:           "01900000-0000-0000-0000-000000000002",
-				ClientOrderID:     "twap.run1.uuid2",
+				ClientOrderID:     "vwap.run1.uuid2",
 				RequestedQuantity: decimal.MustNew(3000, 0),
 				FilledQuantity:    decimal.MustNew(1500, 0),
 				Status:            "OPEN",
@@ -38,20 +38,10 @@ func TestRunState_RoundTrip(t *testing.T) {
 
 	decoded, err := UnmarshalState(raw)
 	require.NoError(t, err)
-
 	require.Equal(t, original.TotalFilled.String(), decoded.TotalFilled.String())
 	require.Equal(t, original.TotalSubmitted.String(), decoded.TotalSubmitted.String())
 	require.Equal(t, original.ChunksProcessed, decoded.ChunksProcessed)
 	require.Len(t, decoded.Orders, 2)
-
-	for i, want := range original.Orders {
-		got := decoded.Orders[i]
-		require.Equal(t, want.OrderID, got.OrderID)
-		require.Equal(t, want.ClientOrderID, got.ClientOrderID)
-		require.Equal(t, want.RequestedQuantity.String(), got.RequestedQuantity.String())
-		require.Equal(t, want.FilledQuantity.String(), got.FilledQuantity.String())
-		require.Equal(t, want.Status, got.Status)
-	}
 }
 
 func TestRunState_EmptyUnmarshal(t *testing.T) {
@@ -63,23 +53,4 @@ func TestRunState_EmptyUnmarshal(t *testing.T) {
 	s, err = UnmarshalState([]byte{})
 	require.NoError(t, err)
 	require.Equal(t, RunState{}, s)
-}
-
-func TestIsTerminal(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		status string
-		want   bool
-	}{
-		{"OPEN", false},
-		{"FILLED", true},
-		{"PARTIAL_FILL", true},
-		{"CANCELLED", true},
-		{"UNKNOWN", true},
-	}
-	for _, c := range cases {
-		t.Run(c.status, func(t *testing.T) {
-			require.Equal(t, c.want, exec.IsTerminal(c.status))
-		})
-	}
 }
