@@ -10,25 +10,26 @@ import (
 // to strategy_runs.state after every chunk and read on restart so the
 // strategy can resume without over-executing.
 type RunState struct {
-	// ExecutedAmount is the total quantity confirmed filled across all
-	// chunks so far. Updated from order update events (FILLED /
-	// PARTIAL_FILL), not from order placement success.
-	ExecutedAmount decimal.Decimal `json:"executed_amount"`
+	// TotalFilled is the cumulative filled quantity across all orders
+	// that have reached a terminal status. Updated once per order when
+	// it completes — not on every partial fill event.
+	TotalFilled decimal.Decimal `json:"total_filled"`
 	// ChunksProcessed is the number of chunk time-slots consumed,
 	// whether the order succeeded, failed, or was skipped. Drives the
-	// rebalance formula: nextChunkSize = (TotalAmount - ExecutedAmount)
+	// rebalance formula: nextChunkSize = (TotalAmount - TotalFilled)
 	// / (NumChunks - ChunksProcessed).
-	ChunksProcessed int `json:"chunks_processed"`
-	// PendingOrders tracks orders submitted to DORA but not yet
-	// confirmed filled. On restart, these are reconciled against the
-	// order update stream to determine actual fill quantities.
-	PendingOrders []PendingOrder `json:"pending_orders,omitempty"`
+	ChunksProcessed int          `json:"chunks_processed"`
+	Orders          []OrderEntry `json:"orders"`
 }
 
-// PendingOrder tracks a submitted-but-unconfirmed chunk order.
-type PendingOrder struct {
+// OrderEntry tracks a single chunk order placed with DORA. Its
+// FilledQuantity and Status are updated as fill events arrive.
+type OrderEntry struct {
+	OrderID           string          `json:"order_id"`
 	ClientOrderID     string          `json:"client_order_id"`
 	RequestedQuantity decimal.Decimal `json:"requested_quantity"`
+	FilledQuantity    decimal.Decimal `json:"filled_quantity"`
+	Status            string          `json:"status"`
 }
 
 // Marshal serialises the state to JSON for persistence.
@@ -47,4 +48,31 @@ func UnmarshalState(raw []byte) (RunState, error) {
 		return RunState{}, err
 	}
 	return s, nil
+}
+
+// OrderFillEvent is the simplified order update consumed by the TWAP
+// run loop. The handler (Phase 5) adapts the raw notifications.Event
+// payload from DORA's order update stream into this type so the TWAP
+// package has no dependency on the notifications package.
+type OrderFillEvent struct {
+	ClientOrderID  string
+	Status         string
+	FilledQuantity decimal.Decimal
+}
+
+// Order statuses from the DORA API that are relevant to TWAP market
+// orders. A market order transitions OPEN → terminal. PENDING exists
+// in the enum but applies only to conditional orders (stop-loss,
+// take-profit) and will never appear for a TWAP market order.
+const (
+	statusOpen        = "OPEN"
+	statusFilled      = "FILLED"
+	statusPartialFill = "PARTIAL_FILL"
+	statusCancelled   = "CANCELLED"
+)
+
+// isTerminal reports whether the order has reached its final state.
+// For TWAP market orders, any status other than OPEN is terminal.
+func isTerminal(status string) bool {
+	return status != statusOpen
 }

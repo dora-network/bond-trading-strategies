@@ -28,6 +28,8 @@ type Strategy struct {
 	marketAPIClient strategy.MarketAPIClient
 	decisionStore   strategy.DecisionRecorder
 	stateStore      strategy.StateStore
+	orderUpdates    <-chan OrderFillEvent
+	runState        RunState
 	decisionSeq     int64
 }
 
@@ -57,6 +59,13 @@ func WithDecisionStore(rec strategy.DecisionRecorder) func(*Strategy) {
 // persist and recover TWAP execution progress across server restarts.
 func WithStateStore(store strategy.StateStore) func(*Strategy) {
 	return func(s *Strategy) { s.stateStore = store }
+}
+
+// WithOrderUpdates injects a channel of order fill events from the
+// DORA order update stream. The run loop reads from this channel to
+// track actual fill quantities and rebalance remaining chunks.
+func WithOrderUpdates(ch <-chan OrderFillEvent) func(*Strategy) {
+	return func(s *Strategy) { s.orderUpdates = ch }
 }
 
 // Backtest returns a no-op result since TWAP is execution-only.
@@ -102,6 +111,12 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 	// Determine asset ID from order book ID.
 	assetID := s.cfg.OrderBookID
 
+	// Load persisted state for crash recovery.
+	s.loadState(ctx)
+	s.mu.RLock()
+	state := s.runState
+	s.mu.RUnlock()
+
 	s.log.Info(
 		"starting TWAP run",
 		"runID", s.runID,
@@ -111,6 +126,9 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 		"chunkSize", chunkSize,
 		"interval", interval,
 		"side", s.cfg.Side,
+		"executedAmount", state.TotalFilled,
+		"chunksProcessed", state.ChunksProcessed,
+		"orders", len(state.Orders),
 	)
 
 	started := false
@@ -131,6 +149,13 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 				}
 			}
 			s.mu.Unlock()
+		case evt, ok := <-s.orderUpdates:
+			if !ok {
+				s.log.Warn("twap: order updates channel closed, fill tracking disabled", "runID", s.runID)
+				s.orderUpdates = nil
+				continue
+			}
+			s.processOrderUpdate(ctx, evt)
 		case <-execTicker.C:
 			s.mu.RLock()
 			if s.paused {
@@ -265,5 +290,101 @@ func mustParseUUID(s string) uuid.UUID {
 func (s *Strategy) SetDecisionSeq(seq int64) {
 	s.mu.Lock()
 	s.decisionSeq = seq
+	s.mu.Unlock()
+}
+
+// processOrderUpdate handles an order fill event from the DORA order
+// update stream. It matches the event to an order by client_order_id
+// and replaces its filled_quantity and status with the values from
+// the event. The updated state is persisted after each event.
+func (s *Strategy) processOrderUpdate(ctx context.Context, evt OrderFillEvent) {
+	s.mu.Lock()
+	idx := -1
+	for i, o := range s.runState.Orders {
+		if o.ClientOrderID == evt.ClientOrderID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		s.mu.Unlock()
+		s.log.Debug(
+			"twap: order update for unknown client_order_id, ignoring",
+			"runID", s.runID,
+			"client_order_id", evt.ClientOrderID,
+		)
+		return
+	}
+
+	entry := &s.runState.Orders[idx]
+	wasTerminal := isTerminal(entry.Status)
+	entry.FilledQuantity = evt.FilledQuantity
+	entry.Status = evt.Status
+	nowTerminal := isTerminal(evt.Status)
+
+	// Add to running total only on the terminal transition — once,
+	// not on every partial fill.
+	if nowTerminal && !wasTerminal {
+		s.runState.TotalFilled, _ = s.runState.TotalFilled.Add(evt.FilledQuantity)
+	}
+	s.mu.Unlock()
+
+	if nowTerminal {
+		s.log.Info(
+			"twap: order reached terminal status",
+			"runID", s.runID,
+			"client_order_id", evt.ClientOrderID,
+			"status", evt.Status,
+			"filled", evt.FilledQuantity,
+			"totalFilled", s.runState.TotalFilled,
+		)
+	}
+
+	s.saveState(ctx)
+}
+
+// saveState persists the current run state to the state store. A
+// failure is logged but non-fatal — the strategy continues, and the
+// next checkpoint overwrites the stale row.
+func (s *Strategy) saveState(ctx context.Context) {
+	if s.stateStore == nil {
+		return
+	}
+	s.mu.RLock()
+	state := s.runState
+	s.mu.RUnlock()
+
+	raw, err := state.Marshal()
+	if err != nil {
+		s.log.Error("twap: marshal run state", "err", err)
+		return
+	}
+	if err := s.stateStore.SaveState(ctx, s.runID, raw); err != nil {
+		s.log.Error("twap: save run state", "err", err, "runID", s.runID)
+	}
+}
+
+// loadState reads the persisted run state from the state store. Called
+// once at the start of run(). A failure or empty state is non-fatal —
+// the strategy starts fresh from zero.
+func (s *Strategy) loadState(ctx context.Context) {
+	if s.stateStore == nil {
+		return
+	}
+	raw, err := s.stateStore.LoadState(ctx, s.runID)
+	if err != nil {
+		s.log.Error("twap: load run state, starting fresh", "err", err, "runID", s.runID)
+		return
+	}
+	if len(raw) == 0 {
+		return
+	}
+	state, err := UnmarshalState(raw)
+	if err != nil {
+		s.log.Error("twap: unmarshal run state, starting fresh", "err", err, "runID", s.runID)
+		return
+	}
+	s.mu.Lock()
+	s.runState = state
 	s.mu.Unlock()
 }
