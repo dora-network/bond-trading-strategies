@@ -5,6 +5,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/govalues/decimal"
 )
@@ -54,7 +55,7 @@ type FakeMarketAPIClient struct {
 		result1 string
 		result2 error
 	}
-	CreateMarketOrderStub        func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool, string) error
+	CreateMarketOrderStub        func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool, string) (string, error)
 	createMarketOrderMutex       sync.RWMutex
 	createMarketOrderArgsForCall []struct {
 		arg1 context.Context
@@ -66,10 +67,12 @@ type FakeMarketAPIClient struct {
 		arg7 string
 	}
 	createMarketOrderReturns struct {
-		result1 error
+		result1 string
+		result2 error
 	}
 	createMarketOrderReturnsOnCall map[int]struct {
-		result1 error
+		result1 string
+		result2 error
 	}
 	GetPortfolioV2Stub        func(context.Context) (*doraclient.AccountPortfolioV2, error)
 	getPortfolioV2Mutex       sync.RWMutex
@@ -300,7 +303,7 @@ func (fake *FakeMarketAPIClient) BaseAssetIDReturnsOnCall(i int, result1 string,
 	}{result1, result2}
 }
 
-func (fake *FakeMarketAPIClient) CreateMarketOrder(arg1 context.Context, arg2 string, arg3 doraclient.Side, arg4 decimal.Decimal, arg5 decimal.Decimal, arg6 bool, arg7 string) error {
+func (fake *FakeMarketAPIClient) CreateMarketOrder(arg1 context.Context, arg2 string, arg3 doraclient.Side, arg4 decimal.Decimal, arg5 decimal.Decimal, arg6 bool, arg7 string) (string, error) {
 	fake.createMarketOrderMutex.Lock()
 	ret, specificReturn := fake.createMarketOrderReturnsOnCall[len(fake.createMarketOrderArgsForCall)]
 	fake.createMarketOrderArgsForCall = append(fake.createMarketOrderArgsForCall, struct {
@@ -320,9 +323,9 @@ func (fake *FakeMarketAPIClient) CreateMarketOrder(arg1 context.Context, arg2 st
 		return stub(arg1, arg2, arg3, arg4, arg5, arg6, arg7)
 	}
 	if specificReturn {
-		return ret.result1
+		return ret.result1, ret.result2
 	}
-	return fakeReturns.result1
+	return fakeReturns.result1, fakeReturns.result2
 }
 
 func (fake *FakeMarketAPIClient) CreateMarketOrderCallCount() int {
@@ -331,7 +334,7 @@ func (fake *FakeMarketAPIClient) CreateMarketOrderCallCount() int {
 	return len(fake.createMarketOrderArgsForCall)
 }
 
-func (fake *FakeMarketAPIClient) CreateMarketOrderCalls(stub func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool, string) error) {
+func (fake *FakeMarketAPIClient) CreateMarketOrderCalls(stub func(context.Context, string, doraclient.Side, decimal.Decimal, decimal.Decimal, bool, string) (string, error)) {
 	fake.createMarketOrderMutex.Lock()
 	defer fake.createMarketOrderMutex.Unlock()
 	fake.CreateMarketOrderStub = stub
@@ -344,27 +347,30 @@ func (fake *FakeMarketAPIClient) CreateMarketOrderArgsForCall(i int) (context.Co
 	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5, argsForCall.arg6, argsForCall.arg7
 }
 
-func (fake *FakeMarketAPIClient) CreateMarketOrderReturns(result1 error) {
+func (fake *FakeMarketAPIClient) CreateMarketOrderReturns(result1 string, result2 error) {
 	fake.createMarketOrderMutex.Lock()
 	defer fake.createMarketOrderMutex.Unlock()
 	fake.CreateMarketOrderStub = nil
 	fake.createMarketOrderReturns = struct {
-		result1 error
-	}{result1}
+		result1 string
+		result2 error
+	}{result1, result2}
 }
 
-func (fake *FakeMarketAPIClient) CreateMarketOrderReturnsOnCall(i int, result1 error) {
+func (fake *FakeMarketAPIClient) CreateMarketOrderReturnsOnCall(i int, result1 string, result2 error) {
 	fake.createMarketOrderMutex.Lock()
 	defer fake.createMarketOrderMutex.Unlock()
 	fake.CreateMarketOrderStub = nil
 	if fake.createMarketOrderReturnsOnCall == nil {
 		fake.createMarketOrderReturnsOnCall = make(map[int]struct {
-			result1 error
+			result1 string
+			result2 error
 		})
 	}
 	fake.createMarketOrderReturnsOnCall[i] = struct {
-		result1 error
-	}{result1}
+		result1 string
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeMarketAPIClient) GetPortfolioV2(arg1 context.Context) (*doraclient.AccountPortfolioV2, error) {
@@ -517,3 +523,5 @@ func (fake *FakeMarketAPIClient) recordInvocation(key string, args []interface{}
 	}
 	fake.invocations[key] = append(fake.invocations[key], args)
 }
+
+var _ strategy.MarketAPIClient = new(FakeMarketAPIClient)

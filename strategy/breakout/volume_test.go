@@ -178,8 +178,8 @@ func TestRun_OBVUpdatesFromTradesAndGatesSignal(t *testing.T) {
 	fake.AssetPositionStub = func(_ context.Context, _ string) (decimal.Decimal, decimal.Decimal, error) {
 		return decimal.MustNew(1000, 0), decimal.Zero, nil
 	}
-	fake.CreateMarketOrderStub = func(_ context.Context, _ string, _ doraclient.Side, _ decimal.Decimal, _ decimal.Decimal, _ bool, _ string) error {
-		return nil
+	fake.CreateMarketOrderStub = func(_ context.Context, _ string, _ doraclient.Side, _ decimal.Decimal, _ decimal.Decimal, _ bool, _ string) (string, error) {
+		return "", nil
 	}
 
 	s := New(

@@ -147,7 +147,7 @@ func TestHandlerListsStrategies(t *testing.T) {
 		Items []strategyhttp.StrategySummary `json:"items"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp.Items, 3)
+	require.Len(t, resp.Items, 4)
 	byType := map[string]strategyhttp.StrategySummary{}
 	for _, it := range resp.Items {
 		byType[it.Type] = it
@@ -208,6 +208,18 @@ func TestHandlerListsStrategies(t *testing.T) {
 	assert.Equal(t, "tenor", mr.ConfigFields[7].Name)
 	assert.Equal(t, float64(1), mr.ConfigFields[8].Default)
 	assert.Equal(t, float64(1), mr.ConfigFields[9].Default)
+	twap, ok := byType["twap"]
+	require.True(t, ok, "twap should be in the strategies list")
+	assert.Equal(t, "available", twap.Status)
+	require.Len(t, twap.ConfigFields, 6)
+	assert.Equal(t, "order_book_id", twap.ConfigFields[0].Name)
+	assert.Equal(t, "total_amount", twap.ConfigFields[1].Name)
+	assert.Equal(t, "side", twap.ConfigFields[2].Name)
+	assert.Equal(t, "start_time", twap.ConfigFields[3].Name)
+	assert.Equal(t, "end_time", twap.ConfigFields[4].Name)
+	assert.Equal(t, "interval_seconds", twap.ConfigFields[5].Name)
+	assert.True(t, twap.SupportsRun)
+	assert.False(t, twap.SupportsBacktest)
 }
 
 func TestHandlerListsTenors(t *testing.T) {

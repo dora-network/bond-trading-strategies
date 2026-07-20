@@ -31,7 +31,7 @@ type MarketAPIClient interface {
 		inverseLeverage decimal.Decimal,
 		fromGlobalPosition bool,
 		clientOrderID string,
-	) error
+	) (orderID string, err error)
 	AssetCollateralWeight(ctx context.Context, assetID string) (decimal.Decimal, error)
 }
 

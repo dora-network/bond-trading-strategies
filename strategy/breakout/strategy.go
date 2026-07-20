@@ -856,7 +856,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision Decision, asset
 
 	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 	s.logger().Info("opening position", "runID", s.runID, "assetID", assetID, "signal", decision.Signal())
-	if err := s.marketAPIClient.CreateMarketOrder(
+	if _, err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, false, clientOrderID,
 	); err != nil {
 		return false, err
@@ -945,7 +945,7 @@ func (s *Strategy) closePosition(ctx context.Context, assetID, reason string) er
 	}
 
 	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
-	if err := s.marketAPIClient.CreateMarketOrder(
+	if _, err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, qty, inverseLeverage, false, clientOrderID,
 	); err != nil {
 		return err

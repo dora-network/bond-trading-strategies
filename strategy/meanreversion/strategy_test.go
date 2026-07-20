@@ -777,7 +777,7 @@ func TestRunLoop_SelfHealsWhenPositionDoesNotExistOnExchange(t *testing.T) {
 		}
 		return decimal.MustNew(50, 0), decimal.Zero, nil
 	}
-	client.CreateMarketOrderReturns(errors.New("insufficient position to close"))
+	client.CreateMarketOrderReturns("", errors.New("insufficient position to close"))
 	meanreversion.SetLookupClient(s, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

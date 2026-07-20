@@ -48,8 +48,8 @@ func runDrive(t *testing.T) (*Strategy, chan strategy.Message, chan map[uuid.UUI
 		// budget = position * fraction, fraction is 1.0, so 1000/120 ~= 8.
 		return decimal.MustNew(1000, 0), decimal.Zero, nil
 	}
-	fake.CreateMarketOrderStub = func(_ context.Context, _ string, _ doraclient.Side, _ decimal.Decimal, _ decimal.Decimal, _ bool, _ string) error {
-		return nil
+	fake.CreateMarketOrderStub = func(_ context.Context, _ string, _ doraclient.Side, _ decimal.Decimal, _ decimal.Decimal, _ bool, _ string) (string, error) {
+		return "", nil
 	}
 
 	s := New(cfg, nil, WithMarketAPIClient(fake))

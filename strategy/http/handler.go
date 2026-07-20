@@ -21,6 +21,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
+	"github.com/dora-network/bond-trading-strategies/strategy/twap"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
@@ -1550,6 +1551,8 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		case *breakout.Strategy:
 			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
+		case *twap.Strategy:
+			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		}
 	}
 
@@ -1897,6 +1900,8 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		case *breakout.Strategy:
 			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+		case *twap.Strategy:
+			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		}
 	}
 
@@ -1919,6 +1924,8 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 			case *copytrading.Strategy:
 				s.SetDecisionSeq(maxSeq)
 			case *breakout.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *twap.Strategy:
 				s.SetDecisionSeq(maxSeq)
 			}
 		}
@@ -2114,6 +2121,8 @@ func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
 		copytrading.WithDecisionStore(h.decisionStore)(s)
 	case *breakout.Strategy:
 		breakout.WithDecisionStore(h.decisionStore)(s)
+	case *twap.Strategy:
+		twap.WithDecisionStore(h.decisionStore)(s)
 	}
 }
 
@@ -2127,6 +2136,7 @@ func defaultStrategies(
 ) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
+		newTWAPDefinition(log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
 		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, tradeHistoryStore, log),
 	}
@@ -2232,6 +2242,67 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 				opts = append(opts, meanreversion.WithBacktestWriter(tradeWriter))
 			}
 			return normalised, meanreversion.New(cfg, pricesHandler, opts...), nil
+		},
+	}
+}
+
+func newTWAPDefinition(log *slog.Logger) StrategyDefinition {
+	defaults := twap.DefaultConfig()
+	return StrategyDefinition{
+		Type:             "twap",
+		Status:           strategyStatusAvailable,
+		Description:      "Time-weighted average price execution strategy for a single order book.",
+		SupportsRun:      true,
+		SupportsBacktest: false,
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "order_book_id",
+				Type:        "string(uuid)",
+				Description: "Order book UUID where orders will be placed.",
+				Required:    true,
+			},
+			{
+				Name:        "total_amount",
+				Type:        "number",
+				Description: "Total quantity to trade across the execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "side",
+				Type:        "string",
+				Description: "Trade side: 'buy' or 'sell'.",
+				Required:    true,
+			},
+			{
+				Name:        "start_time",
+				Type:        "string",
+				Description: "ISO 8601 start time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "end_time",
+				Type:        "string",
+				Description: "ISO 8601 end time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "interval_seconds",
+				Type:        "number",
+				Description: "Time between each chunk order. Default 300 (5 minutes).",
+				Required:    false,
+				Default:     defaults.IntervalSeconds,
+			},
+		},
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			cfg, normalised, err := decodeTWAPConfig(raw)
+			if err != nil {
+				return nil, nil, err
+			}
+			return normalised, twap.New(cfg, log), nil
 		},
 	}
 }
@@ -2779,6 +2850,21 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 		InitialBalance:  amount,
 		Leverage:        leverage,
 	}, normalised, nil
+}
+
+func decodeTWAPConfig(raw json.RawMessage) (twap.Config, json.RawMessage, error) {
+	var cfg twap.Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return twap.Config{}, nil, fmt.Errorf("decode twap config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return twap.Config{}, nil, err
+	}
+	normalised, err := json.Marshal(cfg)
+	if err != nil {
+		return twap.Config{}, nil, fmt.Errorf("marshal normalised twap config: %w", err)
+	}
+	return cfg, normalised, nil
 }
 
 type copyTradingConfigPayload struct {

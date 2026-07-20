@@ -365,7 +365,7 @@ type fakeMarketAPI struct {
 	orderErr error
 }
 
-func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, side doraclient.Side, quantity decimal.Decimal, inverse decimal.Decimal, fromGlobal bool, _ string) error {
+func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, side doraclient.Side, quantity decimal.Decimal, inverse decimal.Decimal, fromGlobal bool, _ string) (string, error) {
 	f.mu.Lock()
 	f.createMarketOrderCalls++
 	f.capturedQuantity = quantity
@@ -374,7 +374,7 @@ func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, side dora
 	f.capturedInverse = inverse
 	err := f.orderErr
 	f.mu.Unlock()
-	return err
+	return "", err
 }
 
 func (f *fakeMarketAPI) GetAssetPosition(_ context.Context, _ string) (decimal.Decimal, decimal.Decimal, error) {

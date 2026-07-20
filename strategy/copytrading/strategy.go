@@ -366,7 +366,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 
 	// Place market order
-	err = s.marketAPI.CreateMarketOrder(
+	_, err = s.marketAPI.CreateMarketOrder(
 		ctx,
 		trade.OrderBookID.String(),
 		side,
