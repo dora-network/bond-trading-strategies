@@ -269,6 +269,40 @@ func (c *DoraClient) CreateMarketOrder(
 	return orderID, nil
 }
 
+// GetOrderFilledStatus fetches the current status and filled quantity
+// of an order from DORA. Used by TWAP on restart to reconcile pending
+// orders that may have filled or been cancelled while the strategy
+// server was offline. Returns the order's status string (OPEN, FILLED,
+// PARTIAL_FILL, CANCELLED) and its cumulative filled quantity.
+func (c *DoraClient) GetOrderFilledStatus(ctx context.Context, orderID string) (status string, filledQuantity decimal.Decimal, err error) {
+	if c == nil || c.client == nil {
+		return "", decimal.Zero, errors.New("DORA client is not configured")
+	}
+	if c.apiKey == "" {
+		return "", decimal.Zero, errors.New("API_KEY is not configured")
+	}
+	authCtx := c.authCtx(ctx)
+	resp, rawResp, err := c.client.DefaultAPI.GetOrderById(authCtx, orderID).Execute()
+	if rawResp != nil && rawResp.Body != nil {
+		defer rawResp.Body.Close()
+	}
+	if err != nil {
+		return "", decimal.Zero, fmt.Errorf("get order %s: %w", orderID, err)
+	}
+	if resp == nil || resp.Data == nil {
+		return "", decimal.Zero, fmt.Errorf("get order %s: empty response", orderID)
+	}
+	order := *resp.Data
+	status = string(order.Status)
+	if order.FilledQuantity != "" {
+		filledQuantity, err = decimal.Parse(order.FilledQuantity)
+		if err != nil {
+			return "", decimal.Zero, fmt.Errorf("get order %s: parse filled_quantity: %w", orderID, err)
+		}
+	}
+	return status, filledQuantity, nil
+}
+
 // authCtx stamps the per-user API key on the context for DORA requests
 // that use the "apiKeyAuthHeader" auth scheme.
 func (c *DoraClient) authCtx(ctx context.Context) context.Context {

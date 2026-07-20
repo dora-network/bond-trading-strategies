@@ -10,14 +10,17 @@ import (
 // to strategy_runs.state after every chunk and read on restart so the
 // strategy can resume without over-executing.
 type RunState struct {
-	// TotalFilled is the cumulative filled quantity across all orders
-	// that have reached a terminal status. Updated once per order when
-	// it completes — not on every partial fill event.
+	// TotalFilled is the cumulative filled quantity across orders
+	// that have reached a terminal status.
 	TotalFilled decimal.Decimal `json:"total_filled"`
-	// ChunksProcessed is the number of chunk time-slots consumed,
-	// whether the order succeeded, failed, or was skipped. Drives the
-	// rebalance formula: nextChunkSize = (TotalAmount - TotalFilled)
+	// TotalSubmitted is the cumulative quantity submitted to DORA
+	// across all orders (open, partial, filled, or cancelled). Used
+	// for the rebalance formula so in-flight and failed orders are
+	// not re-placed: nextChunkSize = (TotalAmount - TotalSubmitted)
 	// / (NumChunks - ChunksProcessed).
+	TotalSubmitted decimal.Decimal `json:"total_submitted"`
+	// ChunksProcessed is the number of chunk time-slots consumed,
+	// whether the order succeeded, failed, or was skipped.
 	ChunksProcessed int          `json:"chunks_processed"`
 	Orders          []OrderEntry `json:"orders"`
 }

@@ -401,6 +401,10 @@ func (f *fakeMarketAPI) QuoteAssetID(_ context.Context, _ string) (string, error
 	return f.quoteAssetID, nil
 }
 
+func (f *fakeMarketAPI) GetOrderFilledStatus(_ context.Context, _ string) (string, decimal.Decimal, error) {
+	return "OPEN", decimal.Zero, nil
+}
+
 func (f *fakeMarketAPI) createMarketOrderCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

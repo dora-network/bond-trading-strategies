@@ -74,6 +74,22 @@ type FakeMarketAPIClient struct {
 		result1 string
 		result2 error
 	}
+	GetOrderFilledStatusStub        func(context.Context, string) (string, decimal.Decimal, error)
+	getOrderFilledStatusMutex       sync.RWMutex
+	getOrderFilledStatusArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+	}
+	getOrderFilledStatusReturns struct {
+		result1 string
+		result2 decimal.Decimal
+		result3 error
+	}
+	getOrderFilledStatusReturnsOnCall map[int]struct {
+		result1 string
+		result2 decimal.Decimal
+		result3 error
+	}
 	GetPortfolioV2Stub        func(context.Context) (*doraclient.AccountPortfolioV2, error)
 	getPortfolioV2Mutex       sync.RWMutex
 	getPortfolioV2ArgsForCall []struct {
@@ -371,6 +387,74 @@ func (fake *FakeMarketAPIClient) CreateMarketOrderReturnsOnCall(i int, result1 s
 		result1 string
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeMarketAPIClient) GetOrderFilledStatus(arg1 context.Context, arg2 string) (string, decimal.Decimal, error) {
+	fake.getOrderFilledStatusMutex.Lock()
+	ret, specificReturn := fake.getOrderFilledStatusReturnsOnCall[len(fake.getOrderFilledStatusArgsForCall)]
+	fake.getOrderFilledStatusArgsForCall = append(fake.getOrderFilledStatusArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.GetOrderFilledStatusStub
+	fakeReturns := fake.getOrderFilledStatusReturns
+	fake.recordInvocation("GetOrderFilledStatus", []interface{}{arg1, arg2})
+	fake.getOrderFilledStatusMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeMarketAPIClient) GetOrderFilledStatusCallCount() int {
+	fake.getOrderFilledStatusMutex.RLock()
+	defer fake.getOrderFilledStatusMutex.RUnlock()
+	return len(fake.getOrderFilledStatusArgsForCall)
+}
+
+func (fake *FakeMarketAPIClient) GetOrderFilledStatusCalls(stub func(context.Context, string) (string, decimal.Decimal, error)) {
+	fake.getOrderFilledStatusMutex.Lock()
+	defer fake.getOrderFilledStatusMutex.Unlock()
+	fake.GetOrderFilledStatusStub = stub
+}
+
+func (fake *FakeMarketAPIClient) GetOrderFilledStatusArgsForCall(i int) (context.Context, string) {
+	fake.getOrderFilledStatusMutex.RLock()
+	defer fake.getOrderFilledStatusMutex.RUnlock()
+	argsForCall := fake.getOrderFilledStatusArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeMarketAPIClient) GetOrderFilledStatusReturns(result1 string, result2 decimal.Decimal, result3 error) {
+	fake.getOrderFilledStatusMutex.Lock()
+	defer fake.getOrderFilledStatusMutex.Unlock()
+	fake.GetOrderFilledStatusStub = nil
+	fake.getOrderFilledStatusReturns = struct {
+		result1 string
+		result2 decimal.Decimal
+		result3 error
+	}{result1, result2, result3}
+}
+
+func (fake *FakeMarketAPIClient) GetOrderFilledStatusReturnsOnCall(i int, result1 string, result2 decimal.Decimal, result3 error) {
+	fake.getOrderFilledStatusMutex.Lock()
+	defer fake.getOrderFilledStatusMutex.Unlock()
+	fake.GetOrderFilledStatusStub = nil
+	if fake.getOrderFilledStatusReturnsOnCall == nil {
+		fake.getOrderFilledStatusReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 decimal.Decimal
+			result3 error
+		})
+	}
+	fake.getOrderFilledStatusReturnsOnCall[i] = struct {
+		result1 string
+		result2 decimal.Decimal
+		result3 error
+	}{result1, result2, result3}
 }
 
 func (fake *FakeMarketAPIClient) GetPortfolioV2(arg1 context.Context) (*doraclient.AccountPortfolioV2, error) {

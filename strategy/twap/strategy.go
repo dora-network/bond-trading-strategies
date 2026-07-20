@@ -85,37 +85,36 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 }
 
 func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error {
-	// Calculate chunk size and interval.
 	numChunks := s.cfg.NumChunks()
 	if numChunks == 0 {
 		return fmt.Errorf("twap: no chunks in execution window")
 	}
-	divisor := decimal.MustNew(int64(numChunks), 0)
-	chunkSize, err := s.cfg.TotalAmount.Quo(divisor)
-	if err != nil {
-		return fmt.Errorf("twap: calculate chunk size: %w", err)
-	}
-
-	// Calculate interval.
 	duration := s.cfg.EndTime.Sub(s.cfg.StartTime)
 	interval := duration / time.Duration(numChunks)
-	execTicker := time.NewTicker(interval)
-	defer execTicker.Stop()
 
-	// Determine signal.
 	signal := types.SignalBuy
 	if s.cfg.Side == "sell" {
 		signal = types.SignalSell
 	}
-
-	// Determine asset ID from order book ID.
 	assetID := s.cfg.OrderBookID
 
-	// Load persisted state for crash recovery.
 	s.loadState(ctx)
+	s.reconcilePendingOrders(ctx)
+
 	s.mu.RLock()
 	state := s.runState
+	chunksProcessed := state.ChunksProcessed
+	totalSubmitted := state.TotalSubmitted
 	s.mu.RUnlock()
+
+	baseChunkSize, err := s.computeChunkSize(numChunks, totalSubmitted, chunksProcessed)
+	if err != nil {
+		return fmt.Errorf("twap: calculate chunk size: %w", err)
+	}
+
+	scheduledTime := func(i int) time.Time {
+		return s.cfg.StartTime.Add(time.Duration(i) * interval)
+	}
 
 	s.log.Info(
 		"starting TWAP run",
@@ -123,16 +122,37 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 		"orderBookID", s.cfg.OrderBookID,
 		"totalAmount", s.cfg.TotalAmount,
 		"numChunks", numChunks,
-		"chunkSize", chunkSize,
 		"interval", interval,
 		"side", s.cfg.Side,
-		"executedAmount", state.TotalFilled,
-		"chunksProcessed", state.ChunksProcessed,
+		"executedAmount", totalSubmitted,
+		"chunksProcessed", chunksProcessed,
 		"orders", len(state.Orders),
 	)
 
-	started := false
-	for {
+	nextChunk := s.skipMissedChunks(ctx, numChunks, scheduledTime, chunksProcessed)
+	if nextChunk >= numChunks {
+		return nil
+	}
+
+	var timer *time.Timer
+	resetTimer := func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		wait := time.Until(scheduledTime(nextChunk))
+		if wait < 0 {
+			wait = 0
+		}
+		timer = time.NewTimer(wait)
+	}
+	resetTimer()
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
+	for nextChunk < numChunks {
 		select {
 		case <-ctx.Done():
 			return nil
@@ -151,90 +171,143 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 			s.mu.Unlock()
 		case evt, ok := <-s.orderUpdates:
 			if !ok {
-				s.log.Warn("twap: order updates channel closed, fill tracking disabled", "runID", s.runID)
+				s.log.Warn("twap: order updates channel closed", "runID", s.runID)
 				s.orderUpdates = nil
 				continue
 			}
 			s.processOrderUpdate(ctx, evt)
-		case <-execTicker.C:
-			s.mu.RLock()
-			if s.paused {
-				s.mu.RUnlock()
-				continue
-			}
-			s.mu.RUnlock()
-
-			if !started {
-				// Wait until we're at or past start time.
-				now := time.Now().UTC()
-				if now.Before(s.cfg.StartTime) {
-					// Reset ticker to fire at start time.
-					execTicker.Reset(s.cfg.StartTime.Sub(now))
-					continue
-				}
-				started = true
-			}
-
-			// Stop if the execution window has elapsed — do not place
-			// orders past EndTime.
-			if time.Now().UTC().After(s.cfg.EndTime) {
-				s.log.Info("twap: execution window ended", "runID", s.runID)
+		case <-timer.C:
+			if !s.handleChunkTick(ctx, nextChunk, numChunks, baseChunkSize, assetID, signal) {
 				return nil
 			}
-
-			// Place order for this chunk.
-			decision := NewDecision(time.Now().UTC(), assetID, signal, chunkSize)
-			clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
-			if err := s.executeDecision(ctx, decision, clientOrderID); err != nil {
-				s.log.Error(
-					"twap: failed to execute decision",
-					"runID", s.runID,
-					"err", err,
-				)
-			}
+			nextChunk++
+			resetTimer()
 		}
 	}
+	return nil
 }
 
-func (s *Strategy) executeDecision(ctx context.Context, decision Decision, clientOrderID string) error {
-	quantity := decision.position
-	if quantity.IsZero() {
-		return nil
+// skipMissedChunks consumes chunk slots whose scheduled time has
+// already passed (missed during downtime or pause). Returns the
+// index of the next chunk to schedule.
+func (s *Strategy) skipMissedChunks(ctx context.Context, numChunks int, scheduledTime func(int) time.Time, chunksProcessed int) int {
+	nextChunk := chunksProcessed
+	now := time.Now().UTC()
+	for nextChunk < numChunks && !now.Before(scheduledTime(nextChunk)) {
+		s.mu.Lock()
+		s.runState.ChunksProcessed = nextChunk + 1
+		s.mu.Unlock()
+		s.saveState(ctx)
+		s.log.Info("twap: skipping missed chunk", "runID", s.runID, "chunk", nextChunk)
+		nextChunk++
+	}
+	if nextChunk >= numChunks {
+		s.log.Info("twap: execution window fully elapsed", "runID", s.runID)
+	}
+	return nextChunk
+}
+
+// computeChunkSize returns the rebalanced chunk size for the next
+// chunk: (totalAmount - totalSubmitted) / (numChunks - chunksProcessed).
+// Using TotalSubmitted (not TotalFilled) prevents re-placing in-flight
+// or cancelled quantities.
+func (s *Strategy) computeChunkSize(numChunks int, totalSubmitted decimal.Decimal, chunksProcessed int) (decimal.Decimal, error) {
+	remaining := numChunks - chunksProcessed
+	if remaining <= 0 {
+		return decimal.Zero, nil
+	}
+	delta, err := s.cfg.TotalAmount.Sub(totalSubmitted)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	if !delta.IsPos() {
+		delta = decimal.Zero
+	}
+	divisor := decimal.MustNew(int64(remaining), 0)
+	return delta.Quo(divisor)
+}
+
+// handleChunkTick places the next chunk order (or skips it if paused),
+// advances the chunk index, and persists state. Returns false if the
+// run has completed and the caller should return.
+func (s *Strategy) handleChunkTick(
+	ctx context.Context,
+	chunkIdx, numChunks int,
+	baseChunkSize decimal.Decimal,
+	assetID string,
+	signal types.Signal,
+) bool {
+	s.mu.RLock()
+	paused := s.paused
+	ts := s.runState.TotalSubmitted
+	cp := s.runState.ChunksProcessed
+	s.mu.RUnlock()
+
+	if paused {
+		s.log.Info("twap: skipping chunk (paused)", "runID", s.runID, "chunk", chunkIdx)
+	} else {
+		chunkSize, err := s.computeChunkSize(numChunks, ts, cp)
+		if err != nil {
+			s.log.Error("twap: recalculate chunk size", "err", err)
+			chunkSize = baseChunkSize
+		}
+		s.placeChunk(ctx, chunkIdx, assetID, signal, chunkSize)
 	}
 
-	side := doraclient.SIDE_BUY
-	if decision.signal == types.SignalSell {
-		side = doraclient.SIDE_SELL
+	nextChunk := chunkIdx + 1
+	s.mu.Lock()
+	s.runState.ChunksProcessed = nextChunk
+	s.mu.Unlock()
+	s.saveState(ctx)
+
+	if nextChunk >= numChunks {
+		s.log.Info("twap: all chunks placed", "runID", s.runID)
+		return false
 	}
+	return true
+}
 
-	// TWAP doesn't use leverage — pass 1.0 as inverse leverage.
-	inverseLeverage := decimal.One
-
-	_, err := s.marketAPIClient.CreateMarketOrder(
+// placeChunk places a single chunk order and records it in pending state.
+func (s *Strategy) placeChunk(ctx context.Context, chunkIdx int, assetID string, signal types.Signal, chunkSize decimal.Decimal) {
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
+	decision := NewDecision(time.Now().UTC(), assetID, signal, chunkSize)
+	orderID, err := s.marketAPIClient.CreateMarketOrder(
 		ctx,
 		decision.bondID,
-		side,
-		quantity,
-		inverseLeverage,
-		false, // fromGlobalPosition
+		doraclientSide(signal),
+		chunkSize,
+		decimal.One,
+		false,
 		clientOrderID,
 	)
 	if err != nil {
-		return fmt.Errorf("create market order: %w", err)
+		s.log.Error("twap: create market order failed", "runID", s.runID, "chunk", chunkIdx, "err", err)
+		return
 	}
 
-	s.log.Info(
-		"twap: market order placed",
-		"runID", s.runID,
-		"quantity", quantity,
-		"side", side,
-		"clientOrderID", clientOrderID,
-	)
+	// Track this order so we can reconcile it on restart.
+	s.mu.Lock()
+	s.runState.Orders = append(s.runState.Orders, OrderEntry{
+		OrderID:           orderID,
+		ClientOrderID:     clientOrderID,
+		RequestedQuantity: chunkSize,
+		FilledQuantity:    decimal.Zero,
+		Status:            statusOpen,
+	})
+	s.runState.TotalSubmitted, _ = s.runState.TotalSubmitted.Add(chunkSize)
+	s.mu.Unlock()
 
-	// Record the decision.
 	s.recordDecision(ctx, decision, clientOrderID)
+	s.saveState(ctx)
 
-	return nil
+	s.log.Info(
+		"twap: chunk order placed",
+		"runID", s.runID,
+		"chunk", chunkIdx,
+		"client_order_id", clientOrderID,
+		"order_id", orderID,
+		"chunk_size", chunkSize,
+	)
 }
 
 func (s *Strategy) recordDecision(ctx context.Context, decision Decision, clientOrderID string) {
@@ -343,6 +416,41 @@ func (s *Strategy) processOrderUpdate(ctx context.Context, evt OrderFillEvent) {
 	s.saveState(ctx)
 }
 
+// reconcilePendingOrders queries DORA for each order that was open when
+// the strategy was last running, updating state with their actual
+// status and filled quantity. Called once at run startup, after
+// loadState. Orders that reached terminal status during downtime
+// contribute to TotalFilled.
+func (s *Strategy) reconcilePendingOrders(ctx context.Context) {
+	if s.marketAPIClient == nil {
+		return
+	}
+	s.mu.Lock()
+	orders := append([]OrderEntry(nil), s.runState.Orders...)
+	s.mu.Unlock()
+
+	for i, o := range orders {
+		// Skip orders already at terminal status.
+		if isTerminal(o.Status) {
+			continue
+		}
+		status, filledQty, err := s.marketAPIClient.GetOrderFilledStatus(ctx, o.OrderID)
+		if err != nil {
+			s.log.Error("twap: reconcile order failed", "runID", s.runID, "orderID", o.OrderID, "err", err)
+			continue
+		}
+		s.mu.Lock()
+		entry := &s.runState.Orders[i]
+		if !isTerminal(entry.Status) && isTerminal(status) {
+			s.runState.TotalFilled, _ = s.runState.TotalFilled.Add(filledQty)
+		}
+		entry.FilledQuantity = filledQty
+		entry.Status = status
+		s.mu.Unlock()
+	}
+	s.saveState(ctx)
+}
+
 // saveState persists the current run state to the state store. A
 // failure is logged but non-fatal — the strategy continues, and the
 // next checkpoint overwrites the stale row.
@@ -387,4 +495,12 @@ func (s *Strategy) loadState(ctx context.Context) {
 	s.mu.Lock()
 	s.runState = state
 	s.mu.Unlock()
+}
+
+// doraclientSide converts a strategy signal to a DORA order side.
+func doraclientSide(signal types.Signal) doraclient.Side {
+	if signal == types.SignalSell {
+		return doraclient.SIDE_SELL
+	}
+	return doraclient.SIDE_BUY
 }
