@@ -129,6 +129,16 @@ func WithDecisionStore(store strategy.DecisionRecorder) func(*Strategy) {
 	}
 }
 
+// SetDecisionSeq seeds the in-memory decision counter. Called once at
+// strategy start (after a server restart, after a resumed run) so the
+// counter resumes past the DB frontier and avoids duplicate-key
+// collisions on (run_id, seq). Concurrent-safe via s.mu.
+func (s *Strategy) SetDecisionSeq(seq int64) {
+	s.mu.Lock()
+	s.decisionSeq = seq
+	s.mu.Unlock()
+}
+
 // Backtest runs a backtest simulation for the given time range.
 func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtestResult types.BacktestResult, err error) {
 	if s.backtestStore == nil {
@@ -229,34 +239,33 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		return fmt.Errorf("get portfolio: %w", err)
 	}
 
-	// Compute position from portfolio data. The portfolio includes
-	// ALL accounts (global + isolated), so we correctly track
-	// isolated margin positions.
-	available, borrowed := positionFromPortfolio(portfolio, trade.AssetID.String())
+	// Compute the position by looking ONLY at the bond's isolated
+	// margin account. We never sum positions across accounts —
+	// global vs isolated pools are kept separate by DORA and a
+	// long on global plus a short on isolated should not be
+	// treated as flat. All trading for this bond also routes
+	// through the same isolated account, so reading from it gives
+	// the position that the next order will offset.
+	bondAccount := s.bondBalancesFor(portfolio, trade.AssetID.String(), false)
+	available, borrowed := bondAccount.available, bondAccount.borrowed
 	current := positionForAsset(available, borrowed)
-	s.log.Debug("position state",
+	s.log.Debug("isolated-account position state",
 		"asset", trade.AssetID,
 		"available", available,
 		"borrowed", borrowed,
 		"current", current,
 	)
-
-	positionOnGlobal, hasPosition := positionAccountIsGlobal(portfolio, trade.AssetID.String())
-
-	// DORA's from_global_position flag:
-	//   - Closes mirror the IsGlobal of the account holding the
-	//     existing position (positionOnGlobal).
-	//   - Opens/extends follow the leverage rules: long with no
-	//     leverage → true; leveraged long or short → false.
-	fromGlobal := fromGlobalPosition(side, current, s.cfg.Leverage, positionOnGlobal)
+	// All trading routes through the bond's isolated margin account.
+	// DORA's from_global_position flag is therefore always false —
+	// strategy leverage does not change which account backs the
+	// order; it only changes inverse_leverage on opens and
+	// extends. Per-bond isolated margin cleanly limits each bond's
+	// position to its own pool of collateral.
+	fromGlobal := false
 	s.log.Debug("account selection",
-		"has_position", hasPosition,
-		"position_on_global", positionOnGlobal,
 		"from_global", fromGlobal,
 		"leverage", s.cfg.Leverage,
 	)
-
-	// Pick which asset's available balance to size the order from.
 	// Closes look at the traded bond (we need to know how much we
 	// hold); opens/extends look at USD (cash to spend, or collateral
 	// to borrow the bond to short).
@@ -271,10 +280,13 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 		"side", side,
 	)
 
-	// DORA's inverse_leverage is 1/leverage. DORA rejects leveraged
-	// closes ("cannot use leverage while position has available
-	// bonds"). For closes, force leverage to 1 (no leverage).
-	// For opens/extends, use the configured strategy leverage.
+	// Order leverage rule (DORA-5778):
+	//   - Closes ALWAYS go out at leverage=1, regardless of the
+	//     strategy's configured leverage. The strategy-level
+	//     leverage only determines which account (fromGlobal) the
+	//     order sizes against — it never reaches the order itself.
+	//   - Opens/extends use the strategy leverage; inverse_leverage
+	//     is 1/leverage when leverage > 1 and 1.0 otherwise.
 	orderLeverage := s.cfg.Leverage
 	if isClose(side, current) {
 		orderLeverage = decimal.One
@@ -299,19 +311,25 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	)
 
 	// Calculate order size.
-	//   - Closes: close the entire position (not a percentage).
+	//   - Closes: close the entire position from the bond's
+	//     isolated account only — DORA rejects orders larger than
+	//     one account actually holds, so we never sum across
+	//     accounts.
 	//   - Opens/extends: availableBalance * percentage * leverage.
 	var orderSize decimal.Decimal
 	if isClose(side, current) {
+		// All trading routes through the isolated account, so the
+		// close size is read from the same single account.
+		accountBalances := s.bondBalancesFor(portfolio, trade.AssetID.String(), false)
 		if current == positionLong {
-			orderSize = available
+			orderSize = accountBalances.available
 		} else {
-			orderSize = borrowed
+			orderSize = accountBalances.borrowed
 		}
 		s.log.Info("closing position, using full position size",
 			"current", current,
-			"available", available,
-			"borrowed", borrowed,
+			"available", accountBalances.available,
+			"borrowed", accountBalances.borrowed,
 			"order_size", orderSize,
 		)
 	} else {
@@ -345,7 +363,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 
 	// Build the client_order_id before submitting so the same value
 	// flows into the DORA request and the recorded decision row.
-	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 
 	// Place market order
 	err = s.marketAPI.CreateMarketOrder(
@@ -400,10 +418,11 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 // asset, derived from the ledger positions endpoint.
 type positionDirection int
 
-// strategyType is the strategy.Decision.StrategyType value used by
-// the live run loop and the client_order_id format.  Keep in sync
-// with the string written by recordDecision.
-const strategyType = "copy_trading"
+// StrategyType is the strategy.Decision.StrategyType value used by the
+// live run loop and the client_order_id format. Exported because the
+// cmd/strategy-server wiring passes it into the orderupdates.Filter as
+// the set of allowed client_order_id prefixes.
+const StrategyType = "copy_trading"
 
 const (
 	positionFlat positionDirection = iota
@@ -424,39 +443,6 @@ func positionForAsset(available, borrowed decimal.Decimal) positionDirection {
 		return positionShort
 	}
 	return positionFlat
-}
-
-// positionFromPortfolio extracts the available and borrowed amounts for
-// an asset across all accounts (global and isolated) in the portfolio.
-// This correctly tracks isolated margin positions that GetLedgerPositionsSelf
-// misses because it only queries the global account.
-func positionFromPortfolio(portfolio *doraclient.AccountPortfolioV2, assetID string) (decimal.Decimal, decimal.Decimal) {
-	if portfolio == nil {
-		return decimal.Zero, decimal.Zero
-	}
-	accounts := portfolio.GetAccounts()
-	if len(accounts) == 0 {
-		return decimal.Zero, decimal.Zero
-	}
-
-	var totalAvailable, totalBorrowed decimal.Decimal
-	for _, assetMap := range accounts {
-		account, ok := assetMap[assetID]
-		if !ok {
-			continue
-		}
-		avail, err := decimal.Parse(account.Available)
-		if err != nil {
-			continue
-		}
-		borrow, err := decimal.Parse(account.Borrowed)
-		if err != nil {
-			continue
-		}
-		totalAvailable, _ = totalAvailable.Add(avail)
-		totalBorrowed, _ = totalBorrowed.Add(borrow)
-	}
-	return totalAvailable, totalBorrowed
 }
 
 // isClose reports whether an order with the given side would close (or
@@ -489,100 +475,6 @@ func balanceAssetFor(side doraclient.Side, current positionDirection, bondAssetI
 	return quoteAssetID
 }
 
-// fromGlobalPosition reports whether a DORA order with the given side
-// and current asset position should use DORA's global (cross-margin)
-// position pool.
-//
-// The rule is two-part:
-//
-//   - Closes (Long+SELL or Short+BUY): fromGlobal mirrors the
-//     IsGlobal flag of the account that holds the existing position
-//     (positionOnGlobal). A close on the global account uses the
-//     global pool (fromGlobal=true); a close on an isolated account
-//     uses isolated margin (fromGlobal=false). The caller resolves
-//     positionOnGlobal from the portfolio.
-//
-//   - Opens/extends: long with no leverage → global (true);
-//     leveraged long or any short → isolated (false). This is
-//     purely a function of (side, leverage) — the position doesn't
-//     matter because there's nothing to close.
-func fromGlobalPosition(side doraclient.Side, current positionDirection, leverage decimal.Decimal, positionOnGlobal bool) bool {
-	closesLong := current == positionLong && side == doraclient.SIDE_SELL
-	closesShort := current == positionShort && side == doraclient.SIDE_BUY
-	if closesLong || closesShort {
-		return positionOnGlobal
-	}
-
-	// Opens/extends. Shorts always need leverage; longs only when
-	// strategy-level leverage > 1.
-	noLeverage := leverage.Cmp(decimal.One) <= 0
-	switch side {
-	case doraclient.SIDE_BUY:
-		return noLeverage
-	case doraclient.SIDE_SELL:
-		return false
-	}
-	return false
-}
-
-// positionAccountIsGlobal reports which account (global vs isolated)
-// holds the existing position on the given asset. Returns (isGlobal,
-// found):
-//   - (true, true)  → the global account has the position
-//   - (false, true) → an isolated account has the position
-//   - (false, false) → no account has a position (flat)
-//
-// If the bot has positions on the same asset across both global and
-// isolated accounts, the global account wins (closes should be
-// against the global pool first, which is also where new positions
-// land by default).
-func positionAccountIsGlobal(portfolio *doraclient.AccountPortfolioV2, assetID string) (bool, bool) {
-	if portfolio == nil {
-		return false, false
-	}
-	hasNonZero := func(avail, borrow string) bool {
-		a, _ := decimal.Parse(avail)
-		b, _ := decimal.Parse(borrow)
-		net, _ := a.Sub(b)
-		return !net.IsZero()
-	}
-
-	accounts := portfolio.GetAccounts()
-	if len(accounts) == 0 {
-		return false, false
-	}
-
-	// Prefer the global account if it has a position.
-	for _, assetMap := range accounts {
-		account, ok := assetMap[assetID]
-		if !ok {
-			continue
-		}
-		if !account.GetIsGlobal() {
-			continue
-		}
-		if hasNonZero(account.Available, account.Borrowed) {
-			return true, true
-		}
-	}
-
-	// Fall back to an isolated account.
-	for _, assetMap := range accounts {
-		account, ok := assetMap[assetID]
-		if !ok {
-			continue
-		}
-		if account.GetIsGlobal() {
-			continue
-		}
-		if hasNonZero(account.Available, account.Borrowed) {
-			return false, true
-		}
-	}
-
-	return false, false
-}
-
 // availableBalanceFor returns the available balance from the
 // appropriate account for the traded asset, given the
 // fromGlobalPosition rule:
@@ -611,10 +503,17 @@ func (s *Strategy) availableBalanceFor(
 		// Global account: sum across all global accounts for the asset.
 		return sumAvailableByAccountType(accounts, true, balanceAsset)
 	}
-
 	// Isolated account: each bond has its own isolated margin
 	// account. Find the account that contains the bond asset and
 	// read the balanceAsset (e.g. USD) from that specific account.
+	//
+	// Shorts always use isolated margin (DORA requires borrowing
+	// from the leverage module, which only happens on isolated
+	// accounts). A short at any leverage — including leverage=1 —
+	// must therefore source its collateral / debt from the bond's
+	// isolated margin account, never from the global account. The
+	// loop below is strict: it only returns the isolated account's
+	// balanceAsset and never falls back to global for a short.
 	for _, assetMap := range accounts {
 		bondAccount, ok := assetMap[bondAssetID]
 		if !ok {
@@ -623,20 +522,27 @@ func (s *Strategy) availableBalanceFor(
 		if bondAccount.GetIsGlobal() {
 			continue
 		}
-		// This is the isolated margin account for the bond.
+		// This is the isolated margin account for the bond. Read
+		// the balanceAsset only if the same account holds it; if
+		// not, return zero rather than silently leaking to the
+		// global account (a bond's isolated account that has been
+		// fully deployed collateral-wise has nothing to spend).
 		balanceAccount, ok := assetMap[balanceAsset]
 		if !ok {
-			continue
+			return decimal.Zero
 		}
 		available, err := decimal.Parse(balanceAccount.Available)
 		if err != nil {
-			continue
+			return decimal.Zero
 		}
 		return available
 	}
 
-	// Fallback: no isolated account for this bond yet; use global.
-	return sumAvailableByAccountType(accounts, true, balanceAsset)
+	// No isolated account for this bond exists yet (flat → opening
+	// a new short). DORA creates the isolated account on order
+	// execution; until then there is no balance to size from, so
+	// skip the trade rather than silently widen to global USD.
+	return decimal.Zero
 }
 
 func sumAvailableByAccountType(
@@ -660,6 +566,69 @@ func sumAvailableByAccountType(
 		total, _ = total.Add(available)
 	}
 	return total
+}
+
+// bondBalances holds the bond-asset available and borrowed quantities
+// for a single account type (global or isolated). Used to size close
+// orders against the exact account DORA will debit, so the order never
+// exceeds what one account actually holds.
+type bondBalances struct {
+	available decimal.Decimal
+	borrowed  decimal.Decimal
+}
+
+// bondBalancesFor returns the bond's available and borrowed quantities
+// from the single account type selected by fromGlobal. The global
+// account sums all global-account entries for the bond (single row in
+// practice); the isolated route reads the unique isolated margin
+// account for that bond.
+func (s *Strategy) bondBalancesFor(portfolio *doraclient.AccountPortfolioV2, bondAssetID string, fromGlobal bool) bondBalances {
+	if portfolio == nil {
+		return bondBalances{}
+	}
+	accounts := portfolio.GetAccounts()
+	if len(accounts) == 0 {
+		return bondBalances{}
+	}
+
+	if fromGlobal {
+		var avail, borrow decimal.Decimal
+		for _, assetMap := range accounts {
+			account, ok := assetMap[bondAssetID]
+			if !ok {
+				continue
+			}
+			if !account.GetIsGlobal() {
+				continue
+			}
+			if a, err := decimal.Parse(account.Available); err == nil {
+				avail, _ = avail.Add(a)
+			}
+			if b, err := decimal.Parse(account.Borrowed); err == nil {
+				borrow, _ = borrow.Add(b)
+			}
+		}
+		return bondBalances{available: avail, borrowed: borrow}
+	}
+
+	for _, assetMap := range accounts {
+		account, ok := assetMap[bondAssetID]
+		if !ok {
+			continue
+		}
+		if account.GetIsGlobal() {
+			continue
+		}
+		var avail, borrow decimal.Decimal
+		if a, err := decimal.Parse(account.Available); err == nil {
+			avail = a
+		}
+		if b, err := decimal.Parse(account.Borrowed); err == nil {
+			borrow = b
+		}
+		return bondBalances{available: avail, borrowed: borrow}
+	}
+	return bondBalances{}
 }
 
 // calculateOrderSize computes the order size from available balance, percentage,
@@ -707,7 +676,7 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 
 	d.RunID = runID
 	d.Seq = seq
-	d.StrategyType = strategyType
+	d.StrategyType = StrategyType
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = time.Now().UTC()
 	}

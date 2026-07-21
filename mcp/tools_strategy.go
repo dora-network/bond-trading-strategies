@@ -65,6 +65,14 @@ type strategyCancelBacktestArgs struct {
 	ID string `json:"id"`
 }
 
+type strategyListTradingDecisionsArgs struct {
+	RunID  string `json:"run_id"`
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
 // configProperties returns the JSON Schema property map for the strategy
 // `config` object. It lists fields from both supported strategies so MCP
 // clients (e.g. opencode) get explicit type information and do not fall
@@ -398,6 +406,32 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args strategyCancelBacktestArgs) (*mcp.CallToolResult, error) {
 			result, err := client.cancelBacktest(ctx, args.ID)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return jsonText(result)
+		}),
+	)
+
+	s.AddTool(
+		mcp.NewTool("list_trading_decisions",
+			mcp.WithDescription("List the trading decisions recorded for a live strategy run, newest first. Requires run_id. Optional from/to (RFC3339 or YYYY-MM-DD), limit (default 50, max 200), and cursor (opaque, from a previous call). The user is derived from the auth token, not the URL."), //nolint:lll // description required for MCP clients
+			mcp.WithString("run_id", mcp.Required(), mcp.Description("Strategy run ID.")),
+			mcp.WithString("from", mcp.Description("Inclusive lower bound on created_at; RFC3339 or YYYY-MM-DD.")),
+			mcp.WithString("to", mcp.Description("Inclusive upper bound on created_at; RFC3339 or YYYY-MM-DD.")),
+			mcp.WithNumber("limit", mcp.Description("Page size; default 50, silently clamped to [1, 200].")),
+			mcp.WithString("cursor", mcp.Description("Opaque continuation token from a previous call.")),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args strategyListTradingDecisionsArgs) (*mcp.CallToolResult, error) { //nolint:lll // typed handler signature
+			if args.RunID == "" {
+				return mcp.NewToolResultError("run_id is required"), nil
+			}
+			result, err := client.listTradingDecisions(ctx, args.RunID, listTradingDecisionsParams{
+				From:   args.From,
+				To:     args.To,
+				Limit:  args.Limit,
+				Cursor: args.Cursor,
+			})
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}

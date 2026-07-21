@@ -836,3 +836,9 @@ func TestRunLoop_SelfHealsWhenPositionDoesNotExistOnExchange(t *testing.T) {
 	assert.Equal(t, types.SignalHold, meanreversion.OpenSignal(s))
 	assert.True(t, meanreversion.BondQty(s).IsZero())
 }
+
+func TestStrategyTypeExported(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "mean_reversion", meanreversion.StrategyType,
+		"StrategyType must be exported and equal to the documented value")
+}

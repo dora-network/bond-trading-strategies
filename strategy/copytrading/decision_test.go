@@ -35,6 +35,20 @@ func (f *fakeDecisionRecorder) SaveDecision(_ context.Context, d strategy.Decisi
 	return f.err
 }
 
+// MaxSeq returns the highest seq in the recorded decisions. Implements
+// strategy.DecisionRecorder for the fake.
+func (f *fakeDecisionRecorder) MaxSeq(_ context.Context, _ uuid.UUID) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var max int64
+	for _, d := range f.decisions {
+		if d.Seq > max {
+			max = d.Seq
+		}
+	}
+	return max, nil
+}
+
 func (f *fakeDecisionRecorder) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -63,9 +77,9 @@ func buildStrategyForDecisionTest(rec strategy.DecisionRecorder) (*Strategy, *fa
 	api := &fakeMarketAPI{}
 	api.portfolio = &doraclient.AccountPortfolioV2{
 		Accounts: map[string]map[string]doraclient.AccountV2{
-			"global": {
-				bondID.String(): {AssetId: bondID.String(), IsGlobal: boolPtr(true), Available: "1000"},
-				usdID:           {AssetId: usdID, IsGlobal: boolPtr(true), Available: "10000"},
+			"isolated-bond": {
+				bondID.String(): {AssetId: bondID.String(), IsGlobal: boolPtr(false), Available: "1000", Borrowed: "0"},
+				usdID:           {AssetId: usdID, IsGlobal: boolPtr(false), Available: "10000"},
 			},
 		},
 	}
@@ -141,7 +155,7 @@ func TestRecordDecision_LiveRunRecordsOnOrder(t *testing.T) {
 		require.Equal(t, bondID, d.Asset)
 		require.Equal(t, orderBookID, d.OrderBookID)
 		require.Equal(t, "follow_trade", d.Reason)
-		require.Equal(t, strategy.DecisionKindOpen, d.Kind)
+		require.Equal(t, strategy.DecisionKindExtend, d.Kind, "each BUY against an existing long is an extend")
 		require.True(t, d.CreatedAt.After(time.Time{}), "CreatedAt should be stamped")
 		require.Equal(t, s.runID, d.RunID)
 		require.Equal(t, int64(i+1), d.Seq, "Seq must be monotonically increasing per run")
@@ -231,37 +245,29 @@ func TestRecordDecision_NilRecorderIsNoop(t *testing.T) {
 // not the strategy's configured leverage.  Regression guard: prior
 // versions recorded s.cfg.Leverage for every order, which would log
 // e.g. Leverage=2.0 for a close that was placed at inverse_leverage=1.
-func TestRecordDecision_CloseRecordsActualOrderLeverage(t *testing.T) {
+// TestRecordDecision_CloseRecordsActualOrderLeverage pins the
+// contract that a close decision records the leverage actually sent
+// to DORA (always 1.0 for closes, since DORA accepts leveraged
+// closes only on isolated margin and we always force leverage=1
+// on closes for simplicity and predictability — the strategy-level
+// leverage only picks the account). Regression guard: prior
+// versions either kept the strategy's leverage for a close (which
+// DORA rejects on global) or routed the close size from the wrong
+// account.
+// TestRecordDecision_CloseForcesLeverageOne pins the contract
+// that a close decision records the leverage actually sent to DORA
+// (always 1.0, regardless of strategy leverage — the strategy
+// leverage only adjusts inverse_leverage on opens and extends).
+func TestRecordDecision_CloseForcesLeverageOne(t *testing.T) {
 	t.Parallel()
 
 	rec := &fakeDecisionRecorder{}
 	s, api, followed, bondID, orderBookID := buildStrategyForDecisionTest(rec)
 
-	// Reconfigure with a non-unit configured leverage so the bug would
-	// be visible: a close at forced leverage=1 must NOT record 2.0.
-	s.cfg.Leverage = decimal.MustParse("2.0")
-
-	// Position the fake portfolio in a Long state (Available > 0,
-	// Borrowed = 0) so the subsequent sell is detected as a close by
-	// isClose(current=Long, side=Sell).
-	api.portfolio = &doraclient.AccountPortfolioV2{
-		Accounts: map[string]map[string]doraclient.AccountV2{
-			"global": {
-				bondID.String(): {
-					AssetId:   bondID.String(),
-					IsGlobal:  boolPtr(true),
-					Available: "1000",
-					Borrowed:  "0",
-				},
-				api.quoteAssetID: {
-					AssetId:   api.quoteAssetID,
-					IsGlobal:  boolPtr(true),
-					Available: "10000",
-					Borrowed:  "0",
-				},
-			},
-		},
-	}
+	// Configuration probe: a non-unit leverage on opens would
+	// shrink inverse_leverage to 1/leverage; for closes the order
+	// must still go out at leverage=1 regardless.
+	s.cfg.Leverage = decimal.MustParse("3.0")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -298,14 +304,27 @@ func TestRecordDecision_CloseRecordsActualOrderLeverage(t *testing.T) {
 
 	require.Equal(t, strategy.DecisionKindClose, d.Kind, "sell-against-Long should be classified as close")
 	require.Equal(t, "SELL", d.Side)
-	require.Equal(t, decimal.One, d.Leverage, "close must record the forced order leverage, not the configured one")
-	require.Equal(t, decimal.One, d.InverseLeverage, "close must be sent at inverse_leverage=1 (no leverage)")
+	require.Equal(t, decimal.One, d.Leverage, "close must record leverage=1 regardless of strategy leverage")
+	require.Equal(t, decimal.One, d.InverseLeverage, "close must be sent at inverse_leverage=1")
 	assertValidClientOrderID(t, d.ClientOrderID, "copy_trading", s.runID)
+
+	// All trading routes through the bond's isolated margin
+	// account regardless of strategy leverage.
+	api.mu.Lock()
+	gotQuantity := api.capturedQuantity
+	gotFromGlobal := api.capturedFromGlobal
+	api.mu.Unlock()
+	require.False(t, gotFromGlobal,
+		"all trading must use from_global=false (bond's isolated margin)")
+	require.True(t, gotQuantity.Equal(decimal.MustParse("1000")),
+		"close must size from the bond's isolated-account available, got %s", gotQuantity)
 
 	cancel()
 	<-done
 }
 
+// assertValidClientOrderID checks that the recorded ClientOrderID
+// assertValidClientOrderID checks that the recorded ClientOrderID
 // assertValidClientOrderID checks that the recorded ClientOrderID
 // follows the live-run contract: <strategy_name>.<run_id>.<uuidv7>.
 // Used by both copytrading and meanreversion decision tests.
