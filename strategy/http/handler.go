@@ -2360,6 +2360,39 @@ func (h *Handler) expireRun(ctx context.Context, detail *RunDetail) {
 	})
 }
 
+// maybePublishNaturalCompletion publishes EventRunCompleted if the run
+// was active one tick ago but isn't now, and the status is still
+// "running" — that combination means the strategy's run loop
+// returned nil naturally (chunks exhausted, end_time elapsed, or all
+// skipped consumed) without going through stopRun. The observer
+// picks this up once per run. The status is also flipped to
+// "completed" so runIsActive returns false and the public status
+// reflects reality.
+func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, detail *RunDetail) {
+	h.mu.Lock()
+	d, ok := h.runs[detail.ID]
+	if !ok || d.Status != "running" {
+		h.mu.Unlock()
+		return
+	}
+	d.Status = "completed"
+	d.UpdatedAt = h.now().UTC()
+	d.StoppedAt = &d.UpdatedAt
+	userID := d.DORAUserID
+	runID := d.ID.String()
+	if err := h.saveRun(ctx, d); err != nil {
+		slog.Error("twap: save completed run", "err", err, "run_id", runID)
+	}
+	h.mu.Unlock()
+
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunCompleted,
+		UserID:    userID,
+		RunID:     runID,
+		Timestamp: h.now().UTC(),
+	})
+}
+
 func (h *Handler) resolveDORAUserID(ctx context.Context) (string, error) {
 	// Fast path: user was already verified by the auth middleware.
 	if id, ok := doraUserIDFromContext(ctx); ok {
