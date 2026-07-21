@@ -120,9 +120,8 @@ type Strategy struct {
 	// SignalHold means flat (no position). Derived from bondQty in
 	// initializeBalances (so restarts correctly see the pre-existing position)
 	// and kept in sync by executeDecision and closePosition. Protected by mu.
-	openSignal         types.Signal
-	fromGlobalPosition bool // matches the fromGlobalPosition used in the opening order; protected by mu
-	runID              uuid.UUID
+	openSignal types.Signal
+	runID      uuid.UUID
 
 	// collateralWeight is the collateral weight of the base asset, fetched from
 	// DORA during Run. Defaults to 1.0 if unavailable. Used to compute effective
@@ -145,10 +144,11 @@ type Strategy struct {
 	decisionSeq int64
 }
 
-// strategyType is the strategy.Decision.StrategyType value used by
-// the live run loop and the client_order_id format.  Keep in sync
-// with the string written by recordDecision.
-const strategyType = "mean_reversion"
+// StrategyType is the strategy.Decision.StrategyType value used by the
+// live run loop and the client_order_id format. Exported because the
+// cmd/strategy-server wiring passes it into the orderupdates.Filter as
+// the set of allowed client_order_id prefixes.
+const StrategyType = "mean_reversion"
 
 // New creates a new Strategy with the given Config and optional functional options.
 // Supported options: WithLogger.
@@ -206,6 +206,16 @@ func WithDecisionStore(store strategy.DecisionRecorder) func(*Strategy) {
 	return func(s *Strategy) {
 		s.decisionStore = store
 	}
+}
+
+// SetDecisionSeq seeds the in-memory decision counter. Called once at
+// strategy start (after a server restart, after a resumed run) so the
+// counter resumes past the DB frontier and avoids duplicate-key
+// collisions on (run_id, seq). Concurrent-safe via s.mu.
+func (s *Strategy) SetDecisionSeq(seq int64) {
+	s.mu.Lock()
+	s.decisionSeq = seq
+	s.mu.Unlock()
 }
 
 func (s *Strategy) logger() *slog.Logger {
@@ -384,15 +394,6 @@ func (s *Strategy) cappedOrderQuantity(positionSize, currentPosition, price deci
 //   - true (leverage == 1x):  use the global account's USD balance as InitialBalance.
 //   - false (leverage > 1x): use the isolated account for the base asset.
 func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
-	inverseLeverage, err := decimal.One.Quo(s.cfg.Leverage)
-	if err != nil {
-		s.mu.Lock()
-		s.errs = append(s.errs, fmt.Errorf("initialise balances: compute inverse leverage: %w", err))
-		s.mu.Unlock()
-		return
-	}
-	fromGlobalPosition := inverseLeverage.Equal(decimal.One)
-
 	quoteAssetID, err := s.marketAPIClient.QuoteAssetID(ctx, s.cfg.OrderBookID.String())
 	if err != nil {
 		s.mu.Lock()
@@ -405,7 +406,7 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 	// so we can pick the right one for the leverage level.
 	portfolio, err := s.marketAPIClient.GetPortfolioV2(ctx)
 	if err == nil && portfolio != nil {
-		initializeBalancesFromPortfolio(s, portfolio, baseAssetID, quoteAssetID, fromGlobalPosition, s.logger())
+		initializeBalancesFromPortfolio(s, portfolio, baseAssetID, quoteAssetID, false, s.logger())
 		s.mu.Lock()
 		s.balancesInitialized = true
 		s.mu.Unlock()
@@ -511,10 +512,10 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 
 	// Build the client_order_id before submitting so the same value
 	// flows into the DORA request and the recorded decision row.
-	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 
 	if err := s.marketAPIClient.CreateMarketOrder(
-		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, s.fromGlobalPosition, clientOrderID,
+		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, false, clientOrderID,
 	); err != nil {
 		// Self-healing: if the order failed, check the live position on the exchange.
 		// If the live position is actually already 0, we can self-heal and clear our tracking state.
@@ -525,7 +526,6 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 				s.bondQty = decimal.Zero
 			}
 			s.openSignal = types.SignalHold
-			s.fromGlobalPosition = false
 			s.mu.Unlock()
 			return nil
 		}
@@ -549,7 +549,7 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		Price:              closePrice, // last observed mid; DORA fills at the market mid
 		Leverage:           s.cfg.Leverage,
 		InverseLeverage:    inverseLeverage,
-		FromGlobalPosition: s.fromGlobalPosition,
+		FromGlobalPosition: false,
 		Kind:               strategy.DecisionKindClose,
 		Reason:             "z_score_exit",
 		ReasonDetail:       "close: spread reverted to mean",
@@ -561,7 +561,6 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 		s.bondQty = decimal.Zero
 	}
 	s.openSignal = types.SignalHold
-	s.fromGlobalPosition = false
 	s.mu.Unlock()
 	return nil
 }
@@ -608,10 +607,10 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		return false, fmt.Errorf("compute inverse leverage: %w", err)
 	}
 
-	// fromGlobalPosition rules:
-	//   - Short sells (SELL) must NEVER be fromGlobalPosition = true.
-	//   - Buys (BUY) are fromGlobalPosition = true only when inverseLeverage == 1.0.
-	fromGlobalPosition := side == doraclient.SIDE_BUY && inverseLeverage.Equal(decimal.One)
+	// All mean-reversion trading routes through the bond's
+	// isolated margin account — strategy leverage is reflected
+	// only in inverse_leverage.
+	fromGlobalPosition := false
 
 	s.log.Info("opening position", "runID", s.runID, "assetID", assetID, "signal", decision.Signal)
 	s.log.Info("creating market order",
@@ -625,7 +624,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 	)
 	// Build the client_order_id before submitting so the same value
 	// flows into the DORA request and the recorded decision row.
-	clientOrderID := strategy.BuildClientOrderID(strategyType, s.runID)
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 	if err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition, clientOrderID,
 	); err != nil {
@@ -679,7 +678,6 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		// direction since we cannot derive it from bondQty.
 		s.openSignal = decision.Signal
 	}
-	s.fromGlobalPosition = fromGlobalPosition
 	s.mu.Unlock()
 	return true, nil
 }
@@ -1100,7 +1098,7 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 
 	d.RunID = runID
 	d.Seq = seq
-	d.StrategyType = strategyType
+	d.StrategyType = StrategyType
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = time.Now().UTC()
 	}

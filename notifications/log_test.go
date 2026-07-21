@@ -26,14 +26,22 @@ func openTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// TestPGLog_InsertAndReplay exercises the Replay cursor predicate
+// (id > afterID) against the production PGLog. The IDs used here MUST
+// be time-ordered UUIDv7s, not random v4 UUIDs, because the predicate
+// assumes b.ID > a.ID. uuid.NewString() (v4) is unordered and would
+// flake ~50% of runs. Use uuid.Must(uuid.NewV7()).String() everywhere
+// a time-ordered ID is required.
 func TestPGLog_InsertAndReplay(t *testing.T) {
 	pool := openTestPool(t)
 	log := notifications.NewPGLog(pool)
 	ctx := context.Background()
 	uid := uuid.NewString()
 
-	a := notifications.Event{ID: uuid.NewString(), Type: notifications.EventRunStarted, UserID: uid, Timestamp: time.Now().UTC()}
-	b := notifications.Event{ID: uuid.NewString(), Type: notifications.EventRunStopped, UserID: uid, Timestamp: time.Now().UTC()}
+	// Time-ordered v7 IDs: b is guaranteed > a lexicographically, so
+	// the Replay cursor (id > a.ID) deterministically returns b.
+	a := notifications.Event{ID: uuid.Must(uuid.NewV7()).String(), Type: notifications.EventRunStarted, UserID: uid, Timestamp: time.Now().UTC()}
+	b := notifications.Event{ID: uuid.Must(uuid.NewV7()).String(), Type: notifications.EventRunStopped, UserID: uid, Timestamp: time.Now().UTC()}
 	require.NoError(t, log.Insert(ctx, a))
 	require.NoError(t, log.Insert(ctx, b))
 

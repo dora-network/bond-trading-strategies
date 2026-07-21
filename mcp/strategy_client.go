@@ -158,6 +158,41 @@ func (c *strategyClient) getBacktestClosedTrades(ctx context.Context, id string,
 	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, path, nil)
 }
 
+// listTradingDecisions proxies GET /v1/trading-decisions/{runID} on
+// strategy-server. The response shape is
+// { "items": [...], "next_cursor": "..." }.
+func (c *strategyClient) listTradingDecisions(
+	ctx context.Context,
+	runID string,
+	params listTradingDecisionsParams,
+) (map[string]any, error) {
+	path := fmt.Sprintf("/v1/trading-decisions/%s", runID)
+	q := url.Values{}
+	if params.From != "" {
+		q.Set("from", params.From)
+	}
+	if params.To != "" {
+		q.Set("to", params.To)
+	}
+	if params.Limit > 0 {
+		q.Set("limit", strconv.Itoa(params.Limit))
+	}
+	if params.Cursor != "" {
+		q.Set("cursor", params.Cursor)
+	}
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return doStrategyJSON[map[string]any](ctx, c, http.MethodGet, path, nil)
+}
+
+type listTradingDecisionsParams struct {
+	From   string
+	To     string
+	Limit  int
+	Cursor string
+}
+
 func (c *strategyClient) cancelBacktest(ctx context.Context, id string) (map[string]any, error) {
 	return doStrategyJSON[map[string]any](ctx, c, http.MethodDelete, "/v1/backtests/"+id, nil)
 }

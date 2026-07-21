@@ -18,11 +18,13 @@ import (
 	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/bond-trading-strategies/cors"
 	"github.com/dora-network/bond-trading-strategies/notifications"
+	"github.com/dora-network/bond-trading-strategies/notifications/orderupdates"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/ratelimit"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
+	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -171,18 +173,43 @@ func main() {
 			retentionLoop(ctx, bus, log)
 		}()
 	}
+	runStore := strategyhttp.NewPGRunStore(pool)
+
+	var orderUpdatesManager orderupdates.Manager
+	if notifier != nil {
+		lookup := func(ctx context.Context, id uuid.UUID) (string, string, bool) {
+			detail, err := runStore.LookupRunByID(ctx, id)
+			if err != nil || detail == nil {
+				return "", "", false
+			}
+			return detail.DORAUserID, detail.Status, true
+		}
+		orderUpdatesManager = orderupdates.NewManager(
+			ctx,
+			notifier,
+			lookup,
+			[]string{meanreversion.StrategyType, copytrading.StrategyType},
+			orderupdates.NewStream(*wsURL, log),
+			orderupdates.WithLogger(log),
+		)
+		defer orderUpdatesManager.Close()
+	}
+
+	decisionStore := strategyhttp.NewPGDecisionStore(pool)
 
 	handlerImpl := strategyhttp.NewHandler(
 		service,
-		strategyhttp.WithRunStore(strategyhttp.NewPGRunStore(pool)),
+		strategyhttp.WithRunStore(runStore),
 		strategyhttp.WithBacktestStore(strategyhttp.NewPGBacktestStore(pool)),
-		strategyhttp.WithDecisionStore(strategyhttp.NewPGDecisionStore(pool)),
+		strategyhttp.WithDecisionStore(decisionStore),
+		strategyhttp.WithDecisionReader(decisionStore),
 		strategyhttp.WithTradesHistoryStore(copytrading.NewPGTradesHistoryStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithTradeStream(tradeStream),
 		strategyhttp.WithLogger(log),
 		strategyhttp.WithEncryptionKey(encryptionKey),
 		strategyhttp.WithNotifier(notifier),
+		strategyhttp.WithOrderUpdatesManager(orderUpdatesManager),
 	)
 	restorer, ok := handlerImpl.(interface{ RestoreRuns(context.Context) error })
 	if !ok {

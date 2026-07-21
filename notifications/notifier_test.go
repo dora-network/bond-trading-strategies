@@ -40,8 +40,9 @@ func TestEventType_Values(t *testing.T) {
 		notifications.EventRunResumed,
 		notifications.EventRunStopped,
 		notifications.EventRunStopLoss,
+		notifications.EventOrderUpdate,
 	}
-	assert.Len(t, cases, 8)
+	assert.Len(t, cases, 9)
 }
 
 type captureLog struct {

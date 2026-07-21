@@ -14,7 +14,7 @@ import (
 
 // EventType identifies the kind of lifecycle change an Event represents.
 // The dora.* namespace is reserved for v2 events relayed from DORA
-// (orders, trades) and is intentionally not enumerated here.
+// (orders, trades); EventOrderUpdate below is the first such event.
 type EventType string
 
 const (
@@ -26,6 +26,12 @@ const (
 	EventRunResumed        EventType = "run.resumed"
 	EventRunStopped        EventType = "run.stopped"
 	EventRunStopLoss       EventType = "run.stop_loss"
+	// EventOrderUpdate is published when DORA reports a state change for an
+	// order that was placed by one of the user's running strategies. Payload
+	// is the raw DORA Order JSON object as DORA returns it — schema is owned
+	// by DORA, may grow without prior notice. This is the first v2 event in
+	// the dora.* namespace.
+	EventOrderUpdate EventType = "dora.order_update"
 )
 
 // Event is the JSON envelope sent on the WebSocket and persisted in
