@@ -20,8 +20,7 @@ const StrategyType = "twap"
 
 // Strategy is the TWAP trading strategy for a single order book.
 // Shared I/O and state-update logic lives in exec.Executor; this
-// strategy contains only the TWAP-specific run loop, schedule, and
-// rebalance math.
+// strategy contains only the TWAP-specific run loop and rebalance math.
 type Strategy struct {
 	cfg          Config
 	log          *slog.Logger
@@ -155,6 +154,8 @@ func (s *Strategy) saveState(ctx context.Context) {
 	s.mu.Unlock()
 }
 
+// run initialises the run, then drives the dispatch loop until
+// completion or context cancellation.
 func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error {
 	s.loadState(ctx)
 	s.reconcilePendingOrders(ctx)
@@ -163,6 +164,7 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 	if numChunks == 0 {
 		return fmt.Errorf("twap: no chunks in execution window")
 	}
+
 	divisor := decimal.MustNew(int64(numChunks), 0)
 	baseChunkSize, err := s.cfg.TotalAmount.Quo(divisor)
 	if err != nil {
@@ -178,9 +180,8 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 	assetID := s.cfg.OrderBookID
 
 	s.mu.RLock()
-	state := s.runState
-	totalSubmitted := state.TotalSubmitted
-	chunksProcessed := state.ChunksProcessed
+	totalSubmitted := s.runState.TotalSubmitted
+	chunksProcessed := s.runState.ChunksProcessed
 	s.mu.RUnlock()
 
 	s.log.Info(
@@ -193,14 +194,59 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 		"side", s.cfg.Side,
 		"executedAmount", totalSubmitted,
 		"chunksProcessed", chunksProcessed,
-		"orders", len(state.Orders),
+		"orders", len(s.runState.Orders),
 	)
 
 	scheduledTime := func(i int) time.Time {
 		return s.cfg.StartTime.Add(time.Duration(i) * interval)
 	}
 
-	started := false
+	// Skip bucket slots whose scheduled time has already passed
+	// (missed during downtime, restart, or pause).
+	now := time.Now().UTC()
+	for chunksProcessed < numChunks && !now.Before(scheduledTime(chunksProcessed)) {
+		s.mu.Lock()
+		s.runState.ChunksProcessed = chunksProcessed + 1
+		s.mu.Unlock()
+		s.saveState(ctx)
+		s.log.Info("twap: skipping missed chunk", "runID", s.runID, "chunk", chunksProcessed)
+		chunksProcessed++
+	}
+	if chunksProcessed >= numChunks {
+		return nil
+	}
+
+	return s.dispatchLoop(ctx, msgCh, numChunks, chunksProcessed, scheduledTime, baseChunkSize, assetID, signal)
+}
+
+// dispatchLoop drives the timer + select until completion.
+func (s *Strategy) dispatchLoop(
+	ctx context.Context,
+	msgCh <-chan strategy.Message,
+	numChunks, chunksProcessed int,
+	scheduledTime func(int) time.Time,
+	baseChunkSize decimal.Decimal,
+	assetID string,
+	signal types.Signal,
+) error {
+	var timer *time.Timer
+	resetTimer := func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		wait := time.Until(scheduledTime(chunksProcessed))
+		if wait < 0 {
+			wait = 0
+		}
+		timer = time.NewTimer(wait)
+	}
+	resetTimer()
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -225,9 +271,10 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 				continue
 			}
 			s.processOrderUpdate(ctx, evt)
-		case <-time.After(time.Until(scheduledTime(chunksProcessed))):
-			if !started {
-				started = true
+		case <-timer.C:
+			if time.Now().UTC().After(s.cfg.EndTime) {
+				s.log.Info("twap: execution window ended", "runID", s.runID)
+				return nil
 			}
 			s.mu.RLock()
 			paused := s.paused
@@ -235,7 +282,16 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 			if paused {
 				s.log.Info("twap: skipping chunk (paused)", "runID", s.runID, "chunk", chunksProcessed)
 			} else {
-				s.placeChunk(ctx, chunksProcessed, assetID, signal, baseChunkSize)
+				s.mu.RLock()
+				ts := s.runState.TotalSubmitted
+				cp := chunksProcessed
+				s.mu.RUnlock()
+				chunkSize, cErr := s.computeChunkSize(numChunks, ts, cp)
+				if cErr != nil {
+					s.log.Error("twap: compute chunk size", "err", cErr, "runID", s.runID)
+					chunkSize = baseChunkSize
+				}
+				s.placeChunk(ctx, chunksProcessed, assetID, signal, chunkSize)
 			}
 			chunksProcessed++
 			s.mu.Lock()
@@ -245,8 +301,27 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 			if chunksProcessed >= numChunks {
 				return nil
 			}
+			resetTimer()
 		}
 	}
+}
+
+// computeChunkSize returns the rebalanced chunk size for the next
+// chunk: (totalAmount - totalSubmitted) / (numChunks - chunksProcessed).
+func (s *Strategy) computeChunkSize(numChunks int, totalSubmitted decimal.Decimal, chunksProcessed int) (decimal.Decimal, error) {
+	remaining := numChunks - chunksProcessed
+	if remaining <= 0 {
+		return decimal.Zero, nil
+	}
+	delta, err := s.cfg.TotalAmount.Sub(totalSubmitted)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	if !delta.IsPos() {
+		delta = decimal.Zero
+	}
+	divisor := decimal.MustNew(int64(remaining), 0)
+	return delta.Quo(divisor)
 }
 
 // placeChunk places a single chunk order via the shared Executor and
@@ -279,25 +354,4 @@ func (s *Strategy) placeChunk(ctx context.Context, chunkIdx int, assetID string,
 		"order_id", orderID,
 		"chunk_size", chunkSize,
 	)
-}
-
-// computeChunkSize returns the rebalanced chunk size for the next
-// chunk: (totalAmount - totalSubmitted) / (numChunks - chunksProcessed).
-// Using TotalSubmitted (not TotalFilled) prevents re-placing
-// in-flight or cancelled quantities. TWAP-specific: VWAP has its own
-// bucket-size computation that accounts for historical ADV.
-func (s *Strategy) computeChunkSize(numChunks int, totalSubmitted decimal.Decimal, chunksProcessed int) (decimal.Decimal, error) {
-	remaining := numChunks - chunksProcessed
-	if remaining <= 0 {
-		return decimal.Zero, nil
-	}
-	delta, err := s.cfg.TotalAmount.Sub(totalSubmitted)
-	if err != nil {
-		return decimal.Zero, err
-	}
-	if !delta.IsPos() {
-		delta = decimal.Zero
-	}
-	divisor := decimal.MustNew(int64(remaining), 0)
-	return delta.Quo(divisor)
 }
