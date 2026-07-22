@@ -2161,15 +2161,18 @@ func (h *Handler) runStopLossObserver(ctx context.Context, detail *RunDetail, ob
 }
 
 // runIsActive reports whether the strategy's run goroutine for this
-// id is still alive. The observer's defer deletes the entry on
-// goroutine exit, so when the run loop ends naturally (chunks
-// exhausted, end_time elapsed, or all skipped consumed) this returns
-// false and the observer fires maybePublishNaturalCompletion.
+// id is still alive by querying the Service. The Service deletes its
+// entry when strategy.Run returns, so this returns false once the run
+// naturally ends. The observer uses this to fire
+// maybePublishNaturalCompletion. We prefer this over checking
+// h.runningStrategies because the Handler's map is only cleaned up
+// when the observer goroutine exits — a chicken-and-egg deadlock
+// prevented natural-completion detection before.
 func (h *Handler) runIsActive(id uuid.UUID) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	_, ok := h.runningStrategies[id]
-	return ok
+	if h.service == nil {
+		return false
+	}
+	return h.service.IsRunActive(id)
 }
 
 // maybePublishNaturalCompletion publishes EventRunCompleted if the run

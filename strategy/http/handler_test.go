@@ -2534,6 +2534,14 @@ func TestHandler_EmitsRunStopLossEvent(t *testing.T) {
 			capturedStrat = s
 			return runID, nil
 		},
+		IsRunActiveStub: func(_ uuid.UUID) bool {
+			// Run is active while the stop-loss observer polls.
+			// The test triggers stop-loss via ShouldExit + the next
+			// observer tick fires EventRunStopLoss. The fake service
+			// does not actually run a goroutine, so IsRunActive stays
+			// true for the duration of the test.
+			return true
+		},
 	}
 	notifier := &notificationsfakes.FakeNotifier{}
 	handler := strategyhttp.NewHandler(
