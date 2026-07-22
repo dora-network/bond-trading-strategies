@@ -2160,17 +2160,16 @@ func (h *Handler) runStopLossObserver(ctx context.Context, detail *RunDetail, ob
 	}
 }
 
-// runIsActive reports whether the run is still tracked in h.runs with
-// status "running". The observer uses this to exit when the run was
-// stopped or completed by some other path.
+// runIsActive reports whether the strategy's run goroutine for this
+// id is still alive. The observer's defer deletes the entry on
+// goroutine exit, so when the run loop ends naturally (chunks
+// exhausted, end_time elapsed, or all skipped consumed) this returns
+// false and the observer fires maybePublishNaturalCompletion.
 func (h *Handler) runIsActive(id uuid.UUID) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	detail, ok := h.runs[id]
-	if !ok {
-		return false
-	}
-	return detail.Status == "running"
+	_, ok := h.runningStrategies[id]
+	return ok
 }
 
 // maybePublishNaturalCompletion publishes EventRunCompleted if the run
