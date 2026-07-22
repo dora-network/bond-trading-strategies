@@ -2341,6 +2341,8 @@ func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
 		breakout.WithDecisionStore(h.decisionStore)(s)
 	case *twap.Strategy:
 		twap.WithDecisionStore(h.decisionStore)(s)
+	case *vwap.Strategy:
+		vwap.WithDecisionStore(h.decisionStore)(s)
 	}
 }
 
