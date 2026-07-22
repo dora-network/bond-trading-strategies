@@ -35,9 +35,9 @@ type doraClient interface {
 }
 ```
 
-- [ ] **Step 1.2: Delete the `DORABotUser` struct, `isBotUser`, and `hasBotPrefix`**
+- [ ] **Step 1.2: Delete the `DORABotUser` struct, `isBotUser`, `hasBotPrefix`, and the `strings` import**
 
-In `strategy/http/dora_client.go`, remove the entire `DORABotUser` block (currently lines 24–30), the `isBotUser` function (lines 32–37), and the `hasBotPrefix` function (lines 39–42). The `strings` import is still used elsewhere in the package (and is used by the new pagination loop below), so leave the import.
+In `strategy/http/dora_client.go`, remove the entire `DORABotUser` block (currently lines 24–30), the `isBotUser` function (lines 32–37), and the `hasBotPrefix` function (lines 39–42). The `strings` import becomes unused after this step — remove it from the import block (lines 3–15). The new pagination loop uses length comparisons, not `strings`.
 
 - [ ] **Step 1.3: Drop the `copyTraderMaxPages` constant**
 
@@ -199,12 +199,10 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
             t.Parallel()
 
             var (
-                mu      sync.Mutex
-                pages   []int32
-                calls   int
-                returnError bool
+                mu    sync.Mutex
+                pages []int32
+                calls int
             )
-            _ = returnError // see 5xx case below
 
             srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
                 if r.URL.Path != "/v1/user/copy-traders" {
@@ -224,7 +222,6 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
                     return
                 }
                 if tc.name == "5xx propagated" {
-                    returnError = true
                     mu.Unlock()
                     http.Error(w, "boom", http.StatusInternalServerError)
                     return
@@ -277,7 +274,6 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
 
 Notes:
 - The `5xx propagated` case uses a sub-test-name string check to control handler behaviour. If a reader finds that ugly, a refactor to a `wantErr bool` field on the case struct is fine, but it must stay inside this file.
-- The `returnError` variable is intentionally written inside the handler under the mutex; the test reads it after `require.Error`. If the locking offends, replace with a sub-test-time server closure; the existing test pattern already uses per-sub-test servers.
 - The `doraclient.GetCopyTradersResponse` type and `doraclient.Metadata` type are assumed to exist in the bumped dora-client-go. If a build error names an unknown type, surface to the user — the SDK regen is the source of truth.
 
 - [ ] **Step 2.4: Run the new test**
