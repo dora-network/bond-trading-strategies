@@ -13,168 +13,168 @@ DORA_BASE_URL="${DORA_BASE_URL:-https://${ENVIRONMENT}.dora.co}"
 MIGRATE_ONLY="${MIGRATE_ONLY:-false}"
 
 case "$ENVIRONMENT" in
-	dev)
-		DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-dev.dora.co,https://dora-awsdev.vercel.app"
-		;;
-	staging)
-		DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-staging.dora.co,https://staging.dora.co"
-		;;
-	*)
-		# Custom/integrator domains should pass CORS_ALLOWED_ORIGINS explicitly.
-		DEFAULT_CORS_ALLOWED_ORIGINS="https://${ENVIRONMENT}.dora.co"
-		;;
+dev)
+  DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-dev.dora.co,https://dora-awsdev.vercel.app"
+  ;;
+staging)
+  DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-staging.dora.co,https://staging.dora.co,https://navion-paper.dora.co,https://blkbox-paper.dora.co"
+  ;;
+*)
+  # Custom/integrator domains should pass CORS_ALLOWED_ORIGINS explicitly.
+  DEFAULT_CORS_ALLOWED_ORIGINS="https://${ENVIRONMENT}.dora.co,https://navion.dora.co,https://blkbox.dora.co"
+  ;;
 esac
 CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS:-$DEFAULT_CORS_ALLOWED_ORIGINS}"
 
 require_env() {
-	local name="$1"
-	if [[ -z "${!name:-}" ]]; then
-		echo "${name} is required" >&2
-		exit 1
-	fi
+  local name="$1"
+  if [[ -z "${!name:-}" ]]; then
+    echo "${name} is required" >&2
+    exit 1
+  fi
 }
 
 truthy() {
-	case "${1:-}" in
-		1 | true | TRUE | yes | YES) return 0 ;;
-		*) return 1 ;;
-	esac
+  case "${1:-}" in
+  1 | true | TRUE | yes | YES) return 0 ;;
+  *) return 1 ;;
+  esac
 }
 
 put_secret_value() {
-	local secret_id="$1"
-	local value="$2"
+  local secret_id="$1"
+  local value="$2"
 
-	aws secretsmanager put-secret-value \
-		--secret-id "$secret_id" \
-		--secret-string "$value" >/dev/null
+  aws secretsmanager put-secret-value \
+    --secret-id "$secret_id" \
+    --secret-string "$value" >/dev/null
 }
 
 secret_arn() {
-	local secret_id="$1"
+  local secret_id="$1"
 
-	aws secretsmanager describe-secret \
-		--secret-id "$secret_id" \
-		--query ARN \
-		--output text
+  aws secretsmanager describe-secret \
+    --secret-id "$secret_id" \
+    --query ARN \
+    --output text
 }
 
 require_secret() {
-	local secret_id="$1"
+  local secret_id="$1"
 
-	if ! aws secretsmanager describe-secret --secret-id "$secret_id" >/dev/null 2>&1; then
-		echo "Secret ${secret_id} does not exist. Apply Terraform for ${ENVIRONMENT} first." >&2
-		exit 1
-	fi
+  if ! aws secretsmanager describe-secret --secret-id "$secret_id" >/dev/null 2>&1; then
+    echo "Secret ${secret_id} does not exist. Apply Terraform for ${ENVIRONMENT} first." >&2
+    exit 1
+  fi
 }
 
 require_service() {
-	local service_name="$1"
-	local service_count
+  local service_name="$1"
+  local service_count
 
-	service_count="$(
-		aws ecs describe-services \
-			--cluster "$CLUSTER_NAME" \
-			--services "$service_name" \
-			--query 'length(services[?status != `INACTIVE`])' \
-			--output text
-	)"
-	if [[ "$service_count" != "1" ]]; then
-		echo "ECS service ${service_name} does not exist. Apply Terraform for ${ENVIRONMENT} first." >&2
-		exit 1
-	fi
+  service_count="$(
+    aws ecs describe-services \
+      --cluster "$CLUSTER_NAME" \
+      --services "$service_name" \
+      --query 'length(services[?status != `INACTIVE`])' \
+      --output text
+  )"
+  if [[ "$service_count" != "1" ]]; then
+    echo "ECS service ${service_name} does not exist. Apply Terraform for ${ENVIRONMENT} first." >&2
+    exit 1
+  fi
 }
 
 register_task_definition() {
-	local family="$1"
-	local cpu="$2"
-	local memory="$3"
-	local containers="$4"
+  local family="$1"
+  local cpu="$2"
+  local memory="$3"
+  local containers="$4"
 
-	aws ecs register-task-definition \
-		--family "$family" \
-		--requires-compatibilities FARGATE \
-		--network-mode awsvpc \
-		--cpu "$cpu" \
-		--memory "$memory" \
-		--execution-role-arn "$EXECUTION_ROLE_ARN" \
-		--task-role-arn "$TASK_ROLE_ARN" \
-		--runtime-platform cpuArchitecture=X86_64,operatingSystemFamily=LINUX \
-		--container-definitions "$containers" \
-		--query 'taskDefinition.taskDefinitionArn' \
-		--output text
+  aws ecs register-task-definition \
+    --family "$family" \
+    --requires-compatibilities FARGATE \
+    --network-mode awsvpc \
+    --cpu "$cpu" \
+    --memory "$memory" \
+    --execution-role-arn "$EXECUTION_ROLE_ARN" \
+    --task-role-arn "$TASK_ROLE_ARN" \
+    --runtime-platform cpuArchitecture=X86_64,operatingSystemFamily=LINUX \
+    --container-definitions "$containers" \
+    --query 'taskDefinition.taskDefinitionArn' \
+    --output text
 }
 
 run_migration() {
-	local task_definition_arn="$1"
-	local network_config task_output failures task_arn task_desc exit_code stopped_reason task_id
+  local task_definition_arn="$1"
+  local network_config task_output failures task_arn task_desc exit_code stopped_reason task_id
 
-	network_config="$(
-		aws ecs describe-services \
-			--cluster "$CLUSTER_NAME" \
-			--services "$STRATEGY_SERVICE_NAME" \
-			--query 'services[0].networkConfiguration' \
-			--output json
-	)"
+  network_config="$(
+    aws ecs describe-services \
+      --cluster "$CLUSTER_NAME" \
+      --services "$STRATEGY_SERVICE_NAME" \
+      --query 'services[0].networkConfiguration' \
+      --output json
+  )"
 
-	echo "Running migrations with ${task_definition_arn}"
-	task_output="$(
-		aws ecs run-task \
-			--cluster "$CLUSTER_NAME" \
-			--task-definition "$task_definition_arn" \
-			--network-configuration "$network_config" \
-			--launch-type FARGATE
-	)"
+  echo "Running migrations with ${task_definition_arn}"
+  task_output="$(
+    aws ecs run-task \
+      --cluster "$CLUSTER_NAME" \
+      --task-definition "$task_definition_arn" \
+      --network-configuration "$network_config" \
+      --launch-type FARGATE
+  )"
 
-	failures="$(jq -r '.failures | length' <<<"$task_output")"
-	if [[ "$failures" != "0" ]]; then
-		echo "Failed to start migration task:" >&2
-		jq '.failures' <<<"$task_output" >&2
-		exit 1
-	fi
+  failures="$(jq -r '.failures | length' <<<"$task_output")"
+  if [[ "$failures" != "0" ]]; then
+    echo "Failed to start migration task:" >&2
+    jq '.failures' <<<"$task_output" >&2
+    exit 1
+  fi
 
-	task_arn="$(jq -r '.tasks[0].taskArn' <<<"$task_output")"
-	echo "Migration task: ${task_arn}"
+  task_arn="$(jq -r '.tasks[0].taskArn' <<<"$task_output")"
+  echo "Migration task: ${task_arn}"
 
-	if ! aws ecs wait tasks-stopped --cluster "$CLUSTER_NAME" --tasks "$task_arn"; then
-		task_desc="$(
-			aws ecs describe-tasks \
-				--cluster "$CLUSTER_NAME" \
-				--tasks "$task_arn" 2>/dev/null || true
-		)"
-		if [[ -n "$task_desc" ]]; then
-			echo "Migration task did not stop before the waiter failed:" >&2
-			jq -r '
+  if ! aws ecs wait tasks-stopped --cluster "$CLUSTER_NAME" --tasks "$task_arn"; then
+    task_desc="$(
+      aws ecs describe-tasks \
+        --cluster "$CLUSTER_NAME" \
+        --tasks "$task_arn" 2>/dev/null || true
+    )"
+    if [[ -n "$task_desc" ]]; then
+      echo "Migration task did not stop before the waiter failed:" >&2
+      jq -r '
 				.tasks[0] |
 				"lastStatus=\(.lastStatus // "unknown"), desiredStatus=\(.desiredStatus // "unknown"), stoppedReason=\(.stoppedReason // "")"
 			' <<<"$task_desc" >&2
-		else
-			echo "Migration task waiter failed before task status could be read: ${task_arn}" >&2
-		fi
-		exit 1
-	fi
+    else
+      echo "Migration task waiter failed before task status could be read: ${task_arn}" >&2
+    fi
+    exit 1
+  fi
 
-	task_desc="$(
-		aws ecs describe-tasks \
-			--cluster "$CLUSTER_NAME" \
-			--tasks "$task_arn"
-	)"
-	exit_code="$(jq -r '[.tasks[0].containers[] | select(.name == "migrate")][0].exitCode // "null"' <<<"$task_desc")"
-	stopped_reason="$(jq -r '.tasks[0].stoppedReason // empty' <<<"$task_desc")"
+  task_desc="$(
+    aws ecs describe-tasks \
+      --cluster "$CLUSTER_NAME" \
+      --tasks "$task_arn"
+  )"
+  exit_code="$(jq -r '[.tasks[0].containers[] | select(.name == "migrate")][0].exitCode // "null"' <<<"$task_desc")"
+  stopped_reason="$(jq -r '.tasks[0].stoppedReason // empty' <<<"$task_desc")"
 
-	if [[ "$exit_code" != "0" ]]; then
-		echo "Migration failed (exit=${exit_code}, reason=${stopped_reason})" >&2
-		task_id="${task_arn##*/}"
-		aws logs get-log-events \
-			--log-group-name "/ecs/${PROJECT_NAME}-migrate-${ENVIRONMENT}" \
-			--log-stream-name "migrate/migrate/${task_id}" \
-			--limit 50 \
-			--query 'events[*].message' \
-			--output text 2>/dev/null || true
-		exit 1
-	fi
+  if [[ "$exit_code" != "0" ]]; then
+    echo "Migration failed (exit=${exit_code}, reason=${stopped_reason})" >&2
+    task_id="${task_arn##*/}"
+    aws logs get-log-events \
+      --log-group-name "/ecs/${PROJECT_NAME}-migrate-${ENVIRONMENT}" \
+      --log-stream-name "migrate/migrate/${task_id}" \
+      --limit 50 \
+      --query 'events[*].message' \
+      --output text 2>/dev/null || true
+    exit 1
+  fi
 
-	echo "Migrations completed successfully"
+  echo "Migrations completed successfully"
 }
 
 require_env IMAGE_TAG
@@ -197,13 +197,13 @@ require_secret "$FRED_API_KEY_SECRET_NAME"
 require_secret "$ENCRYPTION_KEY_SECRET_NAME"
 
 if ! truthy "$MIGRATE_ONLY"; then
-	require_env DORA_API_KEY
-	require_env ENCRYPTION_KEY
-	require_service "$PRICE_DAEMON_SERVICE_NAME"
+  require_env DORA_API_KEY
+  require_env ENCRYPTION_KEY
+  require_service "$PRICE_DAEMON_SERVICE_NAME"
 
-	put_secret_value "$DORA_API_KEY_SECRET_NAME" "$DORA_API_KEY"
-	put_secret_value "$FRED_API_KEY_SECRET_NAME" "${FRED_API_KEY:-not-configured}"
-	put_secret_value "$ENCRYPTION_KEY_SECRET_NAME" "$ENCRYPTION_KEY"
+  put_secret_value "$DORA_API_KEY_SECRET_NAME" "$DORA_API_KEY"
+  put_secret_value "$FRED_API_KEY_SECRET_NAME" "${FRED_API_KEY:-not-configured}"
+  put_secret_value "$ENCRYPTION_KEY_SECRET_NAME" "$ENCRYPTION_KEY"
 fi
 
 DATABASE_URL_SECRET_ARN="$(secret_arn "$DATABASE_URL_SECRET_NAME")"
@@ -212,17 +212,17 @@ FRED_API_KEY_SECRET_ARN="$(secret_arn "$FRED_API_KEY_SECRET_NAME")"
 ENCRYPTION_KEY_SECRET_ARN="$(secret_arn "$ENCRYPTION_KEY_SECRET_NAME")"
 
 strategy_containers="$(
-	jq -cn \
-		--arg image "$IMAGE_URI" \
-		--arg db "$DATABASE_URL_SECRET_ARN" \
-		--arg dora "$DORA_API_KEY_SECRET_ARN" \
-		--arg fred "$FRED_API_KEY_SECRET_ARN" \
-		--arg encryption "$ENCRYPTION_KEY_SECRET_ARN" \
-		--arg ws_url "$WS_URL" \
-		--arg dora_base_url "$DORA_BASE_URL" \
-		--arg cors_allowed_origins "$CORS_ALLOWED_ORIGINS" \
-		--arg environment "$ENVIRONMENT" \
-		'[{
+  jq -cn \
+    --arg image "$IMAGE_URI" \
+    --arg db "$DATABASE_URL_SECRET_ARN" \
+    --arg dora "$DORA_API_KEY_SECRET_ARN" \
+    --arg fred "$FRED_API_KEY_SECRET_ARN" \
+    --arg encryption "$ENCRYPTION_KEY_SECRET_ARN" \
+    --arg ws_url "$WS_URL" \
+    --arg dora_base_url "$DORA_BASE_URL" \
+    --arg cors_allowed_origins "$CORS_ALLOWED_ORIGINS" \
+    --arg environment "$ENVIRONMENT" \
+    '[{
 			name: "strategy-server",
 			image: $image,
 			essential: true,
@@ -263,14 +263,14 @@ strategy_containers="$(
 )"
 
 price_daemon_containers="$(
-	jq -cn \
-		--arg image "$IMAGE_URI" \
-		--arg db "$DATABASE_URL_SECRET_ARN" \
-		--arg dora "$DORA_API_KEY_SECRET_ARN" \
-		--arg ws_url "$WS_URL" \
-		--arg dora_base_url "$DORA_BASE_URL" \
-		--arg environment "$ENVIRONMENT" \
-		'[{
+  jq -cn \
+    --arg image "$IMAGE_URI" \
+    --arg db "$DATABASE_URL_SECRET_ARN" \
+    --arg dora "$DORA_API_KEY_SECRET_ARN" \
+    --arg ws_url "$WS_URL" \
+    --arg dora_base_url "$DORA_BASE_URL" \
+    --arg environment "$ENVIRONMENT" \
+    '[{
 			name: "price-daemon",
 			image: $image,
 			essential: true,
@@ -309,11 +309,11 @@ price_daemon_containers="$(
 )"
 
 migrate_containers="$(
-	jq -cn \
-		--arg image "$IMAGE_URI" \
-		--arg db "$DATABASE_URL_SECRET_ARN" \
-		--arg environment "$ENVIRONMENT" \
-		'[{
+  jq -cn \
+    --arg image "$IMAGE_URI" \
+    --arg db "$DATABASE_URL_SECRET_ARN" \
+    --arg environment "$ENVIRONMENT" \
+    '[{
 			name: "migrate",
 			image: $image,
 			essential: true,
@@ -338,27 +338,27 @@ migration_task_definition="$(register_task_definition "${PROJECT_NAME}-migrate-$
 run_migration "$migration_task_definition"
 
 if truthy "$MIGRATE_ONLY"; then
-	echo "Skipping service deployment because MIGRATE_ONLY=${MIGRATE_ONLY}"
-	exit 0
+  echo "Skipping service deployment because MIGRATE_ONLY=${MIGRATE_ONLY}"
+  exit 0
 fi
 
 strategy_task_definition="$(register_task_definition "${PROJECT_NAME}-strategy-${ENVIRONMENT}" 1024 2048 "$strategy_containers")"
 price_task_definition="$(register_task_definition "${PROJECT_NAME}-price-daemon-${ENVIRONMENT}" 512 1024 "$price_daemon_containers")"
 
 aws ecs update-service \
-	--cluster "$CLUSTER_NAME" \
-	--service "$STRATEGY_SERVICE_NAME" \
-	--task-definition "$strategy_task_definition" \
-	--desired-count 1 >/dev/null
+  --cluster "$CLUSTER_NAME" \
+  --service "$STRATEGY_SERVICE_NAME" \
+  --task-definition "$strategy_task_definition" \
+  --desired-count 1 >/dev/null
 
 aws ecs update-service \
-	--cluster "$CLUSTER_NAME" \
-	--service "$PRICE_DAEMON_SERVICE_NAME" \
-	--task-definition "$price_task_definition" \
-	--desired-count 1 >/dev/null
+  --cluster "$CLUSTER_NAME" \
+  --service "$PRICE_DAEMON_SERVICE_NAME" \
+  --task-definition "$price_task_definition" \
+  --desired-count 1 >/dev/null
 
 aws ecs wait services-stable \
-	--cluster "$CLUSTER_NAME" \
-	--services "$STRATEGY_SERVICE_NAME" "$PRICE_DAEMON_SERVICE_NAME"
+  --cluster "$CLUSTER_NAME" \
+  --services "$STRATEGY_SERVICE_NAME" "$PRICE_DAEMON_SERVICE_NAME"
 
 echo "Deployed ${IMAGE_URI}"
