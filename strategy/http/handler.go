@@ -1863,6 +1863,14 @@ func (h *Handler) RestoreRuns(ctx context.Context) error {
 		if detail.Status != "running" {
 			continue
 		}
+		// Don't relaunch runs whose execution window has already
+		// passed — the strategy would only skip every bucket on
+		// startup. Mark them completed and publish EventRunCompleted
+		// so the client isn't left polling.
+		if h.runWindowExpired(detail) {
+			h.expireRun(ctx, detail)
+			continue
+		}
 		h.log.Info(
 			"resuming run",
 			"run_id", detail.ID,
@@ -2195,6 +2203,56 @@ func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, detail *Run
 		UserID:    userID,
 		RunID:     runID,
 		Timestamp: h.now().UTC(),
+	})
+}
+
+// runWindowExpired returns true if the run's execution window has
+// already passed. Reads end_time out of the persisted config JSON,
+// which is the canonical source of truth (RunDetail does not expose
+// end_time directly).
+func (h *Handler) runWindowExpired(detail *RunDetail) bool {
+	var cfg struct {
+		EndTime time.Time `json:"end_time"`
+	}
+	if err := json.Unmarshal(detail.Config, &cfg); err != nil {
+		return false
+	}
+	if cfg.EndTime.IsZero() {
+		return false
+	}
+	return h.now().UTC().After(cfg.EndTime)
+}
+
+// expireRun marks the run as completed in the DB and publishes
+// EventRunCompleted. Called by RestoreRuns when a run with status
+// "running" is found past its end_time — we don't want to relaunch
+// a finished run because the strategy would only skip every chunk
+// at startup.
+func (h *Handler) expireRun(ctx context.Context, detail *RunDetail) {
+	h.log.Info(
+		"run expired during restart, marking completed",
+		"run_id", detail.ID,
+		"strategy_type", detail.StrategyType,
+	)
+	now := h.now().UTC()
+	userID := ""
+	runIDStr := detail.ID.String()
+	h.mu.Lock()
+	if d, ok := h.runs[detail.ID]; ok {
+		d.Status = "completed"
+		d.UpdatedAt = now
+		d.StoppedAt = &now
+		userID = d.DORAUserID
+		if err := h.saveRun(ctx, d); err != nil {
+			slog.Error("save expired run", "err", err, "run_id", runIDStr)
+		}
+	}
+	h.mu.Unlock()
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunCompleted,
+		UserID:    userID,
+		RunID:     runIDStr,
+		Timestamp: now,
 	})
 }
 
