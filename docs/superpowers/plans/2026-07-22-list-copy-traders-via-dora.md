@@ -35,9 +35,9 @@ type doraClient interface {
 }
 ```
 
-- [ ] **Step 1.2: Delete the `DORABotUser` struct, `isBotUser`, `hasBotPrefix`, and the `strings` import**
+- [ ] **Step 1.2: Delete the `DORABotUser` struct, `isBotUser`, and `hasBotPrefix`**
 
-In `strategy/http/dora_client.go`, remove the entire `DORABotUser` block (currently lines 24–30), the `isBotUser` function (lines 32–37), and the `hasBotPrefix` function (lines 39–42). The `strings` import becomes unused after this step — remove it from the import block (lines 3–15). The new pagination loop uses length comparisons, not `strings`.
+In `strategy/http/dora_client.go`, remove the entire `DORABotUser` block (currently lines 24–30), the `isBotUser` function (lines 32–37), and the `hasBotPrefix` function (lines 39–42). **Keep the `strings` import** — it is still used by `NewDORAClient` (`strings.TrimRight(baseURL, "/")`) and `GetUserID` (`strings.TrimSpace(string(body))`) in the same file.
 
 - [ ] **Step 1.3: Drop the `copyTraderMaxPages` constant**
 
@@ -90,14 +90,12 @@ func (c *liveDORAClient) ListCopyTraders(ctx context.Context) ([]string, error) 
         all = append(all, resp.Data...)
         if len(resp.Data) < int(copyTraderPageSize) {
             break
-        }
     }
     return all, nil
 }
 ```
 
-- [ ] **Step 1.5: Run the build to confirm compile errors are the expected "deleted symbols" ones**
-
+**Note for the implementer of Task 3:** `liveDORAClient.ListCopyTraders` returns `nil` (not an empty slice) when DORA returns no copy traders — the `var all []string` declaration defaults to nil and the loop never appends. The handler step in Task 3 must initialise `items` with `make([]CopyTraderSummary, 0, len(ids))` (not `var items []CopyTraderSummary`) so that an empty result serializes as `"items": []` and not `"items": null`. This is captured in the Task 3 step below.
 Run: `go build ./...`
 Expected: compile errors in `strategy/http/dora_client_test.go` (references `TestIsBotUser`, `TestLiveDORAClient_ListBotUsers`, `copyTraderMaxPages`) and `strategy/http/handler.go` (references `DORABotUser`, `ListBotUsers`) and `strategy/http/handler_test.go` (references `listBotUsers`, `strategyhttp.DORABotUser`). These are expected; the next tasks fix them.
 
@@ -337,6 +335,11 @@ func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // `make(..., 0, len(ids))` is required, not `var items []CopyTraderSummary`:
+    // when DORA returns no copy traders, the live client returns `nil`, and
+    // writeJSON serialises a nil slice as `"items": null`. The spec guarantees
+    // `"items": []` for empty results, so the handler must produce a non-nil
+    // empty slice explicitly.
     items := make([]CopyTraderSummary, 0, len(ids))
     for _, id := range ids {
         items = append(items, CopyTraderSummary{ID: id})
