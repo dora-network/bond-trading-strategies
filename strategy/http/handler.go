@@ -104,7 +104,8 @@ type Handler struct {
 	runningStrategies map[uuid.UUID]strategycore.Strategy
 	// stopLossObservers cancels the per-run observer goroutine. Protected
 	// by mu.
-	stopLossObservers map[uuid.UUID]context.CancelFunc
+	stopLossObservers     map[uuid.UUID]context.CancelFunc
+	runCompletionWatchers map[uuid.UUID]context.CancelFunc
 	// stopLossObserverInterval is the polling cadence for the stop-loss
 	// observer. Defaults to 1s; overridable for tests via
 	// WithStopLossObserverInterval.
@@ -489,6 +490,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		runs:                     make(map[uuid.UUID]*RunDetail),
 		runningStrategies:        make(map[uuid.UUID]strategycore.Strategy),
 		stopLossObservers:        make(map[uuid.UUID]context.CancelFunc),
+		runCompletionWatchers:    make(map[uuid.UUID]context.CancelFunc),
 		stopLossObserverInterval: defaultStopLossObserverInterval,
 		orderbookCache:           make(map[string]DORAOrderBookSummary),
 		assetCache:               make(map[string]AssetInfo),
@@ -1626,6 +1628,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.startStopLossObserver(detail, strat)
+	h.startCompletionWatcher(detail)
 
 	h.publishEvent(r.Context(), notifications.Event{
 		Type:      notifications.EventRunStarted,
@@ -1973,6 +1976,7 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		}
 	}
 	h.startStopLossObserver(detail, strat)
+	h.startCompletionWatcher(detail)
 	return nil
 }
 
@@ -2091,6 +2095,51 @@ func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strateg
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// startCompletionWatcher spawns a per-run goroutine that fires
+// EventRunCompleted when the strategy's run loop exits naturally
+// (chunks exhausted, end_time elapsed, or skipped buckets consumed).
+// Distinct from startStopLossObserver which is a no-op for strategies
+// without stop-loss semantics — this runs unconditionally so every
+// execution strategy's natural completion is observable.
+func (h *Handler) startCompletionWatcher(detail *RunDetail) {
+	parent := context.Background()
+	if h.service != nil {
+		if bc := h.service.BaseContext(); bc != nil {
+			parent = bc
+		}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	h.mu.Lock()
+	h.runCompletionWatchers[detail.ID] = cancel
+	h.runningStrategies[detail.ID] = nil // ensure map entry exists
+	h.mu.Unlock()
+	go func() {
+		defer cancel()
+		defer func() {
+			h.mu.Lock()
+			delete(h.runCompletionWatchers, detail.ID)
+			h.mu.Unlock()
+		}()
+		interval := h.stopLossObserverInterval
+		if interval <= 0 {
+			interval = defaultStopLossObserverInterval
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !h.runIsActive(detail.ID) {
+					h.maybePublishNaturalCompletion(ctx, detail)
+					return
+				}
+			}
+		}
+	}()
 }
 
 // startStopLossObserver records strat in runningStrategies and spawns a
