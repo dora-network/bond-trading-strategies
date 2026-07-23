@@ -3166,7 +3166,7 @@ func decodeTWAPConfig(raw json.RawMessage) (twap.Config, json.RawMessage, error)
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return twap.Config{}, nil, fmt.Errorf("decode twap config: %w", err)
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.Validate(time.Now().UTC()); err != nil {
 		return twap.Config{}, nil, err
 	}
 	normalised, err := json.Marshal(cfg)
@@ -3181,7 +3181,7 @@ func decodeVWAPConfig(raw json.RawMessage) (vwap.Config, json.RawMessage, error)
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return vwap.Config{}, nil, fmt.Errorf("decode vwap config: %w", err)
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.Validate(time.Now().UTC()); err != nil {
 		return vwap.Config{}, nil, err
 	}
 	normalised, err := json.Marshal(cfg)

@@ -22,7 +22,7 @@ type Config struct {
 	// WindowDays is how many days of trade history to use for computing
 	// the ADV (Average Daily Volume) bucket distribution. Default 30.
 	WindowDays int `json:"window_days"`
-	// BucketMinutes is the granularity of each VWAP chunk. Default 5.
+	// BucketMinutes is the granularity of each VWAP bucket. Default 5.
 	BucketMinutes int `json:"bucket_minutes"`
 }
 
@@ -34,8 +34,9 @@ func DefaultConfig() Config {
 	}
 }
 
-// Validate checks that the config is valid for a run.
-func (c Config) Validate() error {
+// Validate checks that the config is valid for a run. The now parameter
+// lets tests inject a fixed clock; pass time.Now().UTC() in production.
+func (c Config) Validate(now time.Time) error {
 	if c.OrderBookID == "" {
 		return fmt.Errorf("order_book_id is required")
 	}
@@ -50,6 +51,9 @@ func (c Config) Validate() error {
 	}
 	if !c.EndTime.After(c.StartTime) {
 		return fmt.Errorf("end_time must be strictly after start_time")
+	}
+	if !c.EndTime.After(now) {
+		return fmt.Errorf("end_time must be in the future (got %s, now %s)", c.EndTime.Format(time.RFC3339), now.Format(time.RFC3339))
 	}
 	if c.WindowDays <= 0 {
 		return fmt.Errorf("window_days must be positive")
