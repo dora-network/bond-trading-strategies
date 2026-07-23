@@ -18,37 +18,6 @@ import (
 
 var _ doraClient = (*liveDORAClient)(nil)
 
-func TestIsBotUser(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name      string
-		firstName string
-		lastName  string
-		want      bool
-	}{
-		{"trader underscore prefix in first name", "TRADER_01", "Smith", true},
-		{"mm underscore prefix in first name", "MM_Alice", "Brown", true},
-		{"trader underscore prefix in last name", "Alice", "TRADER_99", true},
-		{"mm prefix in last name", "Alice", "mm_bot", true},
-		{"lowercase variants", "trader_42", "doe", true},
-		{"no prefix in either", "Alice", "Smith", false},
-		{"empty names", "", "", false},
-		{"only first name no prefix", "Alice", "", false},
-		{"only last name no prefix", "", "Smith", false},
-		{"trader without underscore is not a bot", "Trader", "Smith", false},
-		{"mm without underscore is not a bot", "Mm", "Smith", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isBotUser(tc.firstName, tc.lastName); got != tc.want {
-				t.Errorf("isBotUser(%q, %q) = %v, want %v", tc.firstName, tc.lastName, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestLiveDORAClientGetUserIDIgnoresUnknownUserFields(t *testing.T) {
 	t.Parallel()
 
@@ -99,99 +68,65 @@ func TestLiveDORAClientGetUserIDIgnoresUnknownUserFields(t *testing.T) {
 	assert.Equal(t, "user-123", got)
 }
 
-func TestLiveDORAClient_ListBotUsers(t *testing.T) {
+func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
 	t.Parallel()
 
-	makeUser := func(id, firstName, lastName string) doraclient.User {
-		return doraclient.User{
-			Id:                id,
-			Email:             id + "@example.com",
-			FirstName:         firstName,
-			LastName:          lastName,
-			CountryOfDomicile: doraclient.CountryCode("US"),
-			NativeAssetId:     "USD",
-			Roles:             []doraclient.UserRole{doraclient.USERROLE_TRADER},
-			TenantId:          "test-tenant",
-		}
-	}
-
-	fullBotPage := func(prefix string) []doraclient.User {
-		users := make([]doraclient.User, 0, copyTraderPageSize)
-		for i := 0; i < int(copyTraderPageSize); i++ {
-			users = append(users, makeUser(
-				fmt.Sprintf("bot-%s-%03d", prefix, i),
-				fmt.Sprintf("TRADER_%s_%03d", prefix, i),
-				"Bot",
-			))
-		}
-		return users
-	}
-
-	fullBotIDs := func(prefix string) []string {
-		ids := make([]string, 0, copyTraderPageSize)
-		for i := 0; i < int(copyTraderPageSize); i++ {
-			ids = append(ids, fmt.Sprintf("bot-%s-%03d", prefix, i))
+	fullPageIDs := func(prefix string) []string {
+		ids := make([]string, 0, int(copyTraderPageSize))
+		for i := range int(copyTraderPageSize) {
+			ids = append(ids, fmt.Sprintf("019c0000-0000-7000-8000-%s%010d", prefix, i))
 		}
 		return ids
 	}
 
 	cases := []struct {
-		name        string
-		pages       [][]doraclient.User
-		wantIDs     []string
-		wantCalls   int
-		wantOffsets []int32
+		name      string
+		pages     [][]string
+		wantIDs   []string
+		wantCalls int
+		wantPages []int
 	}{
 		{
-			name: "single short page filters non-bots",
-			pages: [][]doraclient.User{
-				{
-					makeUser("u1", "TRADER_01", "Bot"),
-					makeUser("u2", "Alice", "Smith"),
-					makeUser("u3", "MM_Bot", "X"),
-				},
+			name: "happy path paginated",
+			pages: [][]string{
+				fullPageIDs("a"),
+				fullPageIDs("b")[:50],
 			},
-			wantIDs:     []string{"u1", "u3"},
-			wantCalls:   1,
-			wantOffsets: []int32{0},
+			wantIDs:   append(fullPageIDs("a"), fullPageIDs("b")[:50]...),
+			wantCalls: 2,
+			wantPages: []int{1, 2},
 		},
 		{
-			name: "multi-page with short final page",
-			pages: [][]doraclient.User{
-				fullBotPage("A"),
-				{
-					makeUser("last-1", "TRADER_99", "Z"),
-					makeUser("last-2", "Bob", "Builder"),
-				},
+			name:      "empty first page terminates",
+			pages:     [][]string{nil},
+			wantIDs:   nil,
+			wantCalls: 1,
+			wantPages: []int{1},
+		},
+		{
+			name:      "short first page terminates",
+			pages:     [][]string{{"019c0000-0000-7000-8000-000000000001", "019c0000-0000-7000-8000-000000000002"}},
+			wantIDs:   []string{"019c0000-0000-7000-8000-000000000001", "019c0000-0000-7000-8000-000000000002"},
+			wantCalls: 1,
+			wantPages: []int{1},
+		},
+		{
+			name:      "5xx propagated",
+			pages:     [][]string{{}}, // unused; handler returns 500 immediately
+			wantIDs:   nil,
+			wantCalls: 1,
+			wantPages: []int{1},
+		},
+		{
+			name: "full pages then a short page terminates",
+			pages: [][]string{
+				fullPageIDs("c"),
+				fullPageIDs("d"),
+				{"019c0000-0000-7000-8000-000000000099"},
 			},
-			wantIDs:     append(fullBotIDs("A"), "last-1"),
-			wantCalls:   2,
-			wantOffsets: []int32{0, 100},
-		},
-		{
-			name:        "empty first page returns no bots",
-			pages:       [][]doraclient.User{nil},
-			wantIDs:     []string{},
-			wantCalls:   1,
-			wantOffsets: []int32{0},
-		},
-		{
-			name: "max pages cap stops after 10 full pages",
-			pages: func() [][]doraclient.User {
-				p := make([][]doraclient.User, int(copyTraderMaxPages))
-				for i := range p {
-					p[i] = fullBotPage("M")
-				}
-				return p
-			}(),
-			wantIDs: func() []string {
-				ids := make([]string, 0, int(copyTraderMaxPages)*int(copyTraderPageSize))
-				for i := 0; i < int(copyTraderMaxPages); i++ {
-					ids = append(ids, fullBotIDs("M")...)
-				}
-				return ids
-			}(),
-			wantCalls: int(copyTraderMaxPages),
+			wantIDs:   append(append(fullPageIDs("c"), fullPageIDs("d")...), "019c0000-0000-7000-8000-000000000099"),
+			wantCalls: 3,
+			wantPages: []int{1, 2, 3},
 		},
 	}
 
@@ -200,19 +135,19 @@ func TestLiveDORAClient_ListBotUsers(t *testing.T) {
 			t.Parallel()
 
 			var (
-				mu      sync.Mutex
-				offsets []int
-				calls   int
+				mu    sync.Mutex
+				pages []int
+				calls int
 			)
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/v1/user" {
+				if r.URL.Path != "/v1/user/copy_traders" {
 					http.NotFound(w, r)
 					return
 				}
-				offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
-				if err != nil {
-					http.Error(w, "bad offset", http.StatusBadRequest)
+				page, err := strconv.Atoi(r.URL.Query().Get("page"))
+				if err != nil || page < 1 {
+					http.Error(w, "bad page", http.StatusBadRequest)
 					return
 				}
 
@@ -222,18 +157,23 @@ func TestLiveDORAClient_ListBotUsers(t *testing.T) {
 					http.Error(w, "unexpected extra request", http.StatusInternalServerError)
 					return
 				}
-				page := tc.pages[calls]
-				offsets = append(offsets, offset)
+				if tc.name == "5xx propagated" {
+					mu.Unlock()
+					http.Error(w, "boom", http.StatusInternalServerError)
+					return
+				}
+				pageData := tc.pages[calls]
+				pages = append(pages, page)
 				calls++
 				mu.Unlock()
 
-				resp := doraclient.ListUsersResponseEnvelope{
-					Data: page,
+				resp := doraclient.GetCopyTradersResponse{
 					Metadata: doraclient.Metadata{
 						StatusCode: 200,
 						TraceId:    "trace",
 						RequestId:  "req",
 					},
+					Data: pageData,
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(resp)
@@ -247,29 +187,22 @@ func TestLiveDORAClient_ListBotUsers(t *testing.T) {
 			client := &liveDORAClient{client: doraclient.NewAPIClient(cfg)}
 
 			ctx := authctx.WithAPIKey(context.Background(), "test-key")
+			got, err := client.ListCopyTraders(ctx)
 
-			got, err := client.ListBotUsers(ctx)
-			require.NoError(t, err)
-
-			gotIDs := make([]string, 0, len(got))
-			for _, b := range got {
-				gotIDs = append(gotIDs, b.ID)
+			if tc.name == "5xx propagated" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "list copy traders")
+				return
 			}
-			assert.Equal(t, tc.wantIDs, gotIDs)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantIDs, got)
 
 			mu.Lock()
 			gotCalls := calls
-			gotOffsets := append([]int(nil), offsets...)
+			gotPages := append([]int(nil), pages...)
 			mu.Unlock()
-
 			assert.Equal(t, tc.wantCalls, gotCalls)
-			if tc.wantOffsets != nil {
-				want := make([]int, len(tc.wantOffsets))
-				for i, o := range tc.wantOffsets {
-					want[i] = int(o)
-				}
-				assert.Equal(t, want, gotOffsets)
-			}
+			assert.Equal(t, tc.wantPages, gotPages)
 		})
 	}
 }

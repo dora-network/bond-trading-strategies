@@ -170,9 +170,11 @@ type DORAUserSummary struct {
 }
 
 // CopyTraderSummary is a single entry in the list-copy-traders response.
+// The id is the DORA user UUID and matches the `followed_trader` field
+// accepted by CopyTradingConfig. Names and other identifying information are
+// intentionally omitted for user anonymity.
 type CopyTraderSummary struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
+	ID string `json:"id"`
 }
 
 type AssetInfo struct {
@@ -723,10 +725,10 @@ func (h *Handler) handleDORAUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCopyTraders returns the list of traders available to be followed by
-// copy-trading runs. This is a placeholder that filters DORA users by name
-// prefix until DORA exposes a dedicated "list available copy traders" endpoint.
-// TODO(remove-placeholder): when DORA ships the new endpoint, swap the body of
-// this handler to call it directly. The response shape must stay the same.
+// copy-trading runs. The list is sourced from DORA's dedicated
+// `GET /v1/user/copy-traders` endpoint, which is server-side filtered to users
+// with copy trading enabled. Only the user IDs are exposed; names and other
+// identifying information are intentionally omitted for user anonymity.
 func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeMethodNotAllowed(w, http.MethodGet)
@@ -737,18 +739,20 @@ func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
 	if client == nil {
 		client = NewDORAClient()
 	}
-	users, err := client.ListBotUsers(r.Context())
+	ids, err := client.ListCopyTraders(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list copy traders: %v", err))
 		return
 	}
 
-	items := make([]CopyTraderSummary, 0, len(users))
-	for _, u := range users {
-		items = append(items, CopyTraderSummary{
-			ID:          u.ID,
-			DisplayName: strings.TrimSpace(u.FirstName + " " + u.LastName),
-		})
+	// `make(..., 0, len(ids))` is required, not `var items []CopyTraderSummary`:
+	// when DORA returns no copy traders, the live client returns `nil`, and
+	// writeJSON serialises a nil slice as `"items": null`. The spec guarantees
+	// `"items": []` for empty results, so the handler must produce a non-nil
+	// empty slice explicitly.
+	items := make([]CopyTraderSummary, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, CopyTraderSummary{ID: id})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -1802,7 +1806,8 @@ func (h *Handler) RestoreRuns(ctx context.Context) error {
 		if detail.Status != "running" {
 			continue
 		}
-		h.log.Info("resuming run",
+		h.log.Info(
+			"resuming run",
 			"run_id", detail.ID,
 			"created_at", detail.CreatedAt,
 			"status", detail.Status,
