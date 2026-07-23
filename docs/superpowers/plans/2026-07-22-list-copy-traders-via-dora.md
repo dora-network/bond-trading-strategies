@@ -132,43 +132,48 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
     t.Parallel()
 
     fullPageIDs := func(prefix string) []string {
-        ids := make([]string, 0, copyTraderPageSize)
-        for i := int32(0); i < copyTraderPageSize; i++ {
+        // Note: `int32` only appears in the production code at the SDK call
+        // boundary (`Page(page)` and `Limit(copyTraderPageSize)`). In the test
+        // we track page numbers as plain `int` — `strconv.Atoi` returns `int`,
+        // and there's no SDK boundary to cross from the test handler.
+        ids := make([]string, 0, int(copyTraderPageSize))
+        for i := range int(copyTraderPageSize) {
             ids = append(ids, fmt.Sprintf("019c0000-0000-7000-8000-%s%010d", prefix, i))
         }
         return ids
     }
+
 
     cases := []struct {
         name        string
         pages       [][]string
         wantIDs     []string
         wantCalls   int
-        wantPages   []int32
+        wantPages   []int
     }{
         {
             name: "happy path paginated",
             pages: [][]string{
                 fullPageIDs("a"),
-                append([]string{}, fullPageIDs("b")[:50]...),
+                fullPageIDs("b")[:50],
             },
-            wantIDs:   append(append([]string{}, fullPageIDs("a")...), fullPageIDs("b")[:50]...),
+            wantIDs:   append(fullPageIDs("a"), fullPageIDs("b")[:50]...),
             wantCalls: 2,
-            wantPages: []int32{1, 2},
+            wantPages: []int{1, 2},
         },
         {
             name:        "empty first page terminates",
             pages:       [][]string{nil},
             wantIDs:     nil,
             wantCalls:   1,
-            wantPages:   []int32{1},
+            wantPages:   []int{1},
         },
         {
             name:        "short first page terminates",
             pages:       [][]string{{"019c0000-0000-7000-8000-000000000001", "019c0000-0000-7000-8000-000000000002"}},
             wantIDs:     []string{"019c0000-0000-7000-8000-000000000001", "019c0000-0000-7000-8000-000000000002"},
             wantCalls:   1,
-            wantPages:   []int32{1},
+            wantPages:   []int{1},
         },
         {
             name: "5xx propagated",
@@ -177,7 +182,7 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
             },
             wantIDs:   nil,
             wantCalls: 1,
-            wantPages: []int32{1},
+            wantPages: []int{1},
         },
         {
             name: "full pages then a short page terminates",
@@ -186,9 +191,9 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
                 fullPageIDs("d"),
                 {"019c0000-0000-7000-8000-000000000099"},
             },
-            wantIDs: append(append(append([]string{}, fullPageIDs("c")...), fullPageIDs("d")...), "019c0000-0000-7000-8000-000000000099"),
+            wantIDs: append(append(fullPageIDs("c"), fullPageIDs("d")...), "019c0000-0000-7000-8000-000000000099"),
             wantCalls: 3,
-            wantPages: []int32{1, 2, 3},
+            wantPages: []int{1, 2, 3},
         },
     }
 
@@ -198,12 +203,12 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
 
             var (
                 mu    sync.Mutex
-                pages []int32
+                pages []int
                 calls int
             )
 
             srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-                if r.URL.Path != "/v1/user/copy-traders" {
+                if r.URL.Path != "/v1/user/copy_traders" {
                     http.NotFound(w, r)
                     return
                 }
@@ -224,8 +229,8 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
                     http.Error(w, "boom", http.StatusInternalServerError)
                     return
                 }
-                page_data := tc.pages[calls]
-                pages = append(pages, int32(page))
+                pageData := tc.pages[calls]
+                pages = append(pages, page)
                 calls++
                 mu.Unlock()
 
@@ -235,7 +240,7 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
                         TraceId:    "trace",
                         RequestId:  "req",
                     },
-                    Data: page_data,
+                    Data: pageData,
                 }
                 w.Header().Set("Content-Type", "application/json")
                 _ = json.NewEncoder(w).Encode(resp)
@@ -261,7 +266,7 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
 
             mu.Lock()
             gotCalls := calls
-            gotPages := append([]int32(nil), pages...)
+            gotPages := append([]int(nil), pages...)
             mu.Unlock()
             assert.Equal(t, tc.wantCalls, gotCalls)
             assert.Equal(t, tc.wantPages, gotPages)
