@@ -51,6 +51,67 @@ func sourceSign(source string) decimal.Decimal {
 	return decimal.MustNew(-1, 0) // ytm, spread: inverted
 }
 
+// NewExitDecision builds a Decision carrying only the fields ShouldExit
+// inspects (signal + price). Exported so the external test package can
+// construct synthetic decisions for unit tests of ShouldExit.
+func NewExitDecision(signal types.Signal, price decimal.Decimal) Decision {
+	return Decision{signal: signal, price: price}
+}
+
+// ShouldExit reports whether an open position should close, and why.
+// Priority: stop_loss > take_profit > reversal. Stop/TP are price-based
+// and entry-anchored (stable for the position's life). Reversal fires
+// when the current decision's signal opposes the open position.
+func (s *Strategy) ShouldExit(openSignal types.Signal, d Decision, entryPrice, entryATR decimal.Decimal) (bool, string) {
+	price := d.Price()
+	cfg := s.cfg
+
+	if cfg.StopLossATR.IsPos() && entryATR.IsPos() {
+		stopDist, err := cfg.StopLossATR.Mul(entryATR)
+		if err == nil {
+			switch openSignal { //nolint:exhaustive // SignalHold means flat — no stop check
+			case types.SignalBuy:
+				threshold, err := entryPrice.Sub(stopDist)
+				if err == nil && price.Cmp(threshold) <= 0 {
+					return true, ExitReasonStopLoss
+				}
+			case types.SignalSell:
+				threshold, err := entryPrice.Add(stopDist)
+				if err == nil && price.Cmp(threshold) >= 0 {
+					return true, ExitReasonStopLoss
+				}
+			}
+		}
+	}
+
+	if cfg.TakeProfitATR.IsPos() && entryATR.IsPos() {
+		tpDist, err := cfg.TakeProfitATR.Mul(entryATR)
+		if err == nil {
+			switch openSignal { //nolint:exhaustive // SignalHold means flat — no take-profit check
+			case types.SignalBuy:
+				threshold, err := entryPrice.Add(tpDist)
+				if err == nil && price.Cmp(threshold) >= 0 {
+					return true, ExitReasonTakeProfit
+				}
+			case types.SignalSell:
+				threshold, err := entryPrice.Sub(tpDist)
+				if err == nil && price.Cmp(threshold) <= 0 {
+					return true, ExitReasonTakeProfit
+				}
+			}
+		}
+	}
+
+	// Reversal: current signal opposes the open position.
+	if openSignal == types.SignalBuy && d.Signal() == types.SignalSell {
+		return true, ExitReasonReversal
+	}
+	if openSignal == types.SignalSell && d.Signal() == types.SignalBuy {
+		return true, ExitReasonReversal
+	}
+	return false, ""
+}
+
 // seriesValue selects the configured series value from the observation.
 // ok is false when the tick must be dropped entirely (zero YTM in
 // ytm/spread modes). price mode never drops.

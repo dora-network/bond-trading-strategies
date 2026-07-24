@@ -100,3 +100,54 @@ func TestUpdate_YTMSource_NilYTM_TickDropped(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, types.SignalHold, d.Signal()) // tick dropped, no window update
 }
+
+func TestShouldExit_StopLoss_Long(t *testing.T) {
+	cfg := momentum.DefaultConfig()
+	cfg.FastWindow = 2
+	cfg.SlowWindow = 3
+	cfg.StopLossATR = decimal.MustNew(2, 0) // 2 ATR
+	s := momentum.New(cfg)
+	entryPrice := decimal.MustNew(100, 0)
+	entryATR := decimal.MustNew(5, 0) // stop distance = 10
+	// Price 89 (< 100-10=90) -> stop loss.
+	d := momentum.NewExitDecision(types.SignalBuy, decimal.MustNew(89, 0))
+	exit, reason := s.ShouldExit(types.SignalBuy, d, entryPrice, entryATR)
+	require.True(t, exit)
+	require.Equal(t, momentum.ExitReasonStopLoss, reason)
+}
+
+func TestShouldExit_TakeProfit_Long(t *testing.T) {
+	cfg := momentum.DefaultConfig()
+	cfg.StopLossATR = decimal.Zero
+	cfg.TakeProfitATR = decimal.MustNew(2, 0)
+	s := momentum.New(cfg)
+	entryPrice := decimal.MustNew(100, 0)
+	entryATR := decimal.MustNew(5, 0) // tp distance = 10
+	d := momentum.NewExitDecision(types.SignalBuy, decimal.MustNew(111, 0))
+	exit, reason := s.ShouldExit(types.SignalBuy, d, entryPrice, entryATR)
+	require.True(t, exit)
+	require.Equal(t, momentum.ExitReasonTakeProfit, reason)
+}
+
+func TestShouldExit_Reversal_Long(t *testing.T) {
+	cfg := momentum.DefaultConfig()
+	cfg.StopLossATR = decimal.Zero
+	cfg.TakeProfitATR = decimal.Zero
+	s := momentum.New(cfg)
+	entryPrice := decimal.MustNew(100, 0)
+	entryATR := decimal.MustNew(1, 0)
+	// Opened Buy; decision now Sell -> reversal.
+	d := momentum.NewExitDecision(types.SignalSell, decimal.MustNew(100, 0))
+	exit, reason := s.ShouldExit(types.SignalBuy, d, entryPrice, entryATR)
+	require.True(t, exit)
+	require.Equal(t, momentum.ExitReasonReversal, reason)
+}
+
+func TestShouldExit_Hold_NoExit(t *testing.T) {
+	cfg := momentum.DefaultConfig()
+	cfg.StopLossATR = decimal.MustNew(2, 0)
+	s := momentum.New(cfg)
+	d := momentum.NewExitDecision(types.SignalBuy, decimal.MustNew(100, 0))
+	exit, _ := s.ShouldExit(types.SignalBuy, d, decimal.MustNew(100, 0), decimal.MustNew(1, 0))
+	require.False(t, exit)
+}
