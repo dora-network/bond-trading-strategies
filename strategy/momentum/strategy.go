@@ -2,11 +2,13 @@ package momentum
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
 	"github.com/google/uuid"
@@ -35,6 +37,11 @@ type Strategy struct {
 	// backtests and signal-only callers.
 	marketAPIClient strategy.MarketAPIClient
 
+	// collateralWeight is the collateral weight of the base asset
+	// fetched from DORA during the live run. Defaults to 1.0 in
+	// backtests and signal-only callers.
+	collateralWeight decimal.Decimal
+
 	// historyStore / benchmarkClient are the historical data surfaces
 	// used by getObservations / prefillWindow (spread mode only for
 	// the FRED client). Defined in historical_data.go.
@@ -43,6 +50,10 @@ type Strategy struct {
 
 	// benchmarkObservations caches FRED yields for spread mode.
 	benchmarkObservations []fred.Observation
+
+	// backtestWriter receives per-trade rows from the backtester.
+	// nil skips persistence.
+	backtestWriter stats.BacktestTradeWriter
 }
 
 // New creates a Strategy with the given Config and optional options.
@@ -51,11 +62,12 @@ func New(cfg Config, opts ...func(*Strategy)) *Strategy {
 		cfg.Leverage = decimal.One
 	}
 	s := &Strategy{
-		cfg:        cfg,
-		fastWin:    window.NewRollingWindow(cfg.FastWindow),
-		slowWin:    window.NewRollingWindow(cfg.SlowWindow),
-		atrWin:     window.NewRollingWindow(cfg.ATRWindow),
-		sourceSign: sourceSign(cfg.SignalSource),
+		cfg:              cfg,
+		fastWin:          window.NewRollingWindow(cfg.FastWindow),
+		slowWin:          window.NewRollingWindow(cfg.SlowWindow),
+		atrWin:           window.NewRollingWindow(cfg.ATRWindow),
+		sourceSign:       sourceSign(cfg.SignalSource),
+		collateralWeight: decimal.One,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -70,23 +82,98 @@ func sourceSign(source string) decimal.Decimal {
 	return decimal.MustNew(-1, 0) // ytm, spread: inverted
 }
 
+// WithBacktestWriter sets the destination for per-trade rows the
+// backtester emits during a backtest. If unset, trade rows are not
+// persisted and the /trades endpoints return empty.
+func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
+	return func(s *Strategy) { s.backtestWriter = w }
+}
+
+// cappedOrderQuantity computes the order quantity for a given position
+// fraction. Applies MinOrderSize / MaxOrderSize (0 disables each).
+// Returns ok=false to skip opening when the quantity is below the
+// minimum or when the budget/price is zero.  Fractional bonds are
+// allowed (no floor) — Dora is a fractionalized market.
+func (s *Strategy) cappedOrderQuantity(positionSize, currentPosition, price decimal.Decimal) (decimal.Decimal, bool, error) {
+	if positionSize.IsNeg() {
+		return decimal.Zero, false, errors.New("position size must be non-negative")
+	}
+	if price.IsZero() {
+		return decimal.Zero, false, errors.New("price is zero")
+	}
+
+	effectiveCapital, err := s.cfg.InitialBalance.Mul(s.collateralWeight)
+	if err != nil {
+		return decimal.Zero, false, err
+	}
+	effectiveCapital, err = effectiveCapital.Mul(s.cfg.Leverage)
+	if err != nil {
+		return decimal.Zero, false, err
+	}
+	budget, err := effectiveCapital.Mul(positionSize)
+	if err != nil {
+		return decimal.Zero, false, err
+	}
+	if !budget.IsPos() {
+		return decimal.Zero, false, nil
+	}
+
+	positionValue, err := currentPosition.Mul(price)
+	if err != nil {
+		return decimal.Zero, false, err
+	}
+	if positionValue.IsNeg() {
+		positionValue = decimal.Zero
+	}
+	if positionValue.Cmp(effectiveCapital) >= 0 {
+		return decimal.Zero, false, nil
+	}
+	remainingBudget, err := effectiveCapital.Sub(positionValue)
+	if err != nil {
+		return decimal.Zero, false, err
+	}
+	if budget.Cmp(remainingBudget) > 0 {
+		budget = remainingBudget
+	}
+
+	quantity, err := budget.Quo(price)
+	if err != nil {
+		return decimal.Zero, false, err
+	}
+	if s.cfg.MaxOrderSize.IsPos() && quantity.Cmp(s.cfg.MaxOrderSize) > 0 {
+		quantity = s.cfg.MaxOrderSize
+	}
+	if s.cfg.MinOrderSize.IsPos() && quantity.Cmp(s.cfg.MinOrderSize) < 0 {
+		return decimal.Zero, false, nil
+	}
+	if quantity.IsZero() || quantity.IsNeg() {
+		return decimal.Zero, false, nil
+	}
+	return quantity, true, nil
+}
+
 // lookupAssetID resolves an order-book UUID to its underlying asset ID.
 func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
 	return strategy.LookupAssetID(context.Background(), s.marketAPIClient, orderBookID)
 }
 
 // Backtest is the strategy.Strategy entry point for a backtest run.
-// It loads the requested observation window and forwards to the
-// backtester. Full implementation lands in Task 5; this stub calls
-// getObservations so the historical-data methods are exercised by
-// the test/lint suite.
+// Validates the date range, loads the observation window, and forwards
+// to the backtester.
 func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
+	if end.UTC().Before(start.UTC()) {
+		return BacktestResult{}, errors.New("end date must be after start date")
+	}
+	now := time.Now().UTC()
+	if start.UTC().After(now) || end.UTC().After(now) {
+		return BacktestResult{}, errors.New("start and end date must be in the past")
+	}
 	obs, err := s.getObservations(ctx, start, end)
 	if err != nil {
 		return nil, err
 	}
-	_ = obs // replaced with NewBacktester(...).Run(...) in Task 5
-	return BacktestResult{}, nil
+	bt := NewBacktester(s, s.backtestWriter)
+	return bt.Run(ctx, obs)
 }
 
 // NewExitDecision builds a Decision carrying only the fields ShouldExit
