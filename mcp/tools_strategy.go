@@ -138,6 +138,20 @@ func configProperties() map[string]any {
 		"obv_trend_threshold":   num("OBV threshold for the volume confirmation filter. Direction-mapped."),
 		"min_long_vol_floor":    num("Minimum LongVol required to trade. Suppresses entries on a flat baseline."),
 		"obv_window":            intMin(0, "Recent trades for windowed OBV. 0 = no verification. >0 = verify with last N trades."),
+		// momentum — shares several field names with breakout/copytrading/mean_reversion
+		// (stop_loss_atr, take_profit_atr, min_order_size, max_order_size, max_position_size,
+		// order_book_id, tenor, initial_balance, leverage). The schema values are
+		// shared approximations; the strategy-server validates the per-strategy
+		// type (e.g. momentum min/max_order_size are decimal, copytrading are int).
+		"signal_source": map[string]any{
+			"type":        "string",
+			"description": "Momentum: series the MA crossover runs on — price, ytm, or spread. spread requires tenor.",
+			"enum":        []string{"price", "ytm", "spread"},
+		},
+		"fast_window": intMin(2, "Momentum: fast-MA tick window. Must be at least 2."),               //nolint:mnd
+		"slow_window": intMin(3, "Momentum: slow-MA tick window. Must be greater than fast_window."), //nolint:mnd
+		// atr_window is already declared above for breakout with the same
+		// semantics (integer ≥ 2). Momentum reuses it.
 	}
 }
 

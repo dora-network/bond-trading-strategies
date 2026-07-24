@@ -600,6 +600,12 @@ func TestStrategyConfigSchemaIsTyped(t *testing.T) {
 			require.True(t, ok, "%s.config.disallowed_bonds must be declared in schema", name)
 			require.Equal(t, "array", arr.Type, "disallowed_bonds must be type array, got %q", arr.Type)
 			require.Equal(t, "string", arr.Items.Type, "disallowed_bonds items must be type string, got %q", arr.Items.Type)
+
+			// Momentum fields.
+			checkField("signal_source", "string")
+			checkField("fast_window", "integer")
+			checkField("slow_window", "integer")
+			checkField("atr_window", "integer")
 		})
 	}
 }
