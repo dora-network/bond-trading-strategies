@@ -138,3 +138,82 @@ selling pressure).
 - Volume confirmation (`obv_window > 0`) requires historical trade data in
   `trades_history`. If no trade data exists for the backtest date range, set
   `obv_window` to 0.
+
+## Momentum (Trend Following)
+
+A trend-following strategy that rides sustained moves on the bond's price,
+yield, or yield-spread series. Where mean reversion bets on spread
+reversion, momentum bets that trends persist — it detects a trend via a
+fast/slow moving-average crossover and rides it until the MAs reverse or
+an ATR-based protective stop fires.
+
+**Algorithm**: Three rolling windows (`fast_window`, `slow_window`,
+`atr_window`) process a configurable series (`signal_source`):
+
+- **`price`** — uses the bond's clean price directly. Rising series → Buy
+  (long uptrend).
+- **`ytm`** — uses the bond's yield-to-maturity. Rising YTM = falling price
+  → Sell (short downtrend). The raw cross direction flips because yield
+  moves inverse to price.
+- **`spread`** — uses `YTM − benchmark_yield(FRED)`. Requires `tenor`. Like
+  `ytm`, the direction is inverted: rising spread = cheapening → Sell.
+
+When the fast MA crosses above (or below, after inversion) the slow MA, the
+strategy opens a position in the indicated direction. The position is held
+until one of three exits fires, in priority order: stop-loss (price moved
+against entry by `stop_loss_atr × ATR_at_open`), take-profit (price moved
+in favour by `take_profit_atr × ATR_at_open`), or reversal (the MA
+crossover flipped against the open position). ATR is the same mean-absolute
+price-diff measure that breakout uses; it's anchored at entry so the
+thresholds don't drift as volatility changes.
+
+In `price` mode the strategy ticks on every price update. In `ytm`/`spread`
+modes, ticks with no YTM are dropped entirely (no window update, no
+signal), mirroring mean-reversion's behaviour.
+
+### Fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `signal_source` | string | `price` | Series the MA crossover runs on. One of `price`, `ytm`, `spread`. `spread` requires `tenor`. |
+| `fast_window` | int | 240 | Fast-MA tick window. Must be at least 2. |
+| `slow_window` | int | 1440 | Slow-MA tick window. Must be greater than `fast_window`. |
+| `atr_window` | int | 240 | Mean-absolute-price-diff window for exits. Must be at least 2. |
+| `stop_loss_atr` | float | 20 | Stop-loss distance in ATR units, anchored at entry. 0 disables. |
+| `take_profit_atr` | float | 0 | Take-profit distance in ATR units from entry. 0 disables. |
+| `min_order_size` | float | 0 | Skip opening when the computed quantity is below this. 0 disables. Decimal because Dora is a fractionalized market. |
+| `max_order_size` | float | 0 | Clamp the order quantity down to this. 0 disables. |
+| `max_position_size` | float | 1 | Capital fraction cap per trade. Must be in (0, 1]. |
+| `order_book_id` | uuid | – | DORA order book UUID used to locate the traded asset. |
+| `tenor` | string | – | Benchmark Treasury tenor (e.g. `2Y`, `5Y`, `10Y`). Required when `signal_source` is `spread`. |
+| `initial_balance` | float | 1 | Starting capital for backtests. Must be greater than 0 for backtests. |
+| `leverage` | float | 1 | Leverage multiplier for live orders. Must be greater than 0. |
+
+### How the fields affect the strategy
+
+- **`signal_source`** is the most consequential choice. `price` is the
+  simplest and most tick-responsive — best for assets where price moves
+  drive the trade thesis. `ytm` and `spread` translate yield-driven views
+  into trades (a "bonds cheapen" thesis is a Sell signal in `spread`
+  mode). Switching source mid-run isn't supported.
+- **`fast_window` / `slow_window`** control trend sensitivity. Tight pairs
+  (e.g. 60 / 240) catch trends early but whipsaw more; wide pairs (e.g.
+  240 / 1440) ride bigger moves but with late entries.
+- **`stop_loss_atr`** anchors at entry so the threshold doesn't drift if
+  volatility changes mid-trade. Tight stops (3–10×ATR) cut losses fast but
+  risk exiting before the trend develops; wider stops (20×ATR+) let trends
+  play out at the cost of larger per-trade risk.
+- **`take_profit_atr = 0`** disables take-profit and lets the position run
+  until the MA crossover reverses. Set >0 to lock in gains on fast trends.
+- **`spread` mode** makes a daily FRED API call per missing benchmark date.
+  The result is cached in-memory for the lifetime of the run.
+
+### Known v1 limitations
+
+- Flat position sizing — every entry uses `max_position_size` of effective
+  capital. No scaling by MA separation or trend strength.
+- Bar/candle resampling is not supported. The strategy runs on raw ticks.
+- No whipsaw neutral-band filter; tight MA pairs generate more false
+  crossovers.
+- Shared `signal_source` decision is per-run; switching requires a new
+  run.

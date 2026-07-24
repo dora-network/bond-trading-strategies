@@ -546,6 +546,7 @@ bond-trading-strategies/
 │   ├── copytrading/         # Copy-trading strategy implementation
 │   ├── http/                # HTTP handler, auth, backtest/run stores
 │   ├── meanreversion/       # Mean-reversion strategy implementation
+│   ├── momentum/            # Momentum / trend-following strategy implementation
 │   ├── types/               # Shared strategy types
 │   └── window/              # Rolling window data structures
 ├── testutils/               # Shared test utilities

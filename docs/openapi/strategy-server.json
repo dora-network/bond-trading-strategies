@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Strategy Service API",
-    "version": "1.8.0",
+    "version": "1.9.0",
     "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`."
   },
   "servers": [
@@ -751,13 +751,14 @@
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading", "breakout"]
+            "enum": ["mean_reversion", "copytrading", "breakout", "momentum"]
           },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
               { "$ref": "#/components/schemas/CopyTradingConfig" },
-              { "$ref": "#/components/schemas/BreakoutConfig" }
+              { "$ref": "#/components/schemas/BreakoutConfig" },
+              { "$ref": "#/components/schemas/MomentumConfig" }
             ]
           },
           "start": { "type": "string", "format": "date-time" },
@@ -770,13 +771,14 @@
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading", "breakout"]
+            "enum": ["mean_reversion", "copytrading", "breakout", "momentum"]
           },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
               { "$ref": "#/components/schemas/CopyTradingConfig" },
-              { "$ref": "#/components/schemas/BreakoutConfig" }
+              { "$ref": "#/components/schemas/BreakoutConfig" },
+              { "$ref": "#/components/schemas/MomentumConfig" }
             ]
           }
         },
@@ -908,6 +910,88 @@
             "exclusiveMinimum": 0,
             "default": 1.0,
             "description": "Starting capital for backtests. Omitted for live runs — obtained from DORA positions."
+          },
+          "leverage": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "Leverage multiplier for live orders."
+          }
+        }
+      },
+      "MomentumConfig": {
+        "type": "object",
+        "description": "Moving-average-crossover trend strategy with configurable signal source (price / ytm / spread) and entry-anchored ATR exits.",
+        "properties": {
+          "signal_source": {
+            "type": "string",
+            "enum": ["price", "ytm", "spread"],
+            "default": "price",
+            "description": "Series the MA crossover runs on. `spread` requires `tenor`."
+          },
+          "fast_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 240,
+            "description": "Fast-MA tick window."
+          },
+          "slow_window": {
+            "type": "integer",
+            "minimum": 3,
+            "default": 1440,
+            "description": "Slow-MA tick window. Must be greater than fast_window."
+          },
+          "atr_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 240,
+            "description": "Mean-absolute-price-diff window for exits."
+          },
+          "stop_loss_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 20.0,
+            "description": "Stop-loss distance in ATR units. 0 disables."
+          },
+          "take_profit_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Take-profit distance in ATR units. 0 disables."
+          },
+          "min_order_size": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Skip opening when the computed quantity is below this. 0 disables."
+          },
+          "max_order_size": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Clamp the order quantity down to this. 0 disables."
+          },
+          "max_position_size": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 1.0,
+            "description": "Maximum fraction of capital allocated per trade."
+          },
+          "order_book_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "DORA order book UUID."
+          },
+          "tenor": {
+            "type": "string",
+            "description": "Benchmark Treasury tenor (e.g. 2Y, 5Y, 10Y). Required when signal_source is spread."
+          },
+          "initial_balance": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1.0,
+            "description": "Starting capital. Omitted for live runs — obtained from DORA positions."
           },
           "leverage": {
             "type": "number",
