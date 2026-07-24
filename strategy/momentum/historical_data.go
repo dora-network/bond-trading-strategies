@@ -203,8 +203,6 @@ func (s *Strategy) cachedBenchmarkYield(ts time.Time) (decimal.Decimal, bool) {
 // mergeBenchmarkObservations merges new FRED observations into the in-memory
 // cache, deduplicating by date and keeping the slice sorted ascending.  This
 // method acquires the write lock.
-//
-//nolint:unused // consumed by the live run loop (Task 6)
 func (s *Strategy) mergeBenchmarkObservations(obs []fred.Observation) {
 	normalised := make([]fred.Observation, 0, len(obs))
 	for _, observation := range obs {
@@ -250,8 +248,6 @@ func (s *Strategy) mergeBenchmarkObservations(obs []fred.Observation) {
 // if historical data is unavailable the method returns an error but
 // the caller may continue with an empty window. Spread mode additionally
 // fetches FRED benchmark yields.
-//
-//nolint:unused // consumed by the live run loop (Task 6)
 func (s *Strategy) prefillWindow(ctx context.Context, assetID string) error {
 	historyStore, err := s.getHistoricalPriceStore(ctx)
 	if err != nil {

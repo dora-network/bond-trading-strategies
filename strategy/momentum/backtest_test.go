@@ -39,7 +39,7 @@ func TestBacktest_OpensAndExits(t *testing.T) {
 	cfg.StopLossATR = decimal.Zero
 	cfg.TakeProfitATR = decimal.Zero
 	cfg.InitialBalance = decimal.MustNew(1000, 0)
-	s := momentum.New(cfg)
+	s := momentum.New(cfg, nil)
 	bt := momentum.NewBacktester(s, nil)
 
 	res, err := bt.Run(context.Background(), uptrendThenReversal())
@@ -55,7 +55,7 @@ func TestBacktest_StopLossExits(t *testing.T) {
 	cfg.StopLossATR = decimal.MustNew(2, 0)
 	cfg.TakeProfitATR = decimal.Zero
 	cfg.InitialBalance = decimal.MustNew(1000, 0)
-	s := momentum.New(cfg)
+	s := momentum.New(cfg, nil)
 	bt := momentum.NewBacktester(s, nil)
 
 	// Up then sharp drop — fastMA still > slowMA, but stop-loss fires on the drop.

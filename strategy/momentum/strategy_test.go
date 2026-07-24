@@ -16,7 +16,7 @@ func newTestStrategy(t *testing.T, source string) *momentum.Strategy {
 	cfg.FastWindow = 3
 	cfg.SlowWindow = 5
 	cfg.ATRWindow = 3
-	return momentum.New(cfg)
+	return momentum.New(cfg, nil)
 }
 
 func ytmP(d float64) decimal.Decimal {
@@ -106,7 +106,7 @@ func TestShouldExit_StopLoss_Long(t *testing.T) {
 	cfg.FastWindow = 2
 	cfg.SlowWindow = 3
 	cfg.StopLossATR = decimal.MustNew(2, 0) // 2 ATR
-	s := momentum.New(cfg)
+	s := momentum.New(cfg, nil)
 	entryPrice := decimal.MustNew(100, 0)
 	entryATR := decimal.MustNew(5, 0) // stop distance = 10
 	// Price 89 (< 100-10=90) -> stop loss.
@@ -120,7 +120,7 @@ func TestShouldExit_TakeProfit_Long(t *testing.T) {
 	cfg := momentum.DefaultConfig()
 	cfg.StopLossATR = decimal.Zero
 	cfg.TakeProfitATR = decimal.MustNew(2, 0)
-	s := momentum.New(cfg)
+	s := momentum.New(cfg, nil)
 	entryPrice := decimal.MustNew(100, 0)
 	entryATR := decimal.MustNew(5, 0) // tp distance = 10
 	d := momentum.NewExitDecision(types.SignalBuy, decimal.MustNew(111, 0))
@@ -133,7 +133,7 @@ func TestShouldExit_Reversal_Long(t *testing.T) {
 	cfg := momentum.DefaultConfig()
 	cfg.StopLossATR = decimal.Zero
 	cfg.TakeProfitATR = decimal.Zero
-	s := momentum.New(cfg)
+	s := momentum.New(cfg, nil)
 	entryPrice := decimal.MustNew(100, 0)
 	entryATR := decimal.MustNew(1, 0)
 	// Opened Buy; decision now Sell -> reversal.
@@ -146,8 +146,27 @@ func TestShouldExit_Reversal_Long(t *testing.T) {
 func TestShouldExit_Hold_NoExit(t *testing.T) {
 	cfg := momentum.DefaultConfig()
 	cfg.StopLossATR = decimal.MustNew(2, 0)
-	s := momentum.New(cfg)
+	s := momentum.New(cfg, nil)
 	d := momentum.NewExitDecision(types.SignalBuy, decimal.MustNew(100, 0))
 	exit, _ := s.ShouldExit(types.SignalBuy, d, decimal.MustNew(100, 0), decimal.MustNew(1, 0))
 	require.False(t, exit)
+}
+
+func TestCappedOrderQuantity_MinSizeSkips_MaxSizeClamps(t *testing.T) {
+	cfg := momentum.DefaultConfig()
+	cfg.InitialBalance = decimal.MustNew(1000, 0)
+	cfg.MinOrderSize = decimal.MustNew(5, 0) // need >= 5 units
+	cfg.MaxOrderSize = decimal.MustNew(3, 0) // but cap at 3
+	s := momentum.New(cfg, nil)
+	// budget/price = 1000/100 = 10 -> clamped to MaxOrderSize 3 (>= MinSize 5? no, 3<5 -> skip)
+	_, ok, err := momentum.CappedOrderQuantity(s, decimal.One, decimal.Zero, decimal.MustNew(100, 0))
+	require.NoError(t, err)
+	require.False(t, ok, "3 < min 5 -> skip")
+
+	cfg.MaxOrderSize = decimal.Zero
+	s = momentum.New(cfg, nil)
+	qty, ok, err := momentum.CappedOrderQuantity(s, decimal.One, decimal.Zero, decimal.MustNew(100, 0))
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, qty.Equal(decimal.MustNew(10, 0)))
 }

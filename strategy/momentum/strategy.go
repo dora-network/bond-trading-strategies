@@ -3,14 +3,20 @@ package momentum
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/fred"
+	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
+	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 )
@@ -54,10 +60,31 @@ type Strategy struct {
 	// backtestWriter receives per-trade rows from the backtester.
 	// nil skips persistence.
 	backtestWriter stats.BacktestTradeWriter
+
+	// Live-run state.
+	log                 *slog.Logger
+	runID               uuid.UUID
+	cancel              context.CancelFunc
+	isRunning           bool
+	paused              bool
+	pricesReqID         uuid.UUID
+	pricesHandler       *prices.Handler
+	balancesInitialized bool
+	bondQty             decimal.Decimal
+	usdBal              decimal.Decimal
+	openSignal          types.Signal
+	entryPrice          decimal.Decimal
+	entryATR            decimal.Decimal
+	decisionStore       strategy.DecisionRecorder
+	decisionSeq         int64
+	errs                []error
 }
 
-// New creates a Strategy with the given Config and optional options.
-func New(cfg Config, opts ...func(*Strategy)) *Strategy {
+// New creates a Strategy with the given Config, prices handler, and
+// optional options. The market API client is initialised from the
+// DORA_API_KEY environment variable by default; callers that need a
+// per-user key should use WithMarketAPIClient.
+func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *Strategy {
 	if cfg.Leverage.IsZero() {
 		cfg.Leverage = decimal.One
 	}
@@ -68,6 +95,9 @@ func New(cfg Config, opts ...func(*Strategy)) *Strategy {
 		atrWin:           window.NewRollingWindow(cfg.ATRWindow),
 		sourceSign:       sourceSign(cfg.SignalSource),
 		collateralWeight: decimal.One,
+		pricesHandler:    pricesHandler,
+		marketAPIClient:  strategy.NewDoraClientWithKey(os.Getenv("DORA_API_KEY")),
+		errs:             make([]error, 0),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -82,11 +112,46 @@ func sourceSign(source string) decimal.Decimal {
 	return decimal.MustNew(-1, 0) // ytm, spread: inverted
 }
 
+// WithLogger sets the logger on a momentum Strategy.
+func WithLogger(log *slog.Logger) func(*Strategy) {
+	return func(s *Strategy) { s.log = log }
+}
+
+// WithMarketAPIClient sets the market API client on a momentum Strategy.
+// Use this to inject a client that authenticates with a specific API
+// key instead of the default client that reads DORA_API_KEY.
+func WithMarketAPIClient(c strategy.MarketAPIClient) func(*Strategy) {
+	return func(s *Strategy) { s.marketAPIClient = c }
+}
+
+// WithDecisionStore sets the recorder invoked after every successful
+// CreateMarketOrder in the live run loop.
+func WithDecisionStore(store strategy.DecisionRecorder) func(*Strategy) {
+	return func(s *Strategy) { s.decisionStore = store }
+}
+
 // WithBacktestWriter sets the destination for per-trade rows the
 // backtester emits during a backtest. If unset, trade rows are not
 // persisted and the /trades endpoints return empty.
 func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
 	return func(s *Strategy) { s.backtestWriter = w }
+}
+
+// SetDecisionSeq seeds the in-memory decision counter. Called once at
+// strategy start (after a server restart, after a resumed run) so the
+// counter resumes past the DB frontier.
+func (s *Strategy) SetDecisionSeq(seq int64) {
+	s.mu.Lock()
+	s.decisionSeq = seq
+	s.mu.Unlock()
+}
+
+// logger returns a non-nil logger.
+func (s *Strategy) logger() *slog.Logger {
+	if s.log != nil {
+		return s.log
+	}
+	return slog.Default()
 }
 
 // cappedOrderQuantity computes the order quantity for a given position
@@ -332,4 +397,522 @@ func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
 		d.reason = DecisionReasonMACrossoverDown
 	}
 	return d, nil
+}
+
+// Run is the strategy.Strategy entry point for a live run. It
+// subscribes to prices, runs the per-tick loop, and respects Pause /
+// Resume / Stop control messages.
+func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
+	s.mu.Lock()
+	s.runID = runID
+	if s.isRunning {
+		s.mu.Unlock()
+		return fmt.Errorf("strategy is already running")
+	}
+	var runCtx context.Context
+	runCtx, s.cancel = context.WithCancel(ctx)
+
+	pricesCh, err := s.subscribePrices()
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to subscribe to prices: %w", err)
+	}
+	s.isRunning = true
+	s.mu.Unlock()
+
+	return s.run(runCtx, msgCh, pricesCh)
+}
+
+func (s *Strategy) subscribePrices() (<-chan map[uuid.UUID]prices.AssetPrice, error) {
+	s.pricesReqID = uuid.Must(uuid.NewV7())
+	pricesCh, err := s.pricesHandler.Subscribe(s.pricesReqID)
+	if err != nil {
+		s.pricesReqID = uuid.Nil
+		return nil, err
+	}
+	return pricesCh, nil
+}
+
+func (s *Strategy) unsubscribePrices() {
+	if s.pricesHandler == nil || s.pricesReqID == uuid.Nil {
+		return
+	}
+	if err := s.pricesHandler.Unsubscribe(s.pricesReqID); err != nil {
+		s.logger().Error("failed to unsubscribe from prices", "error", err)
+	}
+}
+
+func (s *Strategy) currentPosition(ctx context.Context, assetID string) (decimal.Decimal, error) {
+	if s.marketAPIClient == nil {
+		return decimal.Zero, errors.New("DORA order book lookup client is not configured")
+	}
+	if strings.TrimSpace(assetID) == "" {
+		return decimal.Zero, errors.New("asset ID is required")
+	}
+	long, short, err := s.marketAPIClient.AssetPosition(ctx, assetID)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	if long.IsZero() && short.IsZero() {
+		return decimal.Zero, nil
+	}
+	if short.IsZero() {
+		return long, nil
+	}
+	return short.Neg(), nil
+}
+
+func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
+	quoteAssetID, err := s.marketAPIClient.QuoteAssetID(ctx, s.cfg.OrderBookID.String())
+	if err != nil {
+		s.recordErr(fmt.Errorf("initialise balances: get quote asset: %w", err))
+		return
+	}
+
+	portfolio, err := s.marketAPIClient.GetPortfolioV2(ctx)
+	if err == nil && portfolio != nil {
+		initializeBalancesFromPortfolio(s, portfolio, baseAssetID, quoteAssetID, false, s.logger())
+		s.mu.Lock()
+		s.balancesInitialized = true
+		s.mu.Unlock()
+		return
+	}
+	if err != nil {
+		s.logger().Warn("initialise balances: v2 portfolio unavailable, falling back to legacy path", "err", err)
+	}
+
+	bondAvailable, bondBorrowed, err := s.marketAPIClient.AssetPosition(ctx, baseAssetID)
+	if err != nil {
+		s.recordErr(fmt.Errorf("initialise balances: get bond position: %w", err))
+	} else {
+		s.mu.Lock()
+		if !bondBorrowed.IsZero() {
+			s.bondQty = bondBorrowed.Neg()
+		} else {
+			s.bondQty = bondAvailable
+		}
+		s.mu.Unlock()
+	}
+
+	usdAvailable, _, err := s.marketAPIClient.AssetPosition(ctx, quoteAssetID)
+	if err != nil {
+		s.recordErr(fmt.Errorf("initialise balances: get USD balance: %w", err))
+	} else {
+		s.mu.Lock()
+		s.usdBal = usdAvailable
+		if !usdAvailable.IsZero() {
+			s.cfg.InitialBalance = usdAvailable
+		}
+		s.mu.Unlock()
+	}
+
+	s.mu.Lock()
+	s.balancesInitialized = true
+	switch {
+	case s.bondQty.IsPos():
+		s.openSignal = types.SignalBuy
+	case s.bondQty.IsNeg():
+		s.openSignal = types.SignalSell
+	default:
+		s.openSignal = types.SignalHold
+	}
+	s.mu.Unlock()
+}
+
+func (s *Strategy) recordErr(err error) {
+	s.mu.Lock()
+	s.errs = append(s.errs, err)
+	s.mu.Unlock()
+	s.logger().Error("strategy error", "err", err)
+}
+
+func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
+	s.mu.RLock()
+	qty := s.bondQty
+	useTracked := s.balancesInitialized
+	s.mu.RUnlock()
+
+	if !useTracked {
+		var err error
+		qty, err = s.currentPosition(ctx, assetID)
+		if err != nil {
+			return err
+		}
+	}
+
+	if qty.IsZero() {
+		s.mu.Lock()
+		if useTracked {
+			s.bondQty = decimal.Zero
+		}
+		s.openSignal = types.SignalHold
+		s.entryPrice = decimal.Zero
+		s.entryATR = decimal.Zero
+		s.mu.Unlock()
+		return nil
+	}
+
+	side := doraclient.SIDE_SELL
+	closeQty := qty
+	if qty.IsNeg() {
+		side = doraclient.SIDE_BUY
+		closeQty = qty.Neg()
+	}
+
+	inverseLeverage, err := decimal.One.Quo(s.cfg.Leverage)
+	if err != nil {
+		inverseLeverage = decimal.One
+	}
+
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
+	if _, err := s.marketAPIClient.CreateMarketOrder(
+		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, false, clientOrderID,
+	); err != nil {
+		if liveQty, liveErr := s.currentPosition(ctx, assetID); liveErr == nil && liveQty.IsZero() {
+			s.logger().Info("close order failed but live position is already 0, self-healing", "runID", s.runID)
+			s.mu.Lock()
+			if useTracked {
+				s.bondQty = decimal.Zero
+			}
+			s.openSignal = types.SignalHold
+			s.entryPrice = decimal.Zero
+			s.entryATR = decimal.Zero
+			s.mu.Unlock()
+			return nil
+		}
+		return err
+	}
+
+	closeSignal := types.SignalSell
+	if side == doraclient.SIDE_BUY {
+		closeSignal = types.SignalBuy
+	}
+	s.mu.RLock()
+	closePrice := s.lastPrice
+	s.mu.RUnlock()
+	s.recordDecision(ctx, strategy.Decision{
+		OrderBookID:        s.cfg.OrderBookID,
+		Asset:              mustParseUUID(assetID),
+		Side:               string(side),
+		Signal:             closeSignal.String(),
+		Quantity:           closeQty,
+		Price:              closePrice,
+		Leverage:           s.cfg.Leverage,
+		InverseLeverage:    inverseLeverage,
+		FromGlobalPosition: false,
+		Kind:               strategy.DecisionKindClose,
+		Reason:             "trend_exit",
+		ReasonDetail:       "close: trend reversal or stop/take hit",
+		ClientOrderID:      clientOrderID,
+	})
+
+	s.mu.Lock()
+	if useTracked {
+		s.bondQty = decimal.Zero
+	}
+	s.openSignal = types.SignalHold
+	s.entryPrice = decimal.Zero
+	s.entryATR = decimal.Zero
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Strategy) executeDecision(ctx context.Context, decision Decision, assetID string) (bool, error) {
+	if decision.Signal() != types.SignalBuy && decision.Signal() != types.SignalSell {
+		return false, nil
+	}
+
+	s.mu.RLock()
+	position := s.bondQty
+	useTracked := s.balancesInitialized
+	s.mu.RUnlock()
+
+	if !useTracked {
+		var err error
+		position, err = s.currentPosition(ctx, assetID)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	price := decision.Price()
+	if price.IsZero() {
+		return false, errors.New("cannot execute decision: price is zero")
+	}
+	quantity, ok, err := s.cappedOrderQuantity(decision.PositionSize(), position, price)
+	if err != nil {
+		return false, err
+	}
+	if !ok || quantity.IsZero() {
+		return false, nil
+	}
+	side := doraclient.SIDE_BUY
+	if decision.Signal() == types.SignalSell {
+		side = doraclient.SIDE_SELL
+	}
+
+	inverseLeverage, err := decimal.One.Quo(s.cfg.Leverage)
+	if err != nil {
+		return false, fmt.Errorf("compute inverse leverage: %w", err)
+	}
+
+	fromGlobalPosition := false
+	s.logger().Info("opening position",
+		"runID", s.runID, "assetID", assetID, "signal", decision.Signal(),
+		"side", side, "quantity", quantity, "price", price)
+	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
+	if _, err := s.marketAPIClient.CreateMarketOrder(
+		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition, clientOrderID,
+	); err != nil {
+		return false, err
+	}
+
+	s.recordDecision(ctx, strategy.Decision{
+		OrderBookID:        s.cfg.OrderBookID,
+		Asset:              mustParseUUID(assetID),
+		Side:               string(side),
+		Signal:             decision.Signal().String(),
+		Quantity:           quantity,
+		Price:              price,
+		Leverage:           s.cfg.Leverage,
+		InverseLeverage:    inverseLeverage,
+		FromGlobalPosition: fromGlobalPosition,
+		Kind:               strategy.DecisionKindOpen,
+		Reason:             "ma_crossover_entry",
+		ReasonDetail: fmt.Sprintf("ma crossover entry: fastMA=%s slowMA=%s signal=%s",
+			decision.FastMA.String(), decision.SlowMA.String(), decision.Signal()),
+		ClientOrderID: clientOrderID,
+	})
+
+	s.mu.Lock()
+	if useTracked {
+		if side == doraclient.SIDE_BUY {
+			s.bondQty, _ = s.bondQty.Add(quantity)
+			cost, _ := quantity.Mul(price)
+			s.usdBal, _ = s.usdBal.Sub(cost)
+		} else {
+			s.bondQty, _ = s.bondQty.Sub(quantity)
+			proceeds, _ := quantity.Mul(price)
+			s.usdBal, _ = s.usdBal.Add(proceeds)
+		}
+		switch {
+		case s.bondQty.IsPos():
+			s.openSignal = types.SignalBuy
+		case s.bondQty.IsNeg():
+			s.openSignal = types.SignalSell
+		default:
+			s.openSignal = types.SignalHold
+		}
+	} else {
+		s.openSignal = decision.Signal()
+	}
+	// Anchor entry state for ShouldExit.
+	s.entryPrice = price
+	s.entryATR = decision.ATR
+	s.mu.Unlock()
+	return true, nil
+}
+
+// run is the per-tick loop. Mirrors meanreversion/breakout but builds
+// the observation source-aware (spread mode fetches FRED, ytm/spread
+// skip ticks with nil YTM).
+//
+//nolint:funlen // main run loop with setup and teardown
+func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, pricesCh <-chan map[uuid.UUID]prices.AssetPrice) error {
+	defer func() {
+		s.mu.Lock()
+		s.isRunning = false
+		s.mu.Unlock()
+	}()
+	defer s.unsubscribePrices()
+
+	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	if err != nil {
+		return fmt.Errorf("error looking up asset ID: %w", err)
+	}
+
+	collateralWeight, err := s.marketAPIClient.AssetCollateralWeight(ctx, assetID)
+	if err != nil {
+		s.logger().Warn("collateral weight lookup failed, defaulting to 1.0", "assetID", assetID, "err", err)
+	} else {
+		s.mu.Lock()
+		s.collateralWeight = collateralWeight
+		s.mu.Unlock()
+	}
+
+	s.logger().Info("prefilling window with historical data", "runID", s.runID)
+	if err := s.prefillWindow(ctx, assetID); err != nil {
+		s.recordErr(fmt.Errorf("prefill window (non-fatal): %w", err))
+	}
+
+	s.logger().Info("initialising balances", "runID", s.runID, "assetID", assetID)
+	s.initializeBalances(ctx, assetID)
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case msg := <-msgs:
+			s.mu.Lock()
+			switch msg {
+			case strategy.Pause:
+				s.paused = true
+			case strategy.Resume:
+				s.paused = false
+			case strategy.Stop:
+				s.cancel()
+			}
+			s.mu.Unlock()
+		case pxs := <-pricesCh:
+			for _, px := range pxs {
+				if px.AssetID != assetID {
+					continue
+				}
+				// ytm/spread modes require YTM; price mode doesn't.
+				if s.cfg.SignalSource != SignalSourcePrice && px.YTM == nil {
+					continue
+				}
+
+				var benchmarkYield decimal.Decimal
+				if s.cfg.SignalSource == SignalSourceSpread {
+					benchmarkYield = s.getBenchmarkYield(ctx, px.Time)
+				}
+
+				s.mu.Lock()
+				obs := types.YieldObservation{
+					Time:   px.Time,
+					BondID: px.AssetID,
+					Price:  px.Price,
+				}
+				if px.YTM != nil {
+					obs.YTM = *px.YTM
+				}
+				if s.cfg.SignalSource == SignalSourceSpread {
+					obs.BenchmarkYield = benchmarkYield
+				}
+				// On the tick that makes a window full, the MAs are
+				// still based on incomplete data. Skip exit evaluation
+				// on that tick to avoid acting on a stale signal.
+				windowReadyBeforeUpdate := s.fastWin.Ready() && s.slowWin.Ready()
+				decision, err := s.Update(obs)
+				if err != nil {
+					s.mu.Unlock()
+					s.logger().Error("failed to update strategy", "runID", s.runID, "err", err)
+					continue
+				}
+				if s.paused {
+					s.mu.Unlock()
+					continue
+				}
+				currentOpenSignal := s.openSignal
+				entryPrice := s.entryPrice
+				entryATR := s.entryATR
+				s.mu.Unlock()
+
+				if currentOpenSignal != types.SignalHold {
+					if windowReadyBeforeUpdate {
+						if shouldExit, reason := s.ShouldExit(currentOpenSignal, decision, entryPrice, entryATR); shouldExit {
+							s.logger().Info("exiting position", "reason", reason, "runID", s.runID)
+							if err := s.closePosition(ctx, px.AssetID); err != nil {
+								s.logger().Error("failed to close position", "runID", s.runID, "err", err)
+								s.recordErr(err)
+							}
+						}
+					}
+					continue
+				}
+
+				if decision.Signal() == types.SignalHold {
+					continue
+				}
+
+				if _, err := s.executeDecision(ctx, decision, px.AssetID); err != nil {
+					s.logger().Error("failed to execute decision", "runID", s.runID, "err", err)
+					s.recordErr(err)
+				}
+			}
+		case <-ticker.C:
+			s.mu.RLock()
+			paused := s.paused
+			s.mu.RUnlock()
+			_ = paused // ticker is just to keep select responsive when no ticks arrive
+		}
+	}
+}
+
+// getBenchmarkYield returns the FRED benchmark yield for the configured
+// tenor, fetching on cache miss. Spread mode only.
+func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.Decimal {
+	yield, ok := s.cachedBenchmarkYield(ts)
+	if ok {
+		return yield
+	}
+
+	tenor, err := parseBenchmarkTenor(s.cfg.Tenor)
+	if err != nil {
+		s.recordErr(fmt.Errorf("get benchmark yield: parse tenor: %w", err))
+		return decimal.Zero
+	}
+
+	client, err := s.getBenchmarkYieldClient()
+	if err != nil {
+		s.recordErr(fmt.Errorf("get benchmark yield: get client: %w", err))
+		return decimal.Zero
+	}
+
+	normedTS := normalizeDate(ts)
+	start := normedTS.AddDate(0, 0, -10)
+	obs, err := client.FetchHistoricalYields(ctx, tenor, start, normedTS)
+	if err != nil {
+		s.recordErr(fmt.Errorf("get benchmark yield: fred fetch: %w", err))
+		return decimal.Zero
+	}
+	if len(obs) == 0 {
+		return decimal.Zero
+	}
+	s.mergeBenchmarkObservations(obs)
+	yield, _ = s.cachedBenchmarkYield(ts)
+	return yield
+}
+
+// recordDecision forwards a strategy.Decision row to the configured
+// DecisionRecorder, assigning per-run seq. Never returns an error:
+// failed persistence is logged and the run continues.
+func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
+	if s.decisionStore == nil {
+		return
+	}
+	s.mu.Lock()
+	s.decisionSeq++
+	seq := s.decisionSeq
+	runID := s.runID
+	s.mu.Unlock()
+
+	d.RunID = runID
+	d.Seq = seq
+	d.StrategyType = StrategyType
+	if d.CreatedAt.IsZero() {
+		d.CreatedAt = time.Now().UTC()
+	}
+	if err := s.decisionStore.SaveDecision(ctx, d); err != nil {
+		s.logger().Error("save strategy decision",
+			"err", err, "run_id", d.RunID, "seq", d.Seq,
+			"side", d.Side, "signal", d.Signal, "quantity", d.Quantity)
+	}
+}
+
+// mustParseUUID converts a non-empty DORA asset/order-book ID string
+// into a uuid.UUID. Empty input → uuid.Nil so the live-run path can
+// still record a decision row even if the asset ID lookup failed.
+func mustParseUUID(id string) uuid.UUID {
+	if id == "" {
+		return uuid.Nil
+	}
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return uuid.Nil
+	}
+	return parsed
 }
