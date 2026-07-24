@@ -29,30 +29,12 @@ type benchmarkYieldClient interface {
 	FetchHistoricalYields(ctx context.Context, tenor fred.Tenor, start, end time.Time) ([]fred.Observation, error)
 }
 
-type BenchmarkTenor struct {
-	Code        string
-	Description string
-	Value       fred.Tenor
-	Aliases     []string
-}
+// BenchmarkTenor is re-exported from fred.
+type BenchmarkTenor = fred.BenchmarkTenor
 
-//nolint:gochecknoglobals // Package-level constant list of known benchmark tenors
-var benchmarkTenors = []BenchmarkTenor{
-	{Code: "1M", Description: "1 Month Treasury", Value: fred.Tenor1Month, Aliases: []string{"1MO", "1MON", "1MONTH"}},
-	{Code: "3M", Description: "3 Month Treasury", Value: fred.Tenor3Month, Aliases: []string{"3MO", "3MON", "3MONTH"}},
-	{Code: "6M", Description: "6 Month Treasury", Value: fred.Tenor6Month, Aliases: []string{"6MO", "6MON", "6MONTH"}},
-	{Code: "1Y", Description: "1 Year Treasury", Value: fred.Tenor1Year, Aliases: []string{"1YR", "1YEAR"}},
-	{Code: "2Y", Description: "2 Year Treasury", Value: fred.Tenor2Year, Aliases: []string{"2YR", "2YEAR"}},
-	{Code: "3Y", Description: "3 Year Treasury", Value: fred.Tenor3Year, Aliases: []string{"3YR", "3YEAR"}},
-	{Code: "5Y", Description: "5 Year Treasury", Value: fred.Tenor5Year, Aliases: []string{"5YR", "5YEAR"}},
-	{Code: "7Y", Description: "7 Year Treasury", Value: fred.Tenor7Year, Aliases: []string{"7YR", "7YEAR"}},
-	{Code: "10Y", Description: "10 Year Treasury", Value: fred.Tenor10Year, Aliases: []string{"10YR", "10YEAR"}},
-	{Code: "20Y", Description: "20 Year Treasury", Value: fred.Tenor20Year, Aliases: []string{"20YR", "20YEAR"}},
-	{Code: "30Y", Description: "30 Year Treasury", Value: fred.Tenor30Year, Aliases: []string{"30YR", "30YEAR"}},
-}
-
-func SupportedBenchmarkTenors() []BenchmarkTenor {
-	return append([]BenchmarkTenor(nil), benchmarkTenors...)
+// SupportedBenchmarkTenors is re-exported from fred.
+func SupportedBenchmarkTenors() []fred.BenchmarkTenor {
+	return fred.SupportedBenchmarkTenors()
 }
 
 func (s *Strategy) getObservations(ctx context.Context, start, end time.Time) ([]types.YieldObservation, error) {
@@ -73,7 +55,7 @@ func (s *Strategy) getObservations(ctx context.Context, start, end time.Time) ([
 
 	// Only spread mode needs the FRED benchmark; price/ytm do not.
 	if s.cfg.SignalSource == SignalSourceSpread {
-		tenor, err := parseBenchmarkTenor(s.cfg.Tenor)
+		tenor, err := fred.ParseBenchmarkTenor(s.cfg.Tenor)
 		if err != nil {
 			return nil, fmt.Errorf("parse tenor: %w", err)
 		}
@@ -170,7 +152,7 @@ func (s *Strategy) setBenchmarkObservations(obs []fred.Observation) {
 	for _, observation := range obs {
 		yieldPct, _ := observation.Yield.Mul(decimal.MustNew(100, 0)) //nolint:mnd
 		normalised = append(normalised, fred.Observation{
-			Date:  normalizeDate(observation.Date),
+			Date:  fred.NormalizeDate(observation.Date),
 			Yield: yieldPct,
 		})
 	}
@@ -181,7 +163,7 @@ func (s *Strategy) setBenchmarkObservations(obs []fred.Observation) {
 }
 
 func (s *Strategy) cachedBenchmarkYield(ts time.Time) (decimal.Decimal, bool) {
-	target := normalizeDate(ts)
+	target := fred.NormalizeDate(ts)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -208,7 +190,7 @@ func (s *Strategy) mergeBenchmarkObservations(obs []fred.Observation) {
 	for _, observation := range obs {
 		yieldPct, _ := observation.Yield.Mul(decimal.MustNew(100, 0)) //nolint:mnd
 		normalised = append(normalised, fred.Observation{
-			Date:  normalizeDate(observation.Date),
+			Date:  fred.NormalizeDate(observation.Date),
 			Yield: yieldPct,
 		})
 	}
@@ -261,7 +243,7 @@ func (s *Strategy) prefillWindow(ctx context.Context, assetID string) error {
 	}
 
 	if s.cfg.SignalSource == SignalSourceSpread && len(history) > 0 {
-		tenor, err := parseBenchmarkTenor(s.cfg.Tenor)
+		tenor, err := fred.ParseBenchmarkTenor(s.cfg.Tenor)
 		if err != nil {
 			return fmt.Errorf("parse tenor: %w", err)
 		}
@@ -302,31 +284,14 @@ func (s *Strategy) prefillWindow(ctx context.Context, assetID string) error {
 	return nil
 }
 
-func parseBenchmarkTenor(value string) (fred.Tenor, error) {
-	normalised := normalizeTenor(value)
-	for _, tenor := range benchmarkTenors {
-		if normalised == tenor.Code {
-			return tenor.Value, nil
-		}
-		for _, alias := range tenor.Aliases {
-			if normalised == alias {
-				return tenor.Value, nil
-			}
-		}
+// latestCachedBenchmarkDate returns the date of the most recent
+// benchmark observation in the cache, or ok=false when empty. Used by
+// getBenchmarkYield to decide whether to refetch from FRED.
+func (s *Strategy) latestCachedBenchmarkDate() (time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.benchmarkObservations) == 0 {
+		return time.Time{}, false
 	}
-	return 0, fmt.Errorf("unsupported tenor %q", value)
-}
-
-func normalizeTenor(value string) string {
-	normalised := strings.ToUpper(strings.TrimSpace(value))
-	normalised = strings.ReplaceAll(normalised, "-", "")
-	normalised = strings.ReplaceAll(normalised, "_", "")
-	normalised = strings.ReplaceAll(normalised, " ", "")
-	normalised = strings.TrimSuffix(normalised, "S")
-	return normalised
-}
-
-func normalizeDate(ts time.Time) time.Time {
-	year, month, day := ts.UTC().Date()
-	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	return s.benchmarkObservations[len(s.benchmarkObservations)-1].Date, true
 }

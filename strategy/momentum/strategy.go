@@ -592,7 +592,7 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 	s.mu.RUnlock()
 	s.recordDecision(ctx, strategy.Decision{
 		OrderBookID:        s.cfg.OrderBookID,
-		Asset:              mustParseUUID(assetID),
+		Asset:              strategy.MustParseUUID(assetID),
 		Side:               string(side),
 		Signal:             closeSignal.String(),
 		Quantity:           closeQty,
@@ -669,7 +669,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision Decision, asset
 
 	s.recordDecision(ctx, strategy.Decision{
 		OrderBookID:        s.cfg.OrderBookID,
-		Asset:              mustParseUUID(assetID),
+		Asset:              strategy.MustParseUUID(assetID),
 		Side:               string(side),
 		Signal:             decision.Signal().String(),
 		Quantity:           quantity,
@@ -843,14 +843,20 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 }
 
 // getBenchmarkYield returns the FRED benchmark yield for the configured
-// tenor, fetching on cache miss. Spread mode only.
+// tenor. Returns the cached yield if the cache has data for today
+// (UTC), otherwise fetches a fresh window from FRED and merges it in.
+// Spread mode only.
 func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.Decimal {
+	normedTS := fred.NormalizeDate(ts)
+
 	yield, ok := s.cachedBenchmarkYield(ts)
 	if ok {
-		return yield
+		if latestDate, has := s.latestCachedBenchmarkDate(); has && !latestDate.Before(normedTS) {
+			return yield
+		}
 	}
 
-	tenor, err := parseBenchmarkTenor(s.cfg.Tenor)
+	tenor, err := fred.ParseBenchmarkTenor(s.cfg.Tenor)
 	if err != nil {
 		s.recordErr(fmt.Errorf("get benchmark yield: parse tenor: %w", err))
 		return decimal.Zero
@@ -862,7 +868,6 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 		return decimal.Zero
 	}
 
-	normedTS := normalizeDate(ts)
 	start := normedTS.AddDate(0, 0, -10)
 	obs, err := client.FetchHistoricalYields(ctx, tenor, start, normedTS)
 	if err != nil {
@@ -901,18 +906,4 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 			"err", err, "run_id", d.RunID, "seq", d.Seq,
 			"side", d.Side, "signal", d.Signal, "quantity", d.Quantity)
 	}
-}
-
-// mustParseUUID converts a non-empty DORA asset/order-book ID string
-// into a uuid.UUID. Empty input → uuid.Nil so the live-run path can
-// still record a decision row even if the asset ID lookup failed.
-func mustParseUUID(id string) uuid.UUID {
-	if id == "" {
-		return uuid.Nil
-	}
-	parsed, err := uuid.Parse(id)
-	if err != nil {
-		return uuid.Nil
-	}
-	return parsed
 }

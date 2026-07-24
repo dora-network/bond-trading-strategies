@@ -1538,6 +1538,7 @@ git commit -m "feat(http): wire momentum strategy definition and config decoder"
 
 ---
 
+
 ## Task 8: Fakes + final verification
 
 - [ ] **Step 1: Generate counterfeiter fakes**
@@ -1587,3 +1588,27 @@ Plan complete and saved to `docs/superpowers/plans/2026-07-24-momentum-trend.md`
 2. **Inline Execution** — I execute tasks in this session with checkpoints for review.
 
 Which approach?
+## Task 9: Extract shared helpers (follow-up)
+
+> **Why this is a task:** momentum was built by copying `strategy/meanreversion/historical_data.go` and `balances.go` wholesale. The pure helpers were duplicated verbatim instead of being broken out. The spec §13 deferred shared extraction "until a 4th strategy repeats the lazy-init pattern" — that deferral is wrong; the helpers below are clearly shareable between two strategies and the duplication is a maintenance hazard.
+
+**Files to touch:**
+- `strategy/fred/tenor.go` — add `BenchmarkTenor`, `benchmarkTenors`, `SupportedBenchmarkTenors()`, `parseBenchmarkTenor`, `normalizeTenor` (currently unexported in meanreversion).
+- `strategy/fred/normalize_date.go` (or fold into `tenor.go`) — add `NormalizeDate`.
+- `strategy/uuid/uuid.go` (new) — `MustParseUUID`.
+- `strategy/portfolio/portfolio.go` (new) — `FindAccountAndBalance`, `FindBalancesInAccounts`, `InitializeBalancesFromPortfolio` (generic over the strategy type, takes a small interface for what the function mutates: `usdBal`, `bondQty`, `cfg.InitialBalance`, `openSignal`, `logger`, `errs`).
+- `strategy/meanreversion/historical_data.go` — delete local copies, import from fred.
+- `strategy/meanreversion/balances.go` — delete local copies, import from portfolio.
+- `strategy/meanreversion/strategy.go` — delete `mustParseUUID`, import from uuid.
+- `strategy/momentum/historical_data.go` — delete local copies, import from fred.
+- `strategy/momentum/balances.go` — delete local copies, import from portfolio.
+- `strategy/momentum/strategy.go` — delete `mustParseUUID`, import from uuid.
+
+**Verification:**
+- `go test -race ./strategy/...` (both packages + meanreversion's existing tests must remain green)
+- `golangci-lint run ./...`
+- `pre-commit run`
+
+**Skipped (deliberate):** strategy-specific methods (`getObservations`, `prefillWindow`, `getBenchmarkYield`, `cachedBenchmarkYield`, `mergeBenchmarkObservations`, `cappedOrderQuantity`, `executeDecision`, `closePosition`, `run`) stay per-package because they touch strategy-specific state. The "lazy-init store pattern" extraction is still deferred per spec §13.
+
+---
