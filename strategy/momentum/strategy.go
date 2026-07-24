@@ -1,10 +1,15 @@
 package momentum
 
 import (
+	"context"
 	"sync"
+	"time"
 
+	"github.com/dora-network/bond-trading-strategies/fred"
+	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
+	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 )
 
@@ -24,6 +29,20 @@ type Strategy struct {
 	// sourceSign applies the bond-specific direction mapping: +1 for
 	// price, -1 for ytm/spread (yield up = price down).
 	sourceSign decimal.Decimal
+
+	// marketAPIClient is used by lookupAssetID to resolve an order
+	// book's asset ID. Lazily set by the live run loop; nil for
+	// backtests and signal-only callers.
+	marketAPIClient strategy.MarketAPIClient
+
+	// historyStore / benchmarkClient are the historical data surfaces
+	// used by getObservations / prefillWindow (spread mode only for
+	// the FRED client). Defined in historical_data.go.
+	historyStore    historicalPriceStore
+	benchmarkClient benchmarkYieldClient
+
+	// benchmarkObservations caches FRED yields for spread mode.
+	benchmarkObservations []fred.Observation
 }
 
 // New creates a Strategy with the given Config and optional options.
@@ -49,6 +68,25 @@ func sourceSign(source string) decimal.Decimal {
 		return decimal.One
 	}
 	return decimal.MustNew(-1, 0) // ytm, spread: inverted
+}
+
+// lookupAssetID resolves an order-book UUID to its underlying asset ID.
+func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
+	return strategy.LookupAssetID(context.Background(), s.marketAPIClient, orderBookID)
+}
+
+// Backtest is the strategy.Strategy entry point for a backtest run.
+// It loads the requested observation window and forwards to the
+// backtester. Full implementation lands in Task 5; this stub calls
+// getObservations so the historical-data methods are exercised by
+// the test/lint suite.
+func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
+	obs, err := s.getObservations(ctx, start, end)
+	if err != nil {
+		return nil, err
+	}
+	_ = obs // replaced with NewBacktester(...).Run(...) in Task 5
+	return BacktestResult{}, nil
 }
 
 // NewExitDecision builds a Decision carrying only the fields ShouldExit
