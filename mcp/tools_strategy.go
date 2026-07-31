@@ -170,7 +170,7 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 
 	s.AddTool(
 		mcp.NewTool("strategy_copy_traders_list",
-			mcp.WithDescription("List available copy traders. Placeholder that filters DORA users whose names start with TRADER_ or MM_ until DORA exposes a dedicated endpoint."), //nolint:lll
+			mcp.WithDescription("List copy traders available to be followed by a copy-trading run."),
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			result, err := client.listCopyTraders(ctx)
