@@ -71,60 +71,81 @@ func TestLiveDORAClientGetUserIDIgnoresUnknownUserFields(t *testing.T) {
 func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
 	t.Parallel()
 
-	fullPageIDs := func(prefix string) []string {
-		ids := make([]string, 0, int(copyTraderPageSize))
+	fullPageTraders := func(prefix string) []doraclient.CopyTrader {
+		traders := make([]doraclient.CopyTrader, 0, int(copyTraderPageSize))
 		for i := range int(copyTraderPageSize) {
-			ids = append(ids, fmt.Sprintf("019c0000-0000-7000-8000-%s%010d", prefix, i))
+			traders = append(traders, doraclient.CopyTrader{
+				UserId:   fmt.Sprintf("019c0000-0000-7000-8000-%s%010d", prefix, i),
+				UserName: fmt.Sprintf("%s_trader_%010d", prefix, i),
+			})
 		}
-		return ids
+		return traders
+	}
+
+	wantTraders := func(prefix string) []CopyTrader {
+		ids := fullPageTraders(prefix)
+		out := make([]CopyTrader, 0, len(ids))
+		for _, t := range ids {
+			out = append(out, CopyTrader{UserID: t.UserId, UserName: t.UserName})
+		}
+		return out
 	}
 
 	cases := []struct {
 		name      string
-		pages     [][]string
-		wantIDs   []string
+		pages     [][]doraclient.CopyTrader
+		want      []CopyTrader
 		wantCalls int
 		wantPages []int
 	}{
 		{
 			name: "happy path paginated",
-			pages: [][]string{
-				fullPageIDs("a"),
-				fullPageIDs("b")[:50],
+			pages: [][]doraclient.CopyTrader{
+				fullPageTraders("a"),
+				fullPageTraders("b")[:50],
 			},
-			wantIDs:   append(fullPageIDs("a"), fullPageIDs("b")[:50]...),
+			want:      append(wantTraders("a"), wantTraders("b")[:50]...),
 			wantCalls: 2,
 			wantPages: []int{1, 2},
 		},
 		{
 			name:      "empty first page terminates",
-			pages:     [][]string{nil},
-			wantIDs:   nil,
+			pages:     [][]doraclient.CopyTrader{nil},
+			want:      nil,
 			wantCalls: 1,
 			wantPages: []int{1},
 		},
 		{
-			name:      "short first page terminates",
-			pages:     [][]string{{"019c0000-0000-7000-8000-000000000001", "019c0000-0000-7000-8000-000000000002"}},
-			wantIDs:   []string{"019c0000-0000-7000-8000-000000000001", "019c0000-0000-7000-8000-000000000002"},
+			name: "short first page terminates",
+			pages: [][]doraclient.CopyTrader{{
+				{UserId: "019c0000-0000-7000-8000-000000000001", UserName: "alice"},
+				{UserId: "019c0000-0000-7000-8000-000000000002", UserName: "bob"},
+			}},
+			want: []CopyTrader{
+				{UserID: "019c0000-0000-7000-8000-000000000001", UserName: "alice"},
+				{UserID: "019c0000-0000-7000-8000-000000000002", UserName: "bob"},
+			},
 			wantCalls: 1,
 			wantPages: []int{1},
 		},
 		{
 			name:      "5xx propagated",
-			pages:     [][]string{{}}, // unused; handler returns 500 immediately
-			wantIDs:   nil,
+			pages:     [][]doraclient.CopyTrader{{}}, // unused; handler returns 500 immediately
+			want:      nil,
 			wantCalls: 1,
 			wantPages: []int{1},
 		},
 		{
 			name: "full pages then a short page terminates",
-			pages: [][]string{
-				fullPageIDs("c"),
-				fullPageIDs("d"),
-				{"019c0000-0000-7000-8000-000000000099"},
+			pages: [][]doraclient.CopyTrader{
+				fullPageTraders("c"),
+				fullPageTraders("d"),
+				{{UserId: "019c0000-0000-7000-8000-000000000099", UserName: "solo"}},
 			},
-			wantIDs:   append(append(fullPageIDs("c"), fullPageIDs("d")...), "019c0000-0000-7000-8000-000000000099"),
+			want: append(append(
+				wantTraders("c"),
+				wantTraders("d")...,
+			), CopyTrader{UserID: "019c0000-0000-7000-8000-000000000099", UserName: "solo"}),
 			wantCalls: 3,
 			wantPages: []int{1, 2, 3},
 		},
@@ -195,7 +216,7 @@ func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantIDs, got)
+			assert.Equal(t, tc.want, got)
 
 			mu.Lock()
 			gotCalls := calls

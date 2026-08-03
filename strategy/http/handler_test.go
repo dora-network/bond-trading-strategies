@@ -35,8 +35,11 @@ func TestHandlerListsCopyTraders(t *testing.T) {
 	trader2 := "22222222-2222-2222-2222-222222222222"
 
 	fake := doraClientFunc{
-		listCopyTraders: func(_ context.Context) ([]string, error) {
-			return []string{trader1, trader2}, nil
+		listCopyTraders: func(_ context.Context) ([]strategyhttp.CopyTrader, error) {
+			return []strategyhttp.CopyTrader{
+				{UserID: trader1, UserName: "alpha_trader"},
+				{UserID: trader2, UserName: "beta_trader"},
+			}, nil
 		},
 	}
 
@@ -52,25 +55,13 @@ func TestHandlerListsCopyTraders(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	// Assert items contain only the id field — no display_name leakage.
-	var rawBody struct {
-		Items []map[string]any `json:"items"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rawBody))
-	require.Len(t, rawBody.Items, 2)
-	for _, item := range rawBody.Items {
-		_, hasDisplayName := item["display_name"]
-		assert.False(t, hasDisplayName, "response must not contain display_name")
-		assert.Len(t, item, 1, "each item must contain only the id field")
-	}
-
 	var body struct {
 		Items []strategyhttp.CopyTraderSummary `json:"items"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Len(t, body.Items, 2)
-	assert.Equal(t, trader1, body.Items[0].ID)
-	assert.Equal(t, trader2, body.Items[1].ID)
+	assert.Equal(t, strategyhttp.CopyTraderSummary{ID: trader1, UserName: "alpha_trader"}, body.Items[0])
+	assert.Equal(t, strategyhttp.CopyTraderSummary{ID: trader2, UserName: "beta_trader"}, body.Items[1])
 }
 
 func TestHandlerListsCopyTradersRequiresAuth(t *testing.T) {
@@ -91,7 +82,7 @@ func TestHandlerListsCopyTradersEmpty(t *testing.T) {
 	t.Parallel()
 
 	fake := doraClientFunc{
-		listCopyTraders: func(_ context.Context) ([]string, error) {
+		listCopyTraders: func(_ context.Context) ([]strategyhttp.CopyTrader, error) {
 			return nil, nil
 		},
 	}
@@ -120,7 +111,7 @@ func TestHandlerListsCopyTradersDORAError(t *testing.T) {
 	t.Parallel()
 
 	fake := doraClientFunc{
-		listCopyTraders: func(_ context.Context) ([]string, error) {
+		listCopyTraders: func(_ context.Context) ([]strategyhttp.CopyTrader, error) {
 			return nil, assert.AnError
 		},
 	}
@@ -1665,7 +1656,7 @@ type doraClientFunc struct {
 	listOrderBooks  func(context.Context) ([]strategyhttp.DORAOrderBookSummary, error)
 	getUserID       func(context.Context) (string, error)
 	getAssetByID    func(context.Context, string) (*strategyhttp.AssetInfo, error)
-	listCopyTraders func(context.Context) ([]string, error)
+	listCopyTraders func(context.Context) ([]strategyhttp.CopyTrader, error)
 }
 
 func (f doraClientFunc) ListOrderBooks(ctx context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
@@ -1689,7 +1680,7 @@ func (f doraClientFunc) GetUserID(ctx context.Context) (string, error) {
 	return f.getUserID(ctx)
 }
 
-func (f doraClientFunc) ListCopyTraders(ctx context.Context) ([]string, error) {
+func (f doraClientFunc) ListCopyTraders(ctx context.Context) ([]strategyhttp.CopyTrader, error) {
 	if f.listCopyTraders == nil {
 		return nil, fmt.Errorf("not implemented")
 	}

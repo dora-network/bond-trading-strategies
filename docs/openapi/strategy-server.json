@@ -702,11 +702,12 @@
       },
       "CopyTraderSummary": {
         "type": "object",
-        "description": "A single entry in the list-copy-traders response. The `id` is the DORA user id and matches the `followed_trader` field accepted by CopyTradingConfig. Names and other identifying information are intentionally omitted for user anonymity.",
+        "description": "A single entry in the list-copy-traders response. The `id` is the DORA user id and matches the `followed_trader` field accepted by CopyTradingConfig. `user_name` is the DORA-registered handle surfaced for display in copy-trading run configuration UIs.",
         "properties": {
-          "id": { "type": "string", "format": "uuid" }
+          "id": { "type": "string", "format": "uuid" },
+          "user_name": { "type": "string" }
         },
-        "required": ["id"]
+        "required": ["id", "user_name"]
       },
       "TenorSummary": {
         "type": "object",

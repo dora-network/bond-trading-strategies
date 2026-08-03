@@ -171,10 +171,11 @@ type DORAUserSummary struct {
 
 // CopyTraderSummary is a single entry in the list-copy-traders response.
 // The id is the DORA user UUID and matches the `followed_trader` field
-// accepted by CopyTradingConfig. Names and other identifying information are
-// intentionally omitted for user anonymity.
+// accepted by CopyTradingConfig. user_name is the DORA-registered handle
+// surfaced for display in copy-trading run configuration UIs.
 type CopyTraderSummary struct {
-	ID string `json:"id"`
+	ID       string `json:"id"`
+	UserName string `json:"user_name"`
 }
 
 type AssetInfo struct {
@@ -727,8 +728,8 @@ func (h *Handler) handleDORAUser(w http.ResponseWriter, r *http.Request) {
 // handleCopyTraders returns the list of traders available to be followed by
 // copy-trading runs. The list is sourced from DORA's dedicated
 // `GET /v1/user/copy-traders` endpoint, which is server-side filtered to users
-// with copy trading enabled. Only the user IDs are exposed; names and other
-// identifying information are intentionally omitted for user anonymity.
+// with copy trading enabled. Each entry exposes the user UUID (for use as
+// `followed_trader` in CopyTradingConfig) and the DORA-registered user_name.
 func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeMethodNotAllowed(w, http.MethodGet)
@@ -739,20 +740,20 @@ func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
 	if client == nil {
 		client = NewDORAClient()
 	}
-	ids, err := client.ListCopyTraders(r.Context())
+	traders, err := client.ListCopyTraders(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list copy traders: %v", err))
 		return
 	}
 
-	// `make(..., 0, len(ids))` is required, not `var items []CopyTraderSummary`:
+	// `make(..., 0, len(traders))` is required, not `var items []CopyTraderSummary`:
 	// when DORA returns no copy traders, the live client returns `nil`, and
 	// writeJSON serialises a nil slice as `"items": null`. The spec guarantees
 	// `"items": []` for empty results, so the handler must produce a non-nil
 	// empty slice explicitly.
-	items := make([]CopyTraderSummary, 0, len(ids))
-	for _, id := range ids {
-		items = append(items, CopyTraderSummary{ID: id})
+	items := make([]CopyTraderSummary, 0, len(traders))
+	for _, t := range traders {
+		items = append(items, CopyTraderSummary{ID: t.UserID, UserName: t.UserName})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
