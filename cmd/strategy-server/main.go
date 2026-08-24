@@ -26,6 +26,8 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/twap"
+	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -205,7 +207,7 @@ func main() {
 			ctx,
 			notifier,
 			lookup,
-			[]string{meanreversion.StrategyType, copytrading.StrategyType, breakout.StrategyType},
+			[]string{meanreversion.StrategyType, copytrading.StrategyType, breakout.StrategyType, twap.StrategyType, vwap.StrategyType},
 			orderupdates.NewStream(*wsURL, log),
 			orderupdates.WithLogger(log),
 		)
@@ -218,6 +220,9 @@ func main() {
 		service,
 		strategyhttp.WithRunStore(runStore),
 		strategyhttp.WithBacktestStore(strategyhttp.NewPGBacktestStore(pool)),
+		// runStore also serves as the per-run StateStore for execution
+		// strategies (TWAP) — it implements strategy.StateStore.
+		strategyhttp.WithStateStore(runStore),
 		strategyhttp.WithDecisionStore(decisionStore),
 		strategyhttp.WithDecisionReader(decisionStore),
 		strategyhttp.WithTradesHistoryStore(copytrading.NewPGTradesHistoryStore(pool)),

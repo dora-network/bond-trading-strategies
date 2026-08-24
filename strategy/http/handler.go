@@ -19,9 +19,12 @@ import (
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
+	"github.com/dora-network/bond-trading-strategies/strategy/exec"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
+	"github.com/dora-network/bond-trading-strategies/strategy/twap"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -53,6 +56,12 @@ const (
 	defaultStopLossObserverInterval = time.Second
 )
 
+// orderUpdatesBuffer is the channel buffer size for the per-run
+// order-update event channel shared by TWAP and VWAP. 16 events
+// cover a reasonable burst of fills from a single run before the
+// run loop reads.
+const orderUpdatesBuffer = 16
+
 type Handler struct {
 	service            strategycore.Service
 	now                func() time.Time
@@ -68,7 +77,10 @@ type Handler struct {
 	// the decision that triggered it. nil disables recording; backtests
 	// never opt in and therefore never write to strategy_decisions.
 	decisionStore strategycore.DecisionRecorder
-	// decisionReader serves the read-only /v1/trading-decisions/{run_id}
+	// stateStore is used by execution strategies (TWAP) to checkpoint
+	// progress for crash recovery. nil disables persistence; the
+	// strategy runs but won't recover state across restarts.
+	stateStore strategycore.StateStore
 	// endpoint. The route is registered unconditionally in NewHandler;
 	// when decisionReader is nil the handler short-circuits to 503 so
 	// the endpoint can be deployed without wiring a reader until the
@@ -94,7 +106,8 @@ type Handler struct {
 	runningStrategies map[uuid.UUID]strategycore.Strategy
 	// stopLossObservers cancels the per-run observer goroutine. Protected
 	// by mu.
-	stopLossObservers map[uuid.UUID]context.CancelFunc
+	stopLossObservers     map[uuid.UUID]context.CancelFunc
+	runCompletionWatchers map[uuid.UUID]context.CancelFunc
 	// stopLossObserverInterval is the polling cadence for the stop-loss
 	// observer. Defaults to 1s; overridable for tests via
 	// WithStopLossObserverInterval.
@@ -479,6 +492,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		runs:                     make(map[uuid.UUID]*RunDetail),
 		runningStrategies:        make(map[uuid.UUID]strategycore.Strategy),
 		stopLossObservers:        make(map[uuid.UUID]context.CancelFunc),
+		runCompletionWatchers:    make(map[uuid.UUID]context.CancelFunc),
 		stopLossObserverInterval: defaultStopLossObserverInterval,
 		orderbookCache:           make(map[string]DORAOrderBookSummary),
 		assetCache:               make(map[string]AssetInfo),
@@ -566,6 +580,15 @@ func WithDecisionStore(store strategycore.DecisionRecorder) func(*Handler) {
 func WithDecisionReader(reader DecisionReader) func(*Handler) {
 	return func(h *Handler) {
 		h.decisionReader = reader
+	}
+}
+
+// WithStateStore sets the per-run state checkpoint store used by
+// execution strategies (TWAP) to persist progress for crash recovery.
+// The same *PGRunStore satisfies both RunStore and strategy.StateStore.
+func WithStateStore(store strategycore.StateStore) func(*Handler) {
+	return func(h *Handler) {
+		h.stateStore = store
 	}
 }
 
@@ -1513,6 +1536,7 @@ func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid
 	h.getBacktestMetadata(w, r, id)
 }
 
+//nolint:funlen // wiring count grew with the vwap notifier + completion watcher integration
 func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	var req CreateRunRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -1550,6 +1574,10 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		case *breakout.Strategy:
 			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
+		case *twap.Strategy:
+			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
+		case *vwap.Strategy:
+			vwap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		}
 	}
 
@@ -1557,6 +1585,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	// market order is written to strategy_decisions. nil disables
 	// recording; the helper is a no-op for unknown strategy types.
 	h.attachDecisionStore(strat)
+	h.attachStateStore(strat)
 
 	var encryptedAPIKey []byte
 	if info != nil && info.APIKey != "" && len(h.encryptionKey) > 0 {
@@ -1601,7 +1630,10 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.startOrderUpdater(detail, strat)
+
 	h.startStopLossObserver(detail, strat)
+	h.startCompletionWatcher(detail)
 
 	h.publishEvent(r.Context(), notifications.Event{
 		Type:      notifications.EventRunStarted,
@@ -1676,6 +1708,9 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 		detail.StoppedAt = &stoppedAt
 	}
 	if cancel, ok := h.stopLossObservers[id]; ok {
+		cancel()
+	}
+	if cancel, ok := h.runCompletionWatchers[id]; ok {
 		cancel()
 	}
 	h.mu.Unlock()
@@ -1839,6 +1874,14 @@ func (h *Handler) RestoreRuns(ctx context.Context) error {
 		if detail.Status != "running" {
 			continue
 		}
+		// Don't relaunch runs whose execution window has already
+		// passed — the strategy would only skip every bucket on
+		// startup. Mark them completed and publish EventRunCompleted
+		// so the client isn't left polling.
+		if h.runWindowExpired(detail) {
+			h.expireRun(ctx, detail)
+			continue
+		}
 		h.log.Info(
 			"resuming run",
 			"run_id", detail.ID,
@@ -1897,11 +1940,16 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		case *breakout.Strategy:
 			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+		case *twap.Strategy:
+			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+		case *vwap.Strategy:
+			vwap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		}
 	}
 
 	// Attach the per-run decision recorder. nil disables recording.
 	h.attachDecisionStore(strat)
+	h.attachStateStore(strat)
 
 	// Seed the in-memory decision counter from the DB frontier so a
 	// resumed run (e.g. after a server restart) doesn't re-use seqs
@@ -1920,10 +1968,14 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 				s.SetDecisionSeq(maxSeq)
 			case *breakout.Strategy:
 				s.SetDecisionSeq(maxSeq)
+			case *twap.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *vwap.Strategy:
+				s.SetDecisionSeq(maxSeq)
 			}
 		}
 	}
-
+	h.startOrderUpdater(detail, strat)
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}
@@ -1933,7 +1985,154 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		}
 	}
 	h.startStopLossObserver(detail, strat)
+	h.startCompletionWatcher(detail)
 	return nil
+}
+
+// startOrderUpdater spawns a per-run goroutine that subscribes to the
+// notifications bus for the run's DORA user, filters events for this
+// run, and forwards OrderFillEvents to the strategy's updates
+// channel. Supports both execution strategies:
+//
+//   - *twap.Strategy forwards via SetOrderUpdatesChannel(<-chan OrderFillEvent).
+//   - *vwap.Strategy forwards via SetOrderUpdatesChannel(<-chan OrderFillEvent).
+//
+// Both strategies use the same OrderFillEvent shape (it's a type
+// alias of exec.OrderFillEvent), so the parsed event value is
+// directly assignable to either channel. No-ops when the strategy
+// type is not one of the execution strategies, when h.notifier is
+// nil, or when the run has no DORA user (it was created without
+// one and will not receive DORA order events).
+func (h *Handler) startOrderUpdater(detail *RunDetail, strat strategycore.Strategy) {
+	if h.notifier == nil || detail.DORAUserID == "" {
+		return
+	}
+	switch s := strat.(type) {
+	case *twap.Strategy:
+		c := make(chan twap.OrderFillEvent, orderUpdatesBuffer)
+		s.SetOrderUpdatesChannel(c)
+		h.runOrderUpdater(detail, func(ctx context.Context, evt twap.OrderFillEvent) error {
+			select {
+			case c <- evt:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	case *vwap.Strategy:
+		c := make(chan vwap.OrderFillEvent, orderUpdatesBuffer)
+		s.SetOrderUpdatesChannel(c)
+		h.runOrderUpdater(detail, func(ctx context.Context, evt vwap.OrderFillEvent) error {
+			select {
+			case c <- evt:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	default:
+		return
+	}
+}
+
+// runOrderUpdater subscribes to the notifications bus for the run's
+// DORA user, filters events for this run, and forwards each parsed
+// OrderFillEvent to the strategy via the supplied callback. The
+// callback receives a context derived from h.service.BaseContext()
+// (or context.Background if none is configured). Closing the
+// callback's channel is the strategy's responsibility; runOrderUpdater
+// returns when the context is cancelled or the subscription ends.
+func (h *Handler) runOrderUpdater(detail *RunDetail, forward func(ctx context.Context, evt exec.OrderFillEvent) error) {
+	parentCtx := context.Background()
+	if h.service != nil {
+		parentCtx = h.service.BaseContext()
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	h.mu.Lock()
+	h.stopLossObservers[detail.ID] = cancel
+	h.mu.Unlock()
+
+	sub, err := h.notifier.Subscribe(ctx, detail.DORAUserID)
+	if err != nil {
+		slog.Error("order updates: subscribe failed",
+			"strategy_type", detail.StrategyType,
+			"run_id", detail.ID, "err", err)
+		return
+	}
+	defer func() {
+		if closer, ok := sub.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-sub.Events():
+			if !ok {
+				return
+			}
+			if evt.Type != notifications.EventOrderUpdate {
+				continue
+			}
+			if evt.RunID != detail.ID.String() {
+				continue
+			}
+			payload, _ := evt.Payload.(map[string]any)
+			if payload == nil {
+				continue
+			}
+			parsed, perr := parseOrderFillEvent(payload)
+			if perr != nil {
+				slog.Debug("order updates: skip event (missing fields)",
+					"run_id", detail.ID, "err", perr)
+				continue
+			}
+			if err := forward(ctx, parsed); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// parseOrderFillEvent extracts the TWAP fields from a DORA order
+// update event payload. The payload is a map[string]any decoded from
+// the notifications bus.
+func parseOrderFillEvent(payload map[string]any) (twap.OrderFillEvent, error) {
+	clientOrderID, _ := payload["client_order_id"].(string)
+	if clientOrderID == "" {
+		return twap.OrderFillEvent{}, fmt.Errorf("missing client_order_id")
+	}
+	status, _ := payload["status"].(string)
+	if status == "" {
+		return twap.OrderFillEvent{}, fmt.Errorf("missing status")
+	}
+	filledQty, err := parseDecimalField(payload["filled_quantity"])
+	if err != nil {
+		return twap.OrderFillEvent{}, fmt.Errorf("parse filled_quantity: %w", err)
+	}
+	return twap.OrderFillEvent{
+		ClientOrderID:  clientOrderID,
+		Status:         status,
+		FilledQuantity: filledQty,
+	}, nil
+}
+
+// parseDecimalField extracts a decimal value from a payload field that
+// may be a string or a number.
+func parseDecimalField(v any) (decimal.Decimal, error) {
+	switch x := v.(type) {
+	case string:
+		return decimal.Parse(x)
+	case float64:
+		return decimal.NewFromFloat64(x)
+	case nil:
+		return decimal.Zero, nil
+	default:
+		return decimal.Zero, fmt.Errorf("unsupported type %T", v)
+	}
 }
 
 func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strategycore.Strategy) (uuid.UUID, error) {
@@ -1949,6 +2148,51 @@ func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strateg
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// startCompletionWatcher spawns a per-run goroutine that fires
+// EventRunCompleted when the strategy's run loop exits naturally
+// (chunks exhausted, end_time elapsed, or skipped buckets consumed).
+// Distinct from startStopLossObserver which is a no-op for strategies
+// without stop-loss semantics — this runs unconditionally so every
+// execution strategy's natural completion is observable.
+func (h *Handler) startCompletionWatcher(detail *RunDetail) {
+	parent := context.Background()
+	if h.service != nil {
+		if bc := h.service.BaseContext(); bc != nil {
+			parent = bc
+		}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	h.mu.Lock()
+	h.runCompletionWatchers[detail.ID] = cancel
+	h.runningStrategies[detail.ID] = nil // ensure map entry exists
+	h.mu.Unlock()
+	go func() {
+		defer cancel()
+		defer func() {
+			h.mu.Lock()
+			delete(h.runCompletionWatchers, detail.ID)
+			h.mu.Unlock()
+		}()
+		interval := h.stopLossObserverInterval
+		if interval <= 0 {
+			interval = defaultStopLossObserverInterval
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !h.runIsActive(detail.ID) {
+					h.maybePublishNaturalCompletion(ctx, detail)
+					return
+				}
+			}
+		}
+	}()
 }
 
 // startStopLossObserver records strat in runningStrategies and spawns a
@@ -2000,6 +2244,7 @@ func (h *Handler) runStopLossObserver(ctx context.Context, detail *RunDetail, ob
 			return
 		case <-ticker.C:
 			if !h.runIsActive(detail.ID) {
+				h.maybePublishNaturalCompletion(ctx, detail)
 				return
 			}
 			z, pnl, triggered := obs.LastStopLossTrigger()
@@ -2017,17 +2262,102 @@ func (h *Handler) runStopLossObserver(ctx context.Context, detail *RunDetail, ob
 	}
 }
 
-// runIsActive reports whether the run is still tracked in h.runs with
-// status "running". The observer uses this to exit when the run was
-// stopped or completed by some other path.
+// runIsActive reports whether the strategy's run goroutine for this
+// id is still alive by querying the Service. The Service deletes its
+// entry when strategy.Run returns, so this returns false once the run
+// naturally ends. The observer uses this to fire
+// maybePublishNaturalCompletion. We prefer this over checking
+// h.runningStrategies because the Handler's map is only cleaned up
+// when the observer goroutine exits — a chicken-and-egg deadlock
+// prevented natural-completion detection before.
 func (h *Handler) runIsActive(id uuid.UUID) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	detail, ok := h.runs[id]
-	if !ok {
+	if h.service == nil {
 		return false
 	}
-	return detail.Status == "running"
+	return h.service.IsRunActive(id)
+}
+
+// maybePublishNaturalCompletion publishes EventRunCompleted if the run
+// was active one tick ago but isn't now, and the status is still
+// "running" — that combination means the strategy's run loop
+// returned nil naturally (chunks exhausted, end_time elapsed, or all
+// skipped consumed) without going through stopRun. The observer
+// picks this up once per run. The status is also flipped to
+// "completed" so runIsActive returns false and the public status
+// reflects reality.
+func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, detail *RunDetail) {
+	h.mu.Lock()
+	d, ok := h.runs[detail.ID]
+	if !ok || d.Status != "running" {
+		h.mu.Unlock()
+		return
+	}
+	d.Status = "completed"
+	d.UpdatedAt = h.now().UTC()
+	d.StoppedAt = &d.UpdatedAt
+	userID := d.DORAUserID
+	runID := d.ID.String()
+	if err := h.saveRun(ctx, d); err != nil {
+		slog.Error("twap: save completed run", "err", err, "run_id", runID)
+	}
+	h.mu.Unlock()
+
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunCompleted,
+		UserID:    userID,
+		RunID:     runID,
+		Timestamp: h.now().UTC(),
+	})
+}
+
+// runWindowExpired returns true if the run's execution window has
+// already passed. Reads end_time out of the persisted config JSON,
+// which is the canonical source of truth (RunDetail does not expose
+// end_time directly).
+func (h *Handler) runWindowExpired(detail *RunDetail) bool {
+	var cfg struct {
+		EndTime time.Time `json:"end_time"`
+	}
+	if err := json.Unmarshal(detail.Config, &cfg); err != nil {
+		return false
+	}
+	if cfg.EndTime.IsZero() {
+		return false
+	}
+	return h.now().UTC().After(cfg.EndTime)
+}
+
+// expireRun marks the run as completed in the DB and publishes
+// EventRunCompleted. Called by RestoreRuns when a run with status
+// "running" is found past its end_time — we don't want to relaunch
+// a finished run because the strategy would only skip every chunk
+// at startup.
+func (h *Handler) expireRun(ctx context.Context, detail *RunDetail) {
+	h.log.Info(
+		"run expired during restart, marking completed",
+		"run_id", detail.ID,
+		"strategy_type", detail.StrategyType,
+	)
+	now := h.now().UTC()
+	userID := ""
+	runIDStr := detail.ID.String()
+	h.mu.Lock()
+	if d, ok := h.runs[detail.ID]; ok {
+		d.Status = "completed"
+		d.UpdatedAt = now
+		d.StoppedAt = &now
+		userID = d.DORAUserID
+		if err := h.saveRun(ctx, d); err != nil {
+			slog.Error("save expired run", "err", err, "run_id", runIDStr)
+		}
+	}
+	h.mu.Unlock()
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunCompleted,
+		UserID:    userID,
+		RunID:     runIDStr,
+		Timestamp: now,
+	})
 }
 
 func (h *Handler) resolveDORAUserID(ctx context.Context) (string, error) {
@@ -2114,6 +2444,26 @@ func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
 		copytrading.WithDecisionStore(h.decisionStore)(s)
 	case *breakout.Strategy:
 		breakout.WithDecisionStore(h.decisionStore)(s)
+	case *twap.Strategy:
+		twap.WithDecisionStore(h.decisionStore)(s)
+	case *vwap.Strategy:
+		vwap.WithDecisionStore(h.decisionStore)(s)
+	}
+}
+
+// attachStateStore wires the handler's configured StateStore into a
+// freshly-built strategy so the live run loop checkpoints progress for
+// crash recovery. Currently only TWAP uses it; no-op for other types
+// or when the handler has no store configured.
+func (h *Handler) attachStateStore(strat strategycore.Strategy) {
+	if h.stateStore == nil {
+		return
+	}
+	if s, ok := strat.(*twap.Strategy); ok {
+		twap.WithStateStore(h.stateStore)(s)
+	}
+	if s, ok := strat.(*vwap.Strategy); ok {
+		vwap.WithStateStore(h.stateStore)(s)
 	}
 }
 
@@ -2127,8 +2477,10 @@ func defaultStrategies(
 ) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
+		newTWAPDefinition(log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
 		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, tradeHistoryStore, log),
+		newVWAPDefinition(tradeHistoryStore, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2232,6 +2584,139 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 				opts = append(opts, meanreversion.WithBacktestWriter(tradeWriter))
 			}
 			return normalised, meanreversion.New(cfg, pricesHandler, opts...), nil
+		},
+	}
+}
+
+func newTWAPDefinition(log *slog.Logger) StrategyDefinition {
+	defaults := twap.DefaultConfig()
+	return StrategyDefinition{
+		Type:             "twap",
+		Status:           strategyStatusAvailable,
+		Description:      "Time-weighted average price execution strategy for a single order book.",
+		SupportsRun:      true,
+		SupportsBacktest: false,
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "order_book_id",
+				Type:        "string(uuid)",
+				Description: "Order book UUID where orders will be placed.",
+				Required:    true,
+			},
+			{
+				Name:        "total_amount",
+				Type:        "number",
+				Description: "Total quantity to trade across the execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "side",
+				Type:        "string",
+				Description: "Trade side: 'buy' or 'sell'.",
+				Required:    true,
+			},
+			{
+				Name:        "start_time",
+				Type:        "string",
+				Description: "ISO 8601 start time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "end_time",
+				Type:        "string",
+				Description: "ISO 8601 end time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "interval_seconds",
+				Type:        "number",
+				Description: "Time between each chunk order. Default 300 (5 minutes).",
+				Required:    false,
+				Default:     defaults.IntervalSeconds,
+			},
+		},
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			cfg, normalised, err := decodeTWAPConfig(raw)
+			if err != nil {
+				return nil, nil, err
+			}
+			return normalised, twap.New(cfg, log), nil
+		},
+	}
+}
+
+func newVWAPDefinition(tradeHistoryStore breakout.TradeHistoryStore, log *slog.Logger) StrategyDefinition {
+	defaults := vwap.DefaultConfig()
+	return StrategyDefinition{
+		Type:             "vwap",
+		Status:           strategyStatusAvailable,
+		Description:      "Volume-weighted average price execution strategy. Bucket schedule derived from historical trade volume.",
+		SupportsRun:      true,
+		SupportsBacktest: false,
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "order_book_id",
+				Type:        "string(uuid)",
+				Description: "Order book UUID where orders will be placed.",
+				Required:    true,
+			},
+			{
+				Name:        "total_amount",
+				Type:        "number",
+				Description: "Total quantity to trade across the execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "side",
+				Type:        "string",
+				Description: "Trade side: 'buy' or 'sell'.",
+				Required:    true,
+			},
+			{
+				Name:        "start_time",
+				Type:        "string",
+				Description: "ISO 8601 start time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "end_time",
+				Type:        "string",
+				Description: "ISO 8601 end time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "window_days",
+				Type:        "integer",
+				Description: "Days of historical trade data used for ADV buckets. Default 30.",
+				Required:    false,
+				Default:     defaults.WindowDays,
+			},
+			{
+				Name:        "bucket_minutes",
+				Type:        "integer",
+				Description: "Granularity of each VWAP bucket. Default 5.",
+				Required:    false,
+				Default:     defaults.BucketMinutes,
+			},
+		},
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			cfg, normalised, err := decodeVWAPConfig(raw)
+			if err != nil {
+				return nil, nil, err
+			}
+			s := vwap.New(cfg, log)
+			if tradeHistoryStore != nil {
+				vwap.WithTradeHistoryStore(tradeHistoryStore)(s)
+			}
+			return normalised, s, nil
 		},
 	}
 }
@@ -2779,6 +3264,36 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 		InitialBalance:  amount,
 		Leverage:        leverage,
 	}, normalised, nil
+}
+
+func decodeTWAPConfig(raw json.RawMessage) (twap.Config, json.RawMessage, error) {
+	var cfg twap.Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return twap.Config{}, nil, fmt.Errorf("decode twap config: %w", err)
+	}
+	if err := cfg.Validate(time.Now().UTC()); err != nil {
+		return twap.Config{}, nil, err
+	}
+	normalised, err := json.Marshal(cfg)
+	if err != nil {
+		return twap.Config{}, nil, fmt.Errorf("marshal normalised twap config: %w", err)
+	}
+	return cfg, normalised, nil
+}
+
+func decodeVWAPConfig(raw json.RawMessage) (vwap.Config, json.RawMessage, error) {
+	var cfg vwap.Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return vwap.Config{}, nil, fmt.Errorf("decode vwap config: %w", err)
+	}
+	if err := cfg.Validate(time.Now().UTC()); err != nil {
+		return vwap.Config{}, nil, err
+	}
+	normalised, err := json.Marshal(cfg)
+	if err != nil {
+		return vwap.Config{}, nil, fmt.Errorf("marshal normalised vwap config: %w", err)
+	}
+	return cfg, normalised, nil
 }
 
 type copyTradingConfigPayload struct {

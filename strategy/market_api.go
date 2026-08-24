@@ -31,8 +31,9 @@ type MarketAPIClient interface {
 		inverseLeverage decimal.Decimal,
 		fromGlobalPosition bool,
 		clientOrderID string,
-	) error
+	) (orderID string, err error)
 	AssetCollateralWeight(ctx context.Context, assetID string) (decimal.Decimal, error)
+	GetOrderFilledStatus(ctx context.Context, orderID string) (status string, filledQuantity decimal.Decimal, err error)
 }
 
 // LookupAssetID resolves a DORA order book UUID to its base asset ID string

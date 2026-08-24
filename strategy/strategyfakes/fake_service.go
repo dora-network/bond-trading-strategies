@@ -22,6 +22,17 @@ type FakeService struct {
 	baseContextReturnsOnCall map[int]struct {
 		result1 context.Context
 	}
+	IsRunActiveStub        func(uuid.UUID) bool
+	isRunActiveMutex       sync.RWMutex
+	isRunActiveArgsForCall []struct {
+		arg1 uuid.UUID
+	}
+	isRunActiveReturns struct {
+		result1 bool
+	}
+	isRunActiveReturnsOnCall map[int]struct {
+		result1 bool
+	}
 	PauseStrategyStub        func(context.Context, uuid.UUID) error
 	pauseStrategyMutex       sync.RWMutex
 	pauseStrategyArgsForCall []struct {
@@ -154,6 +165,67 @@ func (fake *FakeService) BaseContextReturnsOnCall(i int, result1 context.Context
 	}
 	fake.baseContextReturnsOnCall[i] = struct {
 		result1 context.Context
+	}{result1}
+}
+
+func (fake *FakeService) IsRunActive(arg1 uuid.UUID) bool {
+	fake.isRunActiveMutex.Lock()
+	ret, specificReturn := fake.isRunActiveReturnsOnCall[len(fake.isRunActiveArgsForCall)]
+	fake.isRunActiveArgsForCall = append(fake.isRunActiveArgsForCall, struct {
+		arg1 uuid.UUID
+	}{arg1})
+	stub := fake.IsRunActiveStub
+	fakeReturns := fake.isRunActiveReturns
+	fake.recordInvocation("IsRunActive", []interface{}{arg1})
+	fake.isRunActiveMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeService) IsRunActiveCallCount() int {
+	fake.isRunActiveMutex.RLock()
+	defer fake.isRunActiveMutex.RUnlock()
+	return len(fake.isRunActiveArgsForCall)
+}
+
+func (fake *FakeService) IsRunActiveCalls(stub func(uuid.UUID) bool) {
+	fake.isRunActiveMutex.Lock()
+	defer fake.isRunActiveMutex.Unlock()
+	fake.IsRunActiveStub = stub
+}
+
+func (fake *FakeService) IsRunActiveArgsForCall(i int) uuid.UUID {
+	fake.isRunActiveMutex.RLock()
+	defer fake.isRunActiveMutex.RUnlock()
+	argsForCall := fake.isRunActiveArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeService) IsRunActiveReturns(result1 bool) {
+	fake.isRunActiveMutex.Lock()
+	defer fake.isRunActiveMutex.Unlock()
+	fake.IsRunActiveStub = nil
+	fake.isRunActiveReturns = struct {
+		result1 bool
+	}{result1}
+}
+
+func (fake *FakeService) IsRunActiveReturnsOnCall(i int, result1 bool) {
+	fake.isRunActiveMutex.Lock()
+	defer fake.isRunActiveMutex.Unlock()
+	fake.IsRunActiveStub = nil
+	if fake.isRunActiveReturnsOnCall == nil {
+		fake.isRunActiveReturnsOnCall = make(map[int]struct {
+			result1 bool
+		})
+	}
+	fake.isRunActiveReturnsOnCall[i] = struct {
+		result1 bool
 	}{result1}
 }
 

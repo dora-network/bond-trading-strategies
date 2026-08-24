@@ -211,18 +211,18 @@ func (c *DoraClient) CreateMarketOrder(
 	inverseLeverage decimal.Decimal,
 	fromGlobalPosition bool,
 	clientOrderID string,
-) error {
+) (string, error) {
 	if c == nil || c.client == nil {
-		return errors.New("DORA client is not configured")
+		return "", errors.New("DORA client is not configured")
 	}
 	if c.apiKey == "" {
-		return errors.New("API_KEY is not configured")
+		return "", errors.New("API_KEY is not configured")
 	}
 	if quantity.IsZero() || quantity.IsNeg() {
-		return errors.New("order quantity must be greater than 0")
+		return "", errors.New("order quantity must be greater than 0")
 	}
 	if inverseLeverage.IsNeg() {
-		return errors.New("inverse leverage must be non-negative and less than or equal to 1.0")
+		return "", errors.New("inverse leverage must be non-negative and less than or equal to 1.0")
 	}
 
 	// DORA requires quantity with at most 3 decimal places.
@@ -242,7 +242,7 @@ func (c *DoraClient) CreateMarketOrder(
 	if clientOrderID != "" {
 		request.SetClientOrderId(clientOrderID)
 	}
-	_, rawResp, err := c.client.DefaultAPI.CreateOrder(authCtx).CreateOrderRequest(*request).Execute()
+	resp, rawResp, err := c.client.DefaultAPI.CreateOrder(authCtx).CreateOrderRequest(*request).Execute()
 	if rawResp != nil && rawResp.Body != nil {
 		defer rawResp.Body.Close()
 	}
@@ -254,15 +254,53 @@ func (c *DoraClient) CreateMarketOrder(
 				Error *string `json:"error"`
 			}
 			if jsonErr := json.Unmarshal(body, &errResp); jsonErr == nil && errResp.Error != nil && *errResp.Error != "" {
-				return fmt.Errorf("create market order on order book %s: %s (raw: %w)", orderBookID, *errResp.Error, err)
+				return "", fmt.Errorf("create market order on order book %s: %s (raw: %w)", orderBookID, *errResp.Error, err)
 			}
 			if len(body) > 0 {
-				return fmt.Errorf("create market order on order book %s: %s (raw: %w)", orderBookID, string(body), err)
+				return "", fmt.Errorf("create market order on order book %s: %s (raw: %w)", orderBookID, string(body), err)
 			}
 		}
-		return fmt.Errorf("create market order on order book %s: %w", orderBookID, err)
+		return "", fmt.Errorf("create market order on order book %s: %w", orderBookID, err)
 	}
-	return nil
+	var orderID string
+	if resp != nil && resp.Data != nil && resp.Data.OrderId != nil {
+		orderID = *resp.Data.OrderId
+	}
+	return orderID, nil
+}
+
+// GetOrderFilledStatus fetches the current status and filled quantity
+// of an order from DORA. Used by TWAP on restart to reconcile pending
+// orders that may have filled or been cancelled while the strategy
+// server was offline. Returns the order's status string (OPEN, FILLED,
+// PARTIAL_FILL, CANCELLED) and its cumulative filled quantity.
+func (c *DoraClient) GetOrderFilledStatus(ctx context.Context, orderID string) (status string, filledQuantity decimal.Decimal, err error) {
+	if c == nil || c.client == nil {
+		return "", decimal.Zero, errors.New("DORA client is not configured")
+	}
+	if c.apiKey == "" {
+		return "", decimal.Zero, errors.New("API_KEY is not configured")
+	}
+	authCtx := c.authCtx(ctx)
+	resp, rawResp, err := c.client.DefaultAPI.GetOrderById(authCtx, orderID).Execute()
+	if rawResp != nil && rawResp.Body != nil {
+		defer rawResp.Body.Close()
+	}
+	if err != nil {
+		return "", decimal.Zero, fmt.Errorf("get order %s: %w", orderID, err)
+	}
+	if resp == nil || resp.Data == nil {
+		return "", decimal.Zero, fmt.Errorf("get order %s: empty response", orderID)
+	}
+	order := *resp.Data
+	status = string(order.Status)
+	if order.FilledQuantity != "" {
+		filledQuantity, err = decimal.Parse(order.FilledQuantity)
+		if err != nil {
+			return "", decimal.Zero, fmt.Errorf("get order %s: parse filled_quantity: %w", orderID, err)
+		}
+	}
+	return status, filledQuantity, nil
 }
 
 // authCtx stamps the per-user API key on the context for DORA requests

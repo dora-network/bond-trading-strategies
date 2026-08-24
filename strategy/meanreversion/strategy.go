@@ -502,7 +502,7 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 	// flows into the DORA request and the recorded decision row.
 	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 
-	if err := s.marketAPIClient.CreateMarketOrder(
+	if _, err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, false, clientOrderID,
 	); err != nil {
 		// Self-healing: if the order failed, check the live position on the exchange.
@@ -613,7 +613,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision Decision, asset
 	// Build the client_order_id before submitting so the same value
 	// flows into the DORA request and the recorded decision row.
 	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
-	if err := s.marketAPIClient.CreateMarketOrder(
+	if _, err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition, clientOrderID,
 	); err != nil {
 		return false, err

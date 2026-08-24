@@ -36,7 +36,7 @@ func TestDoraAPIClient_CreateMarketOrder_ErrorHandling(t *testing.T) {
 	os.Setenv("DORA_BASE_URL", server.URL)
 
 	client := strategy.NewDoraClientWithKey("test-api-key")
-	err := client.CreateMarketOrder(
+	_, err := client.CreateMarketOrder(
 		context.Background(),
 		"test-orderbook",
 		doraclient.SIDE_BUY,
