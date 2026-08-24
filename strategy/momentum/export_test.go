@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/prices"
 	strategyPkg "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/google/uuid"
@@ -80,4 +81,22 @@ func EntryATR(s *Strategy) decimal.Decimal {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.entryATR
+}
+
+// RunLoop drives the strategy's internal run loop with the supplied
+// channels. Used by tests that want to exercise the live tick path
+// without the pricesHandler dependency. Returns a teardown that stops
+// the goroutine.
+func RunLoop(s *Strategy, ctx context.Context, msgs <-chan strategyPkg.Message, pricesCh <-chan map[uuid.UUID]prices.AssetPrice) func() {
+	if s.cancel == nil {
+		s.cancel = func() {}
+	}
+	go func() {
+		_ = s.run(ctx, msgs, pricesCh)
+	}()
+	return func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
+	}
 }

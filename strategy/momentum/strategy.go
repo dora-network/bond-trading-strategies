@@ -780,6 +780,11 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 					benchmarkYield = s.getBenchmarkYield(ctx, px.Time)
 				}
 
+				// Snapshot state under the lock; Update() re-acquires
+				// s.mu so we must release before calling it. Same pattern
+				// as breakout.handleTick. Without this the run goroutine
+				// deadlocks on the first matching price tick because
+				// sync.RWMutex is not reentrant.
 				s.mu.Lock()
 				obs := types.YieldObservation{
 					Time:   px.Time,
@@ -796,20 +801,20 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 				// still based on incomplete data. Skip exit evaluation
 				// on that tick to avoid acting on a stale signal.
 				windowReadyBeforeUpdate := s.fastWin.Ready() && s.slowWin.Ready()
-				decision, err := s.Update(obs)
-				if err != nil {
-					s.mu.Unlock()
-					s.logger().Error("failed to update strategy", "runID", s.runID, "err", err)
-					continue
-				}
-				if s.paused {
-					s.mu.Unlock()
-					continue
-				}
+				paused := s.paused
 				currentOpenSignal := s.openSignal
 				entryPrice := s.entryPrice
 				entryATR := s.entryATR
 				s.mu.Unlock()
+
+				decision, err := s.Update(obs)
+				if err != nil {
+					s.logger().Error("failed to update strategy", "runID", s.runID, "err", err)
+					continue
+				}
+				if paused {
+					continue
+				}
 
 				if currentOpenSignal != types.SignalHold {
 					if windowReadyBeforeUpdate {
@@ -834,10 +839,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 				}
 			}
 		case <-ticker.C:
-			s.mu.RLock()
-			paused := s.paused
-			s.mu.RUnlock()
-			_ = paused // ticker is just to keep select responsive when no ticks arrive
+			_ = struct{}{} // ticker keeps the select responsive when no ticks arrive
 		}
 	}
 }
