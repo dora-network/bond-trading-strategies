@@ -59,3 +59,110 @@ here so they get revisited, not abandoned.
   Documented intent in `strategy/twap/state.go` and mirrored in
   `strategy/vwap/state.go`. Decision required whether fills should be
   recovered.
+
+## Momentum strategy follow-ups (deferred from Slice A wiring, 2026-08-24)
+
+Slice A wired momentum through the HTTP API (definition, config decoder, result
+type, per-user DORA API key injection in three switches, decision recorder,
+SetDecisionSeq seed, orderupdates filter, handler test count 5 -> 6). The
+16-reviewer pass on `tan/momentum-strategy` vs `development` flagged additional
+defects and a wiring-refactor follow-up that did not block Slice A but should
+not be lost.
+
+### Blockers (must fix before merge)
+
+- **Live run loop self-deadlock** — `strategy/momentum/strategy.go:783-799`.
+  `run()` holds `s.mu.Lock()` then calls `s.Update(obs)` which re-locks at
+  `:328`. `sync.RWMutex` is not reentrant. First matching price tick freezes
+  the run goroutine; Pause/Stop/ctx.Done never serviced. Fix: breakout's
+  `handleTick` pattern — read state under a short lock, unlock, then call
+  `s.Update(obs)`. Add a regression test that drives the live run loop (the
+  current suite only exercises `Backtest`, `Update`, `ShouldExit`).
+
+- **Force-close omits exit TradeRecord** — `strategy/momentum/backtest.go:108-118`.
+  At end of history, `closedTrades` is appended but no `exitRecord` row is
+  emitted to `trade_records`. Cause: `/trades` shows dangling open entry while
+  `/closed-trades` shows the round-trip. meanreversion appends both — port the
+  exit record. Also use `lastDecision.Signal()` instead of `openTrade.Signal`
+  for the close signal.
+
+### Major (should land in the same merge)
+
+- **`getBenchmarkYield` stale-cache fallback dropped** —
+  `strategy/momentum/strategy.go:849-887`. Every error path returns
+  `decimal.Zero` instead of returning the cached yield. On FRED outage in
+  spread mode momentum computes `YTM - 0` (raw yield with sign inversion) and
+  trades on garbage signals. Mirror meanreversion's `if ok { return yield }`
+  fallback on each error path.
+
+- **Short-position ShouldExit branches untested** —
+  `strategy/momentum/strategy_test.go:117-153`. All four tests are
+  long-only. Short stop-loss (`:268-272`), short take-profit (`:286-290`),
+  and Sell->Buy reversal (`:299-300`) have zero coverage. Sign-flip in any
+  Sell branch is silent mutation. Mirror each existing test with
+  `openSignal=SignalSell` and inverted price fixtures.
+
+- **Backtest tests are mutation-immune** —
+  `strategy/momentum/backtest_test.go:34,47,77`. Only `NotEmpty(closedTrades)`
+  is asserted. `TestBacktest_StopLossExits` would still pass if the entire
+  stop-loss branch in `ShouldExit` were deleted because reversal fires on the
+  same tick. Sibling packages set the bar (`breakout/backtest_test.go:56`,
+  `copytrading/backtest_test.go:159` assert exact entry prices). Add exact
+  trade count, exit reason, entry/exit price, and PnL sign/magnitude
+  assertions.
+
+- **`nil-YTM tick dropped` test cannot detect ingestion** —
+  `strategy/momentum/strategy_test.go:96-102`. One zero-YTM tick asserts
+  `SignalHold`, which is also the warming-up default. Deleting the `!ok`
+  early-return at `strategy.go:338-344` still passes. Follow the dropped
+  tick with valid ticks and assert the crossover timing shifts by one, or
+  distinguish dropped-tick decision from warming-up via the reason field.
+
+- **`historical_data.go` untested, both counterfeiter fakes unused** —
+  `strategy/momentum/historical_data.go` (297 lines of date-window merging
+  logic: `getObservations`, `prefillWindow`, `mergeBenchmarkObservations`,
+  `cachedBenchmarkYield`, `latestCachedBenchmarkDate`) ships with zero test
+  coverage. `momentumfakes/fake_historical_price_store.go` and
+  `momentumfakes/fake_benchmark_yield_client.go` are generated but imported
+  by nothing. Port `meanreversion/historical_data_test.go` and
+  `market_api_test.go` patterns.
+
+- **Price-mode YTM-optional contract is dead code** —
+  `strategy/momentum/historical_data.go:76-79` skips rows only when
+  `price.YTM == nil && SignalSource != SignalSourcePrice`. Real PG store
+  filters `AND ytm IS NOT NULL` (`prices/store.go:65,86`), so nil-YTM ticks
+  are always excluded regardless of mode. Either route price mode through
+  a YTM-less loader or document the requirement.
+
+- **Wiring refactor: bake `WithMarketAPIClient` into the construction
+  closure** — currently `WithMarketAPIClient` is applied in three separate
+  type-switch sites (`strategy/http/handler.go:969-976, 1594-1597,
+  1962-1965`) after the strategy is built by `DecodeConfig`. The cleaner
+  pattern — already implicit in the breakout/meanreversion definitions —
+  is to inject the user-specific `MarketAPIClient` as a closure variable
+  captured at strategy-construction time, eliminating the post-build
+  switch walking. This would also fold the three switch sites in
+  `createBacktest`/`createRun`/`resumePersistedRun` into a single helper
+  on the handler. Touches all three strategy definitions; refactor scope,
+  not a one-liner. Original slice note from the Slice A review.
+
+### Minor (clean batch later)
+
+- `strategy/momentum/strategy.go:332` mutates `s.lastPrice` before the zero-YTM
+  drop check, skewing ATR gaps. Move the assignment after the drop check.
+- `strategy/momentum/strategy.go:834-840` ticker case dead-reads `s.paused`
+  into `_`; remove the lock cycle.
+- `mcp/tools_strategy.go` declares `min_order_size` / `max_order_size` as
+  integer but momentum's `Config` is `decimal.Decimal` (the same PR's own
+  OpenAPI MomentumConfig uses `number`). Widen to `nonNegNum` and update
+  the assertion in `mcp/server_test.go`.
+- `mcp/server_test.go:604-608` doesn't pin the `signal_source` enum values;
+  add an `Enum []string` assertion.
+- `strategy/portfolio.go` silently swallows `decimal.Parse` failures on
+  account balances (`portfolio.go:81-87`). Fail loudly — log + return
+  `ok=false` so the caller falls back to the legacy `AssetPosition` path.
+- `fred/benchmark.go` has no tests for `ParseBenchmarkTenor` /
+  `NormalizeTenor` / `NormalizeDate` / `SupportedBenchmarkTenors`. Add a
+  table-driven `fred/benchmark_test.go`.
+- `strategy.MustParseUUID` duplicates `strategy/exec/exec.go:78 MustParseUUID`.
+  Pick one canonical location and delete the other.
