@@ -63,7 +63,7 @@ func TestUpdate_OBVFilterSuppressesBuyWhenOBVFlat(t *testing.T) {
 	}
 
 	// 5 BUY trades of 10 each with OBVWindow=5. OBV = 50.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		s.applyTradeEvent(streams.TradeEvent{
 			Price:    decimal.MustNew(100, 0),
 			Quantity: decimal.MustNew(10, 0),

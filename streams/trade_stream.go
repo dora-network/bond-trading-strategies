@@ -60,13 +60,11 @@ const (
 // than a parameter because every caller in this package uses the
 // same limit.
 func nextDelay(d time.Duration) time.Duration {
-	next := d * 2
-	if next > maxReconnectDelay {
-		next = maxReconnectDelay
-	}
+	next := min(d*2, maxReconnectDelay) //nolint:mnd
 	var b [8]byte
 	_, _ = rand.Read(b[:])
-	jitterMax := uint64(next / jitterDivisor)
+	// next is a time.Duration, which is always < math.MaxInt64, so conversion is safe and positive
+	jitterMax := uint64(next / jitterDivisor) //nolint:gosec
 	jitterN := binary.BigEndian.Uint64(b[:]) % jitterMax
 	//nolint:gosec // G115: jitterMax < maxReconnectDelay (5s) < math.MaxInt64, conversion is safe
 	return next + time.Duration(jitterN)

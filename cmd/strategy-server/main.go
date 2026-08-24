@@ -145,13 +145,11 @@ func main() {
 	pricesDaemon := streams.New(streams.Config{ReconnectDelay: *reconnectDelay})
 	errCh := make(chan error, 2) //nolint:mnd
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := pricesDaemon.Run(ctx, pricesHandler.Stream); err != nil && !errors.Is(err, context.Canceled) {
 			errCh <- err
 		}
-	}()
+	})
 
 	// Start the live trade stream for copy-trading runs.
 	tradeStream := streams.NewTradeStream()
@@ -168,13 +166,11 @@ func main() {
 					openBooks = append(openBooks, uuid.MustParse(ob.ID))
 				}
 			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				if err := tradeStream.Start(ctx, *wsURL, *apiKey, openBooks); err != nil && !errors.Is(err, context.Canceled) {
 					errCh <- err
 				}
-			}()
+			})
 		}
 	}
 
@@ -190,11 +186,9 @@ func main() {
 		)
 		notifier = bus
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			retentionLoop(ctx, bus, log)
-		}()
+		})
 	}
 	runStore := strategyhttp.NewPGRunStore(pool)
 

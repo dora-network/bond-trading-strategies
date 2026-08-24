@@ -1140,14 +1140,8 @@ func (h *Handler) listBacktests(w http.ResponseWriter, r *http.Request) {
 	}
 
 	total := len(items)
-	start := (page - 1) * limit
-	if start > total {
-		start = total
-	}
-	end := start + limit
-	if end > total {
-		end = total
-	}
+	start := min((page-1)*limit, total)
+	end := min(start+limit, total)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items[start:end],
@@ -1397,10 +1391,7 @@ func parsePagination(r *http.Request) (page, limit int) {
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if val, err := strconv.Atoi(l); err == nil && val > 0 {
-			limit = val
-			if limit > maxPaginationLimit {
-				limit = maxPaginationLimit
-			}
+			limit = min(val, maxPaginationLimit)
 		}
 	}
 	return page, limit

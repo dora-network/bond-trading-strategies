@@ -1886,10 +1886,7 @@ func paginateInserts[T any](items []T, page, limit int) []T {
 	if start >= len(items) {
 		return []T{}
 	}
-	end := start + limit
-	if end > len(items) {
-		end = len(items)
-	}
+	end := min(start+limit, len(items))
 	return items[start:end]
 }
 
@@ -2301,7 +2298,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 	// Trade records and closed trades are now persisted via the writer
 	// interface, not embedded in the result JSON. Add 15 of each so the
 	// pagination assertions below have something to page through.
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		require.NoError(t, store.WriteTradeRecord(context.Background(), stats.TradeRecordInsert{
 			BacktestID: backtestID,
 			BondID:     fmt.Sprintf("bond-%d", i),
@@ -2452,7 +2449,6 @@ func TestHandlerCopyTradingBacktestInitialBalance(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rec := performJSONRequest(t, newHandler(), "/v1/backtests", buildBody(tc.initial))

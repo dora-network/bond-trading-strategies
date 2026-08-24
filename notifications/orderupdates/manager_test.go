@@ -106,8 +106,7 @@ func TestManager_PublishesForwardedEvent(t *testing.T) {
 	stream := &fakeStream{batches: [][]byte{msg}}
 	notifier := newFakeNotifier()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := orderupdates.NewManager(ctx, notifier, lookup,
 		[]string{"mean_reversion"}, stream,
@@ -138,8 +137,7 @@ func TestManager_DropsUnknownRun(t *testing.T) {
 	stream := &fakeStream{batches: [][]byte{msg}}
 	notifier := newFakeNotifier()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := orderupdates.NewManager(ctx, notifier, lookup,
 		[]string{"mean_reversion"}, stream,
@@ -168,8 +166,7 @@ func TestManager_RefCount_GraceBeforeTearDown(t *testing.T) {
 	}}
 	notifier := newFakeNotifier()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m := orderupdates.NewManager(ctx, notifier, lookup,
 		[]string{"mean_reversion"}, stream,

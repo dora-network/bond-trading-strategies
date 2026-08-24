@@ -58,7 +58,7 @@ func TestHub_DropsForSlowSubscriber(t *testing.T) {
 	sub, _ := h.Subscribe(context.Background(), "user-1")
 	defer sub.Close()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		h.Broadcast(notifications.Event{ID: string(rune('a' + i)), Type: notifications.EventRunStarted, UserID: "user-1"})
 	}
 	// At least one event must be delivered; with buffer=2 the rest are

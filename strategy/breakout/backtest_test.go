@@ -35,11 +35,11 @@ func TestBacktest_SingleBreakoutTrade(t *testing.T) {
 	const flatAt100 = 30
 	const risingTail = 10
 	obs := make([]types.YieldObservation, 0, flatAt100+1+risingTail)
-	for i := 0; i < flatAt100; i++ {
+	for i := range flatAt100 {
 		obs = append(obs, flatObs(i, 100))
 	}
 	obs = append(obs, flatObs(flatAt100, 110))
-	for i := 0; i < risingTail; i++ {
+	for i := range risingTail {
 		// 110, 111, 112, ..., 119
 		obs = append(obs, flatObs(flatAt100+1+i, 110+int64(i)+1))
 	}
@@ -106,7 +106,7 @@ func TestBacktest_ReversalClosesOpenPosition(t *testing.T) {
 		obs = append(obs, flatObs(i, 100))
 	}
 	obs = append(obs, flatObs(cfg.LongVolWindow, 110)) // BUY
-	for i := 0; i < flatTail; i++ {
+	for i := range flatTail {
 		obs = append(obs, flatObs(cfg.LongVolWindow+1+i, 110))
 	}
 	obs = append(obs, flatObs(cfg.LongVolWindow+1+flatTail, 90)) // SELL

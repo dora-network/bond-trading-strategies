@@ -131,10 +131,7 @@ func decodeEvent(data []byte) (Event, error) {
 const jitterDivisor = 5
 
 func nextDelay(d, max time.Duration) time.Duration {
-	next := d * 2
-	if next > max {
-		next = max
-	}
+	next := min(d*2, max) //nolint:mnd
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	jitterMax := uint64(next / jitterDivisor) //nolint:gosec // next is bounded by max (5s); safe

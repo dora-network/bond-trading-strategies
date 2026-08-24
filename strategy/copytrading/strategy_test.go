@@ -123,7 +123,6 @@ func TestInverseLeverage(t *testing.T) {
 		{name: "leverage 0.5 → 1 (degenerate, only leverage>1 triggers division)", leverage: decimal.MustParse("0.5"), want: "1"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			inverse := decimal.One
@@ -159,7 +158,6 @@ func TestBalanceAssetFor(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := balanceAssetFor(tt.side, tt.current, bond, usd)
@@ -253,7 +251,6 @@ func TestAvailableBalanceFor(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var got decimal.Decimal
@@ -287,8 +284,8 @@ func TestRunLoop_PauseSuppressesTradeHandling(t *testing.T) {
 	client.portfolio = &doraclient.AccountPortfolioV2{
 		Accounts: map[string]map[string]doraclient.AccountV2{
 			"isolated-bond": {
-				bondID.String(): {AssetId: bondID.String(), IsGlobal: boolPtr(false), Available: "1000"},
-				usdID:           {AssetId: usdID, IsGlobal: boolPtr(false), Available: "10000"},
+				bondID.String(): {AssetId: bondID.String(), IsGlobal: new(false), Available: "1000"},
+				usdID:           {AssetId: usdID, IsGlobal: new(false), Available: "10000"},
 			},
 		},
 	}
@@ -408,10 +405,6 @@ func (f *fakeMarketAPI) createMarketOrderCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.createMarketOrderCalls
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }
 
 func TestProperty_PositionLogic(t *testing.T) {
