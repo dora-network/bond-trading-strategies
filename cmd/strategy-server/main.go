@@ -26,6 +26,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
 	"github.com/dora-network/bond-trading-strategies/strategy/twap"
 	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
@@ -207,7 +208,14 @@ func main() {
 			ctx,
 			notifier,
 			lookup,
-			[]string{meanreversion.StrategyType, copytrading.StrategyType, breakout.StrategyType, twap.StrategyType, vwap.StrategyType},
+			[]string{
+				meanreversion.StrategyType,
+				copytrading.StrategyType,
+				breakout.StrategyType,
+				momentum.StrategyType,
+				twap.StrategyType,
+				vwap.StrategyType,
+			},
 			orderupdates.NewStream(*wsURL, log),
 			orderupdates.WithLogger(log),
 		)

@@ -147,7 +147,7 @@ func TestHandlerListsStrategies(t *testing.T) {
 		Items []strategyhttp.StrategySummary `json:"items"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp.Items, 5)
+	require.Len(t, resp.Items, 6)
 	byType := map[string]strategyhttp.StrategySummary{}
 	for _, it := range resp.Items {
 		byType[it.Type] = it
