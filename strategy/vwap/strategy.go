@@ -223,10 +223,7 @@ func (s *Strategy) dispatchLoop(
 		if timer != nil {
 			timer.Stop()
 		}
-		wait := time.Until(scheduledTime(nextBucket))
-		if wait < 0 {
-			wait = 0
-		}
+		wait := max(time.Until(scheduledTime(nextBucket)), 0)
 		timer = time.NewTimer(wait)
 	}
 	resetTimer()

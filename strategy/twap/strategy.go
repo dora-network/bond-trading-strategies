@@ -234,10 +234,7 @@ func (s *Strategy) dispatchLoop(
 		if timer != nil {
 			timer.Stop()
 		}
-		wait := time.Until(scheduledTime(chunksProcessed))
-		if wait < 0 {
-			wait = 0
-		}
+		wait := max(time.Until(scheduledTime(chunksProcessed)), 0)
 		timer = time.NewTimer(wait)
 	}
 	resetTimer()

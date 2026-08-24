@@ -194,7 +194,6 @@ func TestResumePersistedRun_WiresAllThreeFindings(t *testing.T) {
 	)
 
 	for _, strategyType := range []string{"twap", "vwap"} {
-		strategyType := strategyType
 		t.Run(strategyType, func(t *testing.T) {
 			t.Parallel()
 
