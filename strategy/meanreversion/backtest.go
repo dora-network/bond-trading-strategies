@@ -49,8 +49,8 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 	var (
 		closedTrades []ClosedTrade
 		tradeRecords []TradeRecord
-		openTrade    *TradeRecord   // nil when flat
-		lastDecision types.Decision // last strategy decision, used for force-close z-score
+		openTrade    *TradeRecord // nil when flat
+		lastDecision Decision     // last strategy decision, used for force-close z-score
 	)
 
 	// Effective capital mirrors the live cappedOrderQuantity calculation:
@@ -83,13 +83,13 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 				if shouldExit, exitReason := b.strategy.ShouldExit(openTrade.Signal, decision.ZScore); shouldExit {
 					// Compute exit quantity and update remaining balance.
 					exitQty := openTrade.Quantity
-					exitPrice := decision.Price
+					exitPrice := decision.Price()
 
 					// Record the exit trade event (use the open trade's signal so the
 					// exit record carries the original direction, not the HOLD signal
 					// generated once the spread has reverted).
 					tradeRecords = append(tradeRecords, TradeRecord{
-						Time:         decision.Time,
+						Time:         decision.Time(),
 						BondID:       openTrade.BondID,
 						Signal:       openTrade.Signal,
 						Spread:       decision.Spread,
@@ -127,9 +127,9 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 					ct := ClosedTrade{
 						BondID:       openTrade.BondID,
 						OpenTime:     openTrade.Time,
-						CloseTime:    decision.Time,
+						CloseTime:    decision.Time(),
 						Signal:       openTrade.Signal,
-						ExitSignal:   decision.Signal,
+						ExitSignal:   decision.Signal(),
 						EntrySpread:  openTrade.Spread,
 						ExitSpread:   decision.Spread,
 						EntryZScore:  openTrade.ZScore,
@@ -154,9 +154,9 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 			}
 
 			// No open position - check for a new entry signal.
-			if decision.Signal != types.SignalHold {
-				entryPrice := decision.Price
-				budget, err := remainingBalance.Mul(decision.PositionSize)
+			if decision.Signal() != types.SignalHold {
+				entryPrice := decision.Price()
+				budget, err := remainingBalance.Mul(decision.PositionSize())
 				if err != nil {
 					return BacktestResult{}, err
 				}
@@ -176,11 +176,11 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 				// any cash-flow adjustment, so the PnL of the closed trade
 				// matches the actual return on the deployed capital.
 				tradeRecords = append(tradeRecords, TradeRecord{
-					Time:         decision.Time,
-					BondID:       decision.BondID,
-					Signal:       decision.Signal,
+					Time:         decision.Time(),
+					BondID:       decision.BondID(),
+					Signal:       decision.Signal(),
 					Spread:       decision.Spread,
-					PositionSize: decision.PositionSize,
+					PositionSize: decision.PositionSize(),
 					ZScore:       decision.ZScore,
 					Price:        entryPrice,
 					Quantity:     qty,
@@ -195,7 +195,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 				if err != nil {
 					return BacktestResult{}, err
 				}
-				switch decision.Signal {
+				switch decision.Signal() {
 				case types.SignalBuy:
 					// We spend cashFlow to buy bonds.
 					remainingBalance, err = remainingBalance.Sub(cashFlow)
@@ -219,7 +219,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		if err != nil {
 			return BacktestResult{}, err
 		}
-		exitPrice := lastDecision.Price
+		exitPrice := lastDecision.Price()
 		exitQty := openTrade.Quantity
 
 		// Update remaining balance on force-close.
@@ -262,7 +262,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 			OpenTime:     openTrade.Time,
 			CloseTime:    last.Time,
 			Signal:       openTrade.Signal,
-			ExitSignal:   lastDecision.Signal,
+			ExitSignal:   lastDecision.Signal(),
 			EntrySpread:  openTrade.Spread,
 			ExitSpread:   lastSpread,
 			EntryZScore:  openTrade.ZScore,

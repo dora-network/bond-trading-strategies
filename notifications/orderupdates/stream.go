@@ -235,10 +235,7 @@ func (s *Stream) sleep(ctx context.Context, d time.Duration) bool {
 }
 
 func nextDelay(current, max time.Duration) time.Duration {
-	b := current * 2
-	if b > max {
-		b = max
-	}
+	b := min(current*2, max) //nolint:mnd
 	var buf [1]byte
 	if _, err := cryptorand.Read(buf[:]); err != nil {
 		return b

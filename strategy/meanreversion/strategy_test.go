@@ -164,7 +164,7 @@ func TestStrategy_HoldBeforeWindowFull(t *testing.T) {
 	for i := range cfg.LookbackWindow - 1 {
 		d, err := s.Update(obs(i, decimal.MustNew(55, 3), decimal.MustNew(5, 2)))
 		require.NoError(t, err)
-		assert.Equal(t, types.SignalHold, d.Signal,
+		assert.Equal(t, types.SignalHold, d.Signal(),
 			"should be HOLD before window is full (step %d)", i)
 	}
 }
@@ -197,8 +197,8 @@ func TestStrategy_BuySignalOnWideSpread(t *testing.T) {
 
 	d, err := s2.Update(obs(10, decimal.MustNew(1, 1), decimal.MustNew(5, 2)))
 	require.NoError(t, err)
-	assert.Equal(t, types.SignalBuy, d.Signal)
-	assert.True(t, d.PositionSize.IsPos())
+	assert.Equal(t, types.SignalBuy, d.Signal())
+	assert.True(t, d.PositionSize().IsPos())
 	assert.True(t, d.ZScore.Cmp(cfg2.EntryZScore) > 0)
 }
 
@@ -222,7 +222,7 @@ func TestStrategy_SellSignalOnTightSpread(t *testing.T) {
 
 	d, err := s.Update(obs(10, decimal.MustNew(2, 2), decimal.MustNew(5, 2)))
 	require.NoError(t, err)
-	assert.Equal(t, types.SignalSell, d.Signal)
+	assert.Equal(t, types.SignalSell, d.Signal())
 	assert.True(t, d.ZScore.Cmp(cfg.EntryZScore.Neg()) < 0)
 }
 
@@ -246,7 +246,7 @@ func TestStrategy_HoldWithinNeutralBand(t *testing.T) {
 
 	d, err := s.Update(obs(10, decimal.MustNew(61, 3), decimal.MustNew(5, 2)))
 	require.NoError(t, err)
-	assert.Equal(t, types.SignalHold, d.Signal)
+	assert.Equal(t, types.SignalHold, d.Signal())
 }
 
 func TestStrategy_ShouldExit_ProfitTake(t *testing.T) {
@@ -546,7 +546,7 @@ func TestRunLoop_NoNewEntryWhenPositionOpen(t *testing.T) {
 	// - 5 entry-signal ticks at 8 % YTM: z ≈ (8-5)/1 = 3 >> entry (2.0),
 	//   so Update returns SignalBuy. The position guard must suppress the order.
 	var priceUpdates []map[uuid.UUID]prices.AssetPrice
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		var ytm decimal.Decimal
 		if i%2 == 0 {
 			ytm = decimal.MustNew(4, 2)
@@ -624,7 +624,7 @@ func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
 	// - 5 reversion ticks at 4 % YTM: z ≈ (4-7)/1 = -3 ≤ ExitZScore (0.5)
 	//   for a Buy position → ShouldExit returns true → closePosition is called.
 	var priceUpdates []map[uuid.UUID]prices.AssetPrice
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		var ytm decimal.Decimal
 		if i%2 == 0 {
 			ytm = decimal.MustNew(6, 2)
@@ -702,7 +702,7 @@ func TestRunLoop_NoNewEntryWhenQuantityZero(t *testing.T) {
 	// Price of the bond is high, e.g., $100, which is greater than budget ($1).
 	// So capped quantity will be floor(1 * PositionSize / 100) = 0.
 	var priceUpdates []map[uuid.UUID]prices.AssetPrice
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		var ytm decimal.Decimal
 		if i%2 == 0 {
 			ytm = decimal.MustNew(4, 2)
@@ -790,7 +790,7 @@ func TestRunLoop_SelfHealsWhenPositionDoesNotExistOnExchange(t *testing.T) {
 	// - 10 window-fill ticks: alternating 6% / 8% YTM: mean = 7%
 	// - Then price ticks showing 4% YTM -> triggers ExitZScore -> ShouldExit returns true
 	var priceUpdates []map[uuid.UUID]prices.AssetPrice
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		var ytm decimal.Decimal
 		if i%2 == 0 {
 			ytm = decimal.MustNew(6, 2)

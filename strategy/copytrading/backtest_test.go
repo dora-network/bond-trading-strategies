@@ -470,7 +470,7 @@ func TestSimulate_MultiPageStream(t *testing.T) {
 	// all 300 trades across the page boundary without dropping or
 	// reordering.
 	var trades []Trade
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		side := "buy"
 		if i%2 == 1 {
 			side = "sell"

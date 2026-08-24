@@ -147,36 +147,67 @@ func TestHandlerListsStrategies(t *testing.T) {
 		Items []strategyhttp.StrategySummary `json:"items"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp.Items, 2)
-	assert.Equal(t, "copytrading", resp.Items[0].Type)
-	assert.Equal(t, "available", resp.Items[0].Status)
-	require.Len(t, resp.Items[0].ConfigFields, 7)
-	assert.Equal(t, "followed_trader", resp.Items[0].ConfigFields[0].Name)
-	assert.Equal(t, "initial_balance", resp.Items[0].ConfigFields[6].Name)
-	assert.Equal(t, "number", resp.Items[0].ConfigFields[6].Type)
-	assert.False(t, resp.Items[0].ConfigFields[6].Required)
-	assert.True(t, resp.Items[0].ConfigFields[0].Required)
-	assert.Equal(t, "percentage_of_available", resp.Items[0].ConfigFields[1].Name)
-	assert.Equal(t, "number", resp.Items[0].ConfigFields[1].Type)
-	assert.True(t, resp.Items[0].ConfigFields[1].Required)
-	assert.Equal(t, "leverage", resp.Items[0].ConfigFields[2].Name)
-	assert.Equal(t, "number", resp.Items[0].ConfigFields[2].Type)
-	assert.True(t, resp.Items[0].ConfigFields[2].Required)
-	assert.Equal(t, "min_order_size", resp.Items[0].ConfigFields[3].Name)
-	assert.False(t, resp.Items[0].ConfigFields[3].Required)
-	assert.Equal(t, "max_order_size", resp.Items[0].ConfigFields[4].Name)
-	assert.False(t, resp.Items[0].ConfigFields[4].Required)
-	assert.Equal(t, "disallowed_bonds", resp.Items[0].ConfigFields[5].Name)
-	assert.False(t, resp.Items[0].ConfigFields[5].Required)
-	assert.Equal(t, "mean_reversion", resp.Items[1].Type)
-	assert.Equal(t, "available", resp.Items[1].Status)
-	require.Len(t, resp.Items[1].ConfigFields, 10)
-	assert.Equal(t, "lookback_window", resp.Items[1].ConfigFields[0].Name)
-	assert.Equal(t, float64(20), resp.Items[1].ConfigFields[0].Default)
-	assert.Equal(t, "order_book_id", resp.Items[1].ConfigFields[6].Name)
-	assert.Equal(t, "tenor", resp.Items[1].ConfigFields[7].Name)
-	assert.Equal(t, float64(1), resp.Items[1].ConfigFields[8].Default)
-	assert.Equal(t, float64(1), resp.Items[1].ConfigFields[9].Default)
+	require.Len(t, resp.Items, 3)
+	byType := map[string]strategyhttp.StrategySummary{}
+	for _, it := range resp.Items {
+		byType[it.Type] = it
+		t.Logf("got strategy type=%q status=%q fields=%d", it.Type, it.Status, len(it.ConfigFields))
+	}
+	t.Logf("raw body: %s", rec.Body.String())
+
+	breakout, ok := byType["breakout"]
+	require.True(t, ok, "breakout should be in the strategies list")
+	assert.Equal(t, "available", breakout.Status)
+	require.Len(t, breakout.ConfigFields, 14)
+	assert.Equal(t, "short_vol_window", breakout.ConfigFields[0].Name)
+	assert.Equal(t, "long_vol_window", breakout.ConfigFields[1].Name)
+	assert.Equal(t, "compression_threshold", breakout.ConfigFields[2].Name)
+	assert.Equal(t, "atr_window", breakout.ConfigFields[3].Name)
+	assert.Equal(t, "breakout_atr_multiple", breakout.ConfigFields[4].Name)
+	assert.Equal(t, "confirmation_bars", breakout.ConfigFields[5].Name)
+	assert.Equal(t, "stop_loss_atr", breakout.ConfigFields[6].Name)
+	assert.Equal(t, "take_profit_atr", breakout.ConfigFields[7].Name)
+	assert.Equal(t, "min_long_vol_floor", breakout.ConfigFields[8].Name)
+	assert.Equal(t, "obv_trend_threshold", breakout.ConfigFields[9].Name)
+	assert.Equal(t, "obv_window", breakout.ConfigFields[10].Name)
+	assert.Equal(t, "order_book_id", breakout.ConfigFields[11].Name)
+	assert.Equal(t, "initial_balance", breakout.ConfigFields[12].Name)
+	assert.Equal(t, "leverage", breakout.ConfigFields[13].Name)
+	assert.True(t, breakout.SupportsRun)
+	assert.True(t, breakout.SupportsBacktest)
+
+	copytrading, ok := byType["copytrading"]
+	require.True(t, ok, "copytrading should be in the strategies list")
+	assert.Equal(t, "available", copytrading.Status)
+	require.Len(t, copytrading.ConfigFields, 7)
+	assert.Equal(t, "followed_trader", copytrading.ConfigFields[0].Name)
+	assert.Equal(t, "initial_balance", copytrading.ConfigFields[6].Name)
+	assert.Equal(t, "number", copytrading.ConfigFields[6].Type)
+	assert.False(t, copytrading.ConfigFields[6].Required)
+	assert.True(t, copytrading.ConfigFields[0].Required)
+	assert.Equal(t, "percentage_of_available", copytrading.ConfigFields[1].Name)
+	assert.Equal(t, "number", copytrading.ConfigFields[1].Type)
+	assert.True(t, copytrading.ConfigFields[1].Required)
+	assert.Equal(t, "leverage", copytrading.ConfigFields[2].Name)
+	assert.Equal(t, "number", copytrading.ConfigFields[2].Type)
+	assert.True(t, copytrading.ConfigFields[2].Required)
+	assert.Equal(t, "min_order_size", copytrading.ConfigFields[3].Name)
+	assert.False(t, copytrading.ConfigFields[3].Required)
+	assert.Equal(t, "max_order_size", copytrading.ConfigFields[4].Name)
+	assert.False(t, copytrading.ConfigFields[4].Required)
+	assert.Equal(t, "disallowed_bonds", copytrading.ConfigFields[5].Name)
+	assert.False(t, copytrading.ConfigFields[5].Required)
+
+	mr, ok := byType["mean_reversion"]
+	require.True(t, ok, "mean_reversion should be in the strategies list")
+	assert.Equal(t, "available", mr.Status)
+	require.Len(t, mr.ConfigFields, 10)
+	assert.Equal(t, "lookback_window", mr.ConfigFields[0].Name)
+	assert.Equal(t, float64(20), mr.ConfigFields[0].Default)
+	assert.Equal(t, "order_book_id", mr.ConfigFields[6].Name)
+	assert.Equal(t, "tenor", mr.ConfigFields[7].Name)
+	assert.Equal(t, float64(1), mr.ConfigFields[8].Default)
+	assert.Equal(t, float64(1), mr.ConfigFields[9].Default)
 }
 
 func TestHandlerListsTenors(t *testing.T) {
@@ -1855,10 +1886,7 @@ func paginateInserts[T any](items []T, page, limit int) []T {
 	if start >= len(items) {
 		return []T{}
 	}
-	end := start + limit
-	if end > len(items) {
-		end = len(items)
-	}
+	end := min(start+limit, len(items))
 	return items[start:end]
 }
 
@@ -1878,6 +1906,18 @@ func tradeRecordInsertToResponse(strategyType string, r stats.TradeRecordInsert)
 		}
 		if r.TradeID != uuid.Nil {
 			rec.TradeID = r.TradeID.String()
+		}
+		return json.Marshal(rec)
+	case "breakout":
+		rec := strategyhttp.BreakoutTradeRecord{
+			Time:             r.Time,
+			BondID:           bondID,
+			Signal:           r.Signal,
+			Price:            r.Price.String(),
+			Quantity:         r.Quantity.String(),
+			PositionSize:     r.PositionSize.String(),
+			CompressionRatio: r.CompressionRatio.String(),
+			EntryATR:         r.EntryATR.String(),
 		}
 		return json.Marshal(rec)
 	default:
@@ -1917,6 +1957,23 @@ func closedTradeInsertToResponse(strategyType string, r stats.ClosedTradeInsert)
 		}
 		if r.CloseTradeID != uuid.Nil {
 			ct.CloseTradeID = r.CloseTradeID.String()
+		}
+		return json.Marshal(ct)
+	case "breakout":
+		ct := strategyhttp.BreakoutClosedTrade{
+			BondID:                bondID,
+			OpenTime:              r.OpenTime,
+			CloseTime:             r.CloseTime,
+			Signal:                r.OpenSignal,
+			ExitSignal:            r.CloseSignal,
+			EntryPrice:            r.EntryPrice.String(),
+			ExitPrice:             r.ExitPrice.String(),
+			Quantity:              r.Quantity.String(),
+			PositionSize:          r.PositionSize.String(),
+			PnL:                   r.PnL.String(),
+			ExitReason:            r.ExitReason,
+			EntryCompressionRatio: r.EntryCompressionRatio.String(),
+			ExitCompressionRatio:  r.ExitCompressionRatio.String(),
 		}
 		return json.Marshal(ct)
 	default:
@@ -2241,7 +2298,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 	// Trade records and closed trades are now persisted via the writer
 	// interface, not embedded in the result JSON. Add 15 of each so the
 	// pagination assertions below have something to page through.
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		require.NoError(t, store.WriteTradeRecord(context.Background(), stats.TradeRecordInsert{
 			BacktestID: backtestID,
 			BondID:     fmt.Sprintf("bond-%d", i),
@@ -2392,7 +2449,6 @@ func TestHandlerCopyTradingBacktestInitialBalance(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rec := performJSONRequest(t, newHandler(), "/v1/backtests", buildBody(tc.initial))

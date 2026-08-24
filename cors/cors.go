@@ -26,7 +26,7 @@ import (
 func New(origins string) func(http.Handler) http.Handler {
 	allowed := make(map[string]bool)
 	allowAll := false
-	for _, o := range strings.Split(origins, ",") {
+	for o := range strings.SplitSeq(origins, ",") {
 		o = strings.TrimSpace(o)
 		if o == "" {
 			continue
@@ -92,7 +92,7 @@ func New(origins string) func(http.Handler) http.Handler {
 // any sequence of non-"/" characters — origin hosts never contain
 // "/", so this is the expected behaviour.
 func OriginPatterns(origins string) (patterns []string, allowAll bool) {
-	for _, o := range strings.Split(origins, ",") {
+	for o := range strings.SplitSeq(origins, ",") {
 		o = strings.TrimSpace(o)
 		if o == "" {
 			continue

@@ -122,8 +122,7 @@ func TestHandler_FiltersByTypes(t *testing.T) {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	// Use a long-lived background context for the live session so that
 	// short read timeouts do not cancel the server's request context.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	filtered := notifications.Event{
 		ID:        uuid.NewString(),

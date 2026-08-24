@@ -326,8 +326,7 @@ func TestService_PauseStrategy(t *testing.T) {
 	})
 
 	t.Run("should pause the strategy and return nil", func(t *testing.T) {
-		startCtx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		startCtx := t.Context()
 		id, err := svc.RunStrategy(startCtx, myStrategy)
 		require.NoError(t, err)
 		assert.True(t, strategy.RunExists(svc, id))
@@ -393,8 +392,7 @@ func TestService_ResumeStrategy(t *testing.T) {
 	})
 
 	t.Run("should resume the strategy and return nil", func(t *testing.T) {
-		startCtx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		startCtx := t.Context()
 		id, err := svc.RunStrategy(startCtx, myStrategy)
 		require.NoError(t, err)
 		assert.True(t, strategy.RunExists(svc, id))

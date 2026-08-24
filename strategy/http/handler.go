@@ -17,6 +17,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
@@ -73,16 +74,18 @@ type Handler struct {
 	// the endpoint can be deployed without wiring a reader until the
 	// operator opts in. Distinct from decisionStore (the write-side
 	// DecisionRecorder) so the read path carries no write concerns.
-	decisionReader DecisionReader
-	tradeStream    *streams.TradeStream
-	notifier       notifications.Notifier
-	orderUpdates   orderUpdatesManager // nil disables the order-update feature
-	encryptionKey  []byte              // 32-byte AES-256 key for encrypting API keys at rest
-	mux            *http.ServeMux
-	authedMux      http.Handler
-	mu             sync.RWMutex
-	backtests      map[uuid.UUID]*BacktestDetail
-	runs           map[uuid.UUID]*RunDetail
+	decisionReader       DecisionReader
+	tradeStream          *streams.TradeStream
+	historicalPriceStore breakout.HistoricalPriceStore
+	tradeHistoryStore    breakout.TradeHistoryStore
+	notifier             notifications.Notifier
+	orderUpdates         orderUpdatesManager // nil disables the order-update feature
+	encryptionKey        []byte              // 32-byte AES-256 key for encrypting API keys at rest
+	mux                  *http.ServeMux
+	authedMux            http.Handler
+	mu                   sync.RWMutex
+	backtests            map[uuid.UUID]*BacktestDetail
+	runs                 map[uuid.UUID]*RunDetail
 	// runningStrategies maps a live run id to the strategy instance that
 	// was started for it, so the stop-loss observer can query the
 	// strategy's recorded trigger. Populated in createRun and
@@ -487,7 +490,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		h.log = slog.Default()
 	}
 	if h.strategies == nil {
-		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.log)
+		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.historicalPriceStore, h.tradeHistoryStore, h.log)
 	}
 
 	h.mux = http.NewServeMux()
@@ -579,6 +582,26 @@ func WithTradesHistoryStore(store *copytrading.PGTradesHistoryStore) func(*Handl
 func WithTradeStream(ts *streams.TradeStream) func(*Handler) {
 	return func(h *Handler) {
 		h.tradeStream = ts
+	}
+}
+
+// WithHistoricalPriceStore wires a breakout backtest data source so
+// Strategy.Backtest can read candles_history. May be nil; the
+// breakout strategy returns an error from Backtest when no store is
+// configured.
+func WithHistoricalPriceStore(s breakout.HistoricalPriceStore) func(*Handler) {
+	return func(h *Handler) {
+		h.historicalPriceStore = s
+	}
+}
+
+// WithTradeHistoryStore wires a breakout backtest trade source so the
+// OBV (On-Balance Volume) filter can be evaluated in backtests when
+// OBVWindow > 0. Reads from trades_history. May be nil; the backtester
+// simply skips OBV accumulation when no store is configured.
+func WithTradeHistoryStore(s breakout.TradeHistoryStore) func(*Handler) {
+	return func(h *Handler) {
+		h.tradeHistoryStore = s
 	}
 }
 
@@ -912,7 +935,11 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	info, _ := authctx.AuthInfoFromContext(r.Context())
 	if info != nil && info.APIKey != "" {
 		if withClient, ok := strat.(*meanreversion.Strategy); ok {
-			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))
+			withClientOpts := meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))
+			withClientOpts(withClient)
+		}
+		if withClient, ok := strat.(*breakout.Strategy); ok {
+			withClientOpts := breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))
 			withClientOpts(withClient)
 		}
 	}
@@ -998,6 +1025,18 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 	case copytrading.BacktestResult:
 		detail.Status = "completed"
 		raw, err := newCopyTradingBacktestResult(r)
+		if err != nil {
+			detail.Status = "failed"
+			detail.Error = err.Error()
+			evtType = notifications.EventBacktestFailed
+			evtErr = err.Error()
+			break
+		}
+		detail.Result = raw
+		evtType = notifications.EventBacktestCompleted
+	case breakout.BacktestResult:
+		detail.Status = "completed"
+		raw, err := newBreakoutBacktestResult(r)
 		if err != nil {
 			detail.Status = "failed"
 			detail.Error = err.Error()
@@ -1100,14 +1139,8 @@ func (h *Handler) listBacktests(w http.ResponseWriter, r *http.Request) {
 	}
 
 	total := len(items)
-	start := (page - 1) * limit
-	if start > total {
-		start = total
-	}
-	end := start + limit
-	if end > total {
-		end = total
-	}
+	start := min((page-1)*limit, total)
+	end := min(start+limit, total)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items[start:end],
@@ -1357,10 +1390,7 @@ func parsePagination(r *http.Request) (page, limit int) {
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if val, err := strconv.Atoi(l); err == nil && val > 0 {
-			limit = val
-			if limit > maxPaginationLimit {
-				limit = maxPaginationLimit
-			}
+			limit = min(val, maxPaginationLimit)
 		}
 	}
 	return page, limit
@@ -1515,9 +1545,11 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	if info != nil && info.APIKey != "" {
 		switch withClient := strat.(type) {
 		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))(withClient)
+			meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(info.APIKey))(withClient)
+			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
+		case *breakout.Strategy:
+			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
 		}
 	}
 
@@ -1860,9 +1892,11 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		}
 		switch withClient := strat.(type) {
 		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+			meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+		case *breakout.Strategy:
+			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		}
 	}
 
@@ -1883,6 +1917,8 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 			case *meanreversion.Strategy:
 				s.SetDecisionSeq(maxSeq)
 			case *copytrading.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *breakout.Strategy:
 				s.SetDecisionSeq(maxSeq)
 			}
 		}
@@ -2076,6 +2112,8 @@ func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
 		meanreversion.WithDecisionStore(h.decisionStore)(s)
 	case *copytrading.Strategy:
 		copytrading.WithDecisionStore(h.decisionStore)(s)
+	case *breakout.Strategy:
+		breakout.WithDecisionStore(h.decisionStore)(s)
 	}
 }
 
@@ -2083,11 +2121,14 @@ func defaultStrategies(
 	pricesHandler *prices.Handler,
 	tradesHistoryStore *copytrading.PGTradesHistoryStore,
 	tradeStream *streams.TradeStream,
+	historicalPriceStore breakout.HistoricalPriceStore,
+	tradeHistoryStore breakout.TradeHistoryStore,
 	log *slog.Logger,
 ) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
+		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, tradeHistoryStore, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2281,6 +2322,340 @@ type meanReversionConfigPayload struct {
 	Tenor           string   `json:"tenor,omitempty"`
 	InitialBalance  *float64 `json:"initial_balance,omitempty"`
 	Leverage        *float64 `json:"leverage,omitempty"`
+}
+
+type breakoutConfigPayload struct {
+	ShortVolWindow       int     `json:"short_vol_window"`
+	LongVolWindow        int     `json:"long_vol_window"`
+	CompressionThreshold float64 `json:"compression_threshold"`
+	ATRWindow            int     `json:"atr_window"`
+	BreakoutATRMultiple  float64 `json:"breakout_atr_multiple"`
+	ConfirmationBars     int     `json:"confirmation_bars"`
+	StopLossATR          float64 `json:"stop_loss_atr"`
+	TakeProfitATR        float64 `json:"take_profit_atr"`
+	MinLongVolFloor      float64 `json:"min_long_vol_floor"`
+
+	OBVTrendThreshold float64 `json:"obv_trend_threshold"`
+	OBVWindow         int     `json:"obv_window"`
+	OrderBookID       string  `json:"order_book_id,omitempty"`
+
+	InitialBalance *float64 `json:"initial_balance,omitempty"`
+	Leverage       *float64 `json:"leverage,omitempty"`
+}
+
+//nolint:funlen // strategy definition with 12 config fields
+func newBreakoutDefinition(
+	pricesHandler *prices.Handler,
+	tradeStream *streams.TradeStream,
+	historicalStore breakout.HistoricalPriceStore,
+	tradeHistoryStore breakout.TradeHistoryStore,
+	log *slog.Logger,
+) StrategyDefinition {
+	defaults := breakout.DefaultConfig()
+	return StrategyDefinition{
+		Type:   breakout.StrategyType,
+		Status: strategyStatusAvailable,
+		Description: "Volatility-compression / price-breakout strategy. Enters when short-window price volatility drops below a " +
+			"threshold of long-window volatility, then a close breaks above (or below) a k·ATR trigger band.",
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "short_vol_window",
+				Type:        "integer",
+				Description: "Short-window price-volatility observation count. Must be at least 2.",
+				Required:    false,
+				Default:     defaults.ShortVolWindow,
+			},
+			{
+				Name:        "long_vol_window",
+				Type:        "integer",
+				Description: "Long-window price-volatility observation count. Must be greater than short_vol_window.",
+				Required:    false,
+				Default:     defaults.LongVolWindow,
+			},
+			{
+				Name:        "compression_threshold",
+				Type:        "number",
+				Description: "ShortVol/LongVol ratio below which the strategy arms for a breakout. Must be in (0, 1].",
+				Required:    false,
+				Default:     mustFloat64(defaults.CompressionThreshold),
+			},
+			{
+				Name:        "atr_window",
+				Type:        "integer",
+				Description: "Rolling-mean window for ATR (mean absolute price diff). Must be at least 2.",
+				Required:    false,
+				Default:     defaults.ATRWindow,
+			},
+			{
+				Name:        "breakout_atr_multiple",
+				Type:        "number",
+				Description: "Number of ATR units above/below the most recent close that defines the breakout trigger. Must be non-negative.",
+				Required:    false,
+				Default:     mustFloat64(defaults.BreakoutATRMultiple),
+			},
+			{
+				Name: "confirmation_bars",
+				Type: "integer",
+				Description: "Consecutive closes beyond the trigger band required to fire. " +
+					"Calibrated for a continuously trading bond market (typical 5-30; min 1).",
+				Required: false,
+				Default:  defaults.ConfirmationBars,
+			},
+			{
+				Name:        "stop_loss_atr",
+				Type:        "number",
+				Description: "Stop-loss distance in ATR units. Set to 0 to disable. Mirrored in the live Run loop and the backtester.",
+				Required:    false,
+				Default:     mustFloat64(defaults.StopLossATR),
+			},
+			{
+				Name:        "take_profit_atr",
+				Type:        "number",
+				Description: "Take-profit distance in ATR units from entry. Set to 0 to disable. Mirrored in the live Run loop and the backtester.",
+				Required:    false,
+				Default:     mustFloat64(defaults.TakeProfitATR),
+			},
+			{
+				Name:        "min_long_vol_floor",
+				Type:        "number",
+				Description: "Minimum LongVol required to trade. Set to 0 to disable. Suppresses entries on a completely flat baseline.",
+				Required:    false,
+				Default:     mustFloat64(defaults.MinLongVolFloor),
+			},
+			{
+				Name:        "obv_trend_threshold",
+				Type:        "number",
+				Description: "OBV threshold for the volume confirmation filter. BUY > this, SELL < -this. Default 0 means any non-zero OBV works.",
+				Required:    false,
+				Default:     mustFloat64(defaults.OBVTrendThreshold),
+			},
+			{
+				Name:        "obv_window",
+				Type:        "integer",
+				Description: "Recent trades to include in windowed OBV. 0 = no volume verification. >0 = verify with last N trades.",
+				Required:    false,
+				Default:     defaults.OBVWindow,
+			},
+			{
+				Name:        "order_book_id",
+				Type:        "string(uuid)",
+				Description: "Order book UUID used to locate the traded asset and place orders.",
+				Required:    false,
+			},
+			{
+				Name:        "initial_balance",
+				Type:        "number",
+				Description: "Starting capital for backtests. Omitted for live runs — obtained from DORA positions.",
+				Required:    false,
+				Default:     mustFloat64(defaults.InitialBalance),
+			},
+			{
+				Name:        "leverage",
+				Type:        "number",
+				Description: "Leverage multiplier for live orders. Must be greater than 0.",
+				Required:    false,
+				Default:     mustFloat64(defaults.Leverage),
+			},
+		},
+		SupportsRun:      true,
+		SupportsBacktest: true,
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			forRun := capability == string(capabilityRun)
+			cfg, normalised, err := decodeBreakoutConfig(raw, forRun)
+			if err != nil {
+				return nil, nil, err
+			}
+			opts := []func(*breakout.Strategy){
+				breakout.WithLogger(log),
+			}
+			if tradeWriter != nil {
+				opts = append(opts, breakout.WithBacktestWriter(tradeWriter))
+			}
+			// Wire the live trade stream when the volume filter is active
+			// (OBVWindow > 0); ignored otherwise. tradeStream is always
+			// non-nil at runtime (cmd/strategy-server starts it in main.go).
+			if cfg.OBVWindow > 0 && tradeStream != nil {
+				opts = append(opts, breakout.WithTradeStream(tradeStream))
+			}
+			// Wire the historical price store so Strategy.Backtest can
+			// read candles_history. May be nil if no DB is configured;
+			// Backtest will then return an error.
+			if historicalStore != nil {
+				opts = append(opts, breakout.WithHistoricalStore(historicalStore))
+			}
+			// Wire the historical trade store so the backtester can
+			// compute OBV for the volume confirmation filter. May be
+			// nil if no DB is configured; the backtester simply skips
+			// OBV accumulation when no store is wired.
+			if tradeHistoryStore != nil {
+				opts = append(opts, breakout.WithTradeHistoryStore(tradeHistoryStore))
+			}
+			return normalised, breakout.New(cfg, pricesHandler, opts...), nil
+		},
+	}
+}
+
+//nolint:funlen // config decoding with validation
+func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, json.RawMessage, error) {
+	var payload breakoutConfigPayload
+	if err := decodeRawConfig(raw, &payload); err != nil {
+		return breakout.Config{}, nil, err
+	}
+	defaults := breakout.DefaultConfig()
+
+	// Apply defaults and validate windows.
+	if payload.ShortVolWindow == 0 {
+		payload.ShortVolWindow = defaults.ShortVolWindow
+	}
+	if payload.LongVolWindow == 0 {
+		payload.LongVolWindow = defaults.LongVolWindow
+	}
+	if payload.ATRWindow == 0 {
+		payload.ATRWindow = defaults.ATRWindow
+	}
+	if payload.ConfirmationBars == 0 {
+		payload.ConfirmationBars = defaults.ConfirmationBars
+	}
+	if payload.ShortVolWindow < 2 { //nolint:mnd
+		return breakout.Config{}, nil, fmt.Errorf("config.short_vol_window must be at least 2")
+	}
+	if payload.LongVolWindow <= payload.ShortVolWindow {
+		return breakout.Config{}, nil, fmt.Errorf("config.long_vol_window must be greater than short_vol_window")
+	}
+	if payload.ATRWindow < 2 { //nolint:mnd
+		return breakout.Config{}, nil, fmt.Errorf("config.atr_window must be at least 2")
+	}
+	if payload.ConfirmationBars < 1 {
+		return breakout.Config{}, nil, fmt.Errorf("config.confirmation_bars must be at least 1")
+	}
+
+	// Apply defaults and validate thresholds.
+	if payload.CompressionThreshold == 0 {
+		payload.CompressionThreshold = mustFloat64(defaults.CompressionThreshold)
+	}
+	if payload.BreakoutATRMultiple == 0 {
+		payload.BreakoutATRMultiple = mustFloat64(defaults.BreakoutATRMultiple)
+	}
+	if payload.StopLossATR == 0 {
+		payload.StopLossATR = mustFloat64(defaults.StopLossATR)
+	}
+	if payload.TakeProfitATR == 0 {
+		payload.TakeProfitATR = mustFloat64(defaults.TakeProfitATR)
+	}
+	if payload.MinLongVolFloor == 0 {
+		payload.MinLongVolFloor = mustFloat64(defaults.MinLongVolFloor)
+	}
+	if payload.OBVTrendThreshold == 0 {
+		payload.OBVTrendThreshold = mustFloat64(defaults.OBVTrendThreshold)
+	}
+	if payload.OBVTrendThreshold < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.obv_trend_threshold must be non-negative")
+	}
+	if payload.OBVWindow < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.obv_window must be non-negative")
+	}
+	if payload.CompressionThreshold <= 0 || payload.CompressionThreshold > 1 {
+		return breakout.Config{}, nil, fmt.Errorf("config.compression_threshold must be in (0, 1]")
+	}
+	if payload.BreakoutATRMultiple < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.breakout_atr_multiple must be non-negative")
+	}
+	if payload.StopLossATR < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr must be non-negative")
+	}
+	if payload.TakeProfitATR < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.take_profit_atr must be non-negative")
+	}
+	if payload.MinLongVolFloor < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.min_long_vol_floor must be non-negative")
+	}
+
+	compression, err := decimal.NewFromFloat64(payload.CompressionThreshold)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.compression_threshold: %w", err)
+	}
+	breakoutATR, err := decimal.NewFromFloat64(payload.BreakoutATRMultiple)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.breakout_atr_multiple: %w", err)
+	}
+	stopLoss, err := decimal.NewFromFloat64(payload.StopLossATR)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr: %w", err)
+	}
+	takeProfit, err := decimal.NewFromFloat64(payload.TakeProfitATR)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.take_profit_atr: %w", err)
+	}
+	obvThreshold, err := decimal.NewFromFloat64(payload.OBVTrendThreshold)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.obv_trend_threshold: %w", err)
+	}
+	minFloor, err := decimal.NewFromFloat64(payload.MinLongVolFloor)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.min_long_vol_floor: %w", err)
+	}
+
+	amount := defaults.InitialBalance
+	if payload.InitialBalance != nil {
+		if *payload.InitialBalance < 0 {
+			return breakout.Config{}, nil, fmt.Errorf("config.initial_balance must be non-negative")
+		}
+		if *payload.InitialBalance == 0 {
+			if !forRun {
+				return breakout.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0 for backtests")
+			}
+		} else {
+			amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
+			if err != nil {
+				return breakout.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+			}
+		}
+	}
+
+	leverage := defaults.Leverage
+	if payload.Leverage != nil {
+		if *payload.Leverage <= 0 {
+			return breakout.Config{}, nil, fmt.Errorf("config.leverage must be greater than 0")
+		}
+		leverage, err = decimal.NewFromFloat64(*payload.Leverage)
+		if err != nil {
+			return breakout.Config{}, nil, fmt.Errorf("config.leverage: %w", err)
+		}
+	}
+
+	var orderBookID uuid.UUID
+	if payload.OrderBookID != "" {
+		orderBookID, err = uuid.Parse(strings.TrimSpace(payload.OrderBookID))
+		if err != nil {
+			return breakout.Config{}, nil, fmt.Errorf("config.order_book_id: %w", err)
+		}
+	}
+
+	normalised, err := json.Marshal(payload)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("marshal normalised config: %w", err)
+	}
+
+	return breakout.Config{
+		ShortVolWindow:       payload.ShortVolWindow,
+		LongVolWindow:        payload.LongVolWindow,
+		CompressionThreshold: compression,
+		ATRWindow:            payload.ATRWindow,
+		BreakoutATRMultiple:  breakoutATR,
+		ConfirmationBars:     payload.ConfirmationBars,
+		StopLossATR:          stopLoss,
+		TakeProfitATR:        takeProfit,
+		MinLongVolFloor:      minFloor,
+		OBVTrendThreshold:    obvThreshold,
+		OBVWindow:            payload.OBVWindow,
+		OrderBookID:          orderBookID,
+		InitialBalance:       amount,
+		Leverage:             leverage,
+	}, normalised, nil
 }
 
 //nolint:funlen // config decoding with validation
@@ -2539,6 +2914,25 @@ func newCopyTradingBacktestResult(result copytrading.BacktestResult) (json.RawMe
 	b, err := json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("marshal copytrading backtest result: %w", err)
+	}
+	return b, nil
+}
+
+func newBreakoutBacktestResult(result breakout.BacktestResult) (json.RawMessage, error) {
+	// Per-trade and per-closed-trade rows are persisted to
+	// strategy_backtest_trades and strategy_backtest_closed_trades by the
+	// backtest engine via stats.BacktestTradeWriter. The summary-result
+	// JSON only carries aggregate metrics.
+	out := BreakoutBacktestResult{
+		TotalPnL:    result.TotalPnL.String(),
+		WinCount:    result.WinCount,
+		LossCount:   result.LossCount,
+		MaxDrawdown: result.MaxDrawdown.String(),
+		SharpeRatio: result.SharpeRatio.String(),
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal breakout backtest result: %w", err)
 	}
 	return b, nil
 }

@@ -375,7 +375,7 @@ func TestStoreSubscriber_Start(t *testing.T) {
 			_ = s.Start(ctx)
 		}()
 
-		payload := []byte(fmt.Sprintf(`[
+		payload := fmt.Appendf(nil, `[
 			{
 				"Time": "2026-04-10T15:30:00Z",
 				"Val": {
@@ -388,7 +388,7 @@ func TestStoreSubscriber_Start(t *testing.T) {
 					"volume": "1000"
 				}
 			}
-		]`, "book-123"))
+		]`, "book-123")
 
 		time.Sleep(time.Second)
 		err := h.ProcessMessage(context.Background(), "book-123", payload)

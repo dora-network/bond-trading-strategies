@@ -146,25 +146,21 @@ func main() {
 		ReadTimeout:       30 * time.Second,
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		slog.Info("health server starting", "addr", *httpAddr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second) //nolint:mnd
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
-	}()
+	})
 
 	// Setup and run Prices Stream
 	pricesDaemon := streams.New(streams.Config{
@@ -182,24 +178,19 @@ func main() {
 		}),
 	)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		slog.Info("price stream starting", "ws_url", *wsURL)
 		if err := pricesDaemon.Run(ctx, pricesHandler.Stream); err != nil {
 			errCh <- err
 		}
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
+	wg.Go(func() {
 		slog.Info("price store subscriber starting")
 		if err := pricesStoreSubscriber.Start(ctx); err != nil {
 			errCh <- err
 		}
-	}()
+	})
 
 	// Setup and run Candles Stream for all discovered order books.
 	if len(orderBookIDs) > 0 {
@@ -225,24 +216,19 @@ func main() {
 			ReconnectDelay: *reconnectDelay,
 		})
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			slog.Info("candle store subscriber starting")
 			if err := candlesStoreSubscriber.Start(ctx); err != nil {
 				errCh <- err
 			}
-		}()
+		})
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			slog.Info("candles stream starting", "order_books", orderBookIDs)
 			if err := candlesDaemon.Run(ctx, candlesHandler.Stream); err != nil {
 				errCh <- err
 			}
-		}()
+		})
 	}
 
 	go func() {
