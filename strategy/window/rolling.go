@@ -76,7 +76,10 @@ func (w *Rolling) Add(value decimal.Decimal) error {
 		}
 		w.buf[w.head] = value
 		w.head = (w.head + 1) % w.size
-		w.sum, _ = w.sum.Add(value)
+		w.sum, err = w.sum.Add(value)
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -127,8 +130,14 @@ func (w *Rolling) Add(value decimal.Decimal) error {
 	w.buf[w.head] = value
 	w.head = (w.head + 1) % w.size
 	// Subtract the evicted value, add the new one.
-	w.sum, _ = w.sum.Add(value)
-	w.sum, _ = w.sum.Sub(oldest)
+	w.sum, err = w.sum.Add(value)
+	if err != nil {
+		return err
+	}
+	w.sum, err = w.sum.Sub(oldest)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

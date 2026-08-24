@@ -78,16 +78,8 @@ type Config struct {
 	// not trade (avoids reacting to a completely flat baseline). 0 disables.
 	MinLongVolFloor decimal.Decimal
 
-	// RequireVolumeConfirmation toggles the OBV (On-Balance Volume)
-	// filter. When true, the strategy only emits BUY when the running
-	// OBV is positive (above OBVTrendThreshold) and only SELL when OBV
-	// is negative (below -OBVTrendThreshold). Disabled by default.
-	// Sourced from the live trade stream (see WithTradeStream) for live
-	// runs, or from the historical trade store (see
-	// WithTradeHistoryStore) for backtests.
-
 	// OBVTrendThreshold is the absolute OBV threshold the breakout
-	// signal must clear when OBVWindow &gt; 0. The
+	// signal must clear when OBVWindow > 0. The
 	// direction must match: BUY requires OBV > OBVTrendThreshold, SELL
 	// requires OBV < -OBVTrendThreshold. Default 0 means any non-zero
 	// OBV in the right direction is enough.
@@ -254,8 +246,8 @@ func WithHistoricalStore(store HistoricalPriceStore) func(*Strategy) {
 
 // WithTradeStream injects the live trade stream. When set, the Run
 // loop subscribes to the configured order book and accumulates OBV
-// from the trade events. Required only when
-// RequireVolumeConfirmation is true; otherwise the stream is ignored.
+// from the trade events. Required only when OBVWindow > 0 (windowed
+// volume confirmation); otherwise the stream is ignored.
 func WithTradeStream(ts *streams.TradeStream) func(*Strategy) {
 	return func(s *Strategy) { s.tradeStream = ts }
 }
@@ -268,11 +260,11 @@ func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
 }
 
 // WithTradeHistoryStore injects the historical trade source used by the
-// backtester to accumulate OBV for the RequireVolumeConfirmation filter.
-// The backtester loads trades from the store and interleaves them with
-// the observation stream by timestamp so OBV is correct at every signal
-// point. Required only when RequireVolumeConfirmation is true on a
-// backtest; otherwise the store is ignored.
+// backtester to accumulate OBV for the volume confirmation filter
+// (active when OBVWindow > 0). The backtester loads trades from the
+// store and interleaves them with the observation stream by timestamp
+// so OBV is correct at every signal point. When OBVWindow == 0 the
+// store is ignored.
 func WithTradeHistoryStore(store TradeHistoryStore) func(*Strategy) {
 	return func(s *Strategy) { s.tradeHistoryStore = store }
 }

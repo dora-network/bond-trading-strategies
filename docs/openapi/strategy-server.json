@@ -834,26 +834,26 @@
           "short_vol_window": {
             "type": "integer",
             "minimum": 2,
-            "default": 5,
+            "default": 240,
             "description": "Short-window price-volatility observation count."
           },
           "long_vol_window": {
             "type": "integer",
             "minimum": 3,
-            "default": 60,
+            "default": 1440,
             "description": "Long-window price-volatility observation count. Must be greater than short_vol_window."
           },
           "compression_threshold": {
             "type": "number",
             "exclusiveMinimum": 0,
             "maximum": 1,
-            "default": 0.5,
+            "default": 0.3,
             "description": "ShortVol/LongVol ratio below which the strategy arms for a breakout."
           },
           "atr_window": {
             "type": "integer",
             "minimum": 2,
-            "default": 14,
+            "default": 240,
             "description": "Rolling-mean window for ATR (mean absolute price diff)."
           },
           "breakout_atr_multiple": {
@@ -865,13 +865,13 @@
           "confirmation_bars": {
             "type": "integer",
             "minimum": 1,
-            "default": 2,
+            "default": 5,
             "description": "Number of consecutive closes beyond the trigger band required to fire."
           },
           "stop_loss_atr": {
             "type": "number",
             "minimum": 0,
-            "default": 3.0,
+            "default": 20,
             "description": "Stop-loss distance in ATR units. Mirrored in the live Run loop and the backtester."
           },
           "take_profit_atr": {
@@ -880,16 +880,17 @@
             "default": 0.0,
             "description": "Take-profit distance in ATR units from entry. Set to 0 to disable. Mirrored in the live Run loop and the backtester."
           },
-          "require_volume_confirmation": {
-            "type": "boolean",
-            "default": false,
-            "description": "When true, the live strategy only emits a signal when the running OBV (On-Balance Volume, computed from the live trade stream) confirms the trade direction: BUY requires OBV > obv_trend_threshold, SELL requires OBV < -obv_trend_threshold."
+          "obv_window": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Recent trades to include in windowed OBV (On-Balance Volume). 0 = no volume verification; > 0 verifies signals with the last N trades, sourced from the live trade stream (runs) or trades_history (backtests)."
           },
           "obv_trend_threshold": {
             "type": "number",
             "minimum": 0,
             "default": 0.0,
-            "description": "Absolute OBV threshold the breakout signal must clear when require_volume_confirmation is enabled. Direction-mapped."
+            "description": "Absolute OBV threshold the breakout signal must clear when obv_window > 0. Direction-mapped."
           },
           "min_long_vol_floor": {
             "type": "number",
@@ -901,10 +902,6 @@
             "type": "string",
             "format": "uuid",
             "description": "DORA order book UUID used to locate the traded asset and place orders."
-          },
-          "tenor": {
-            "type": "string",
-            "description": "Tenor label recorded alongside the run. Not used by the signal (breakout is price-only)."
           },
           "initial_balance": {
             "type": "number",

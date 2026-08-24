@@ -43,7 +43,7 @@ func TestApplyTradeEvent_OBVAccumulation(t *testing.T) {
 }
 
 // TestUpdate_OBVFilterSuppressesBuyWhenOBVFlat verifies the signal gate
-// when RequireVolumeConfirmation is on and OBV doesn't confirm the BUY.
+// when OBVWindow > 0 and OBV doesn't confirm the BUY.
 func TestUpdate_OBVFilterSuppressesBuyWhenOBVFlat(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultConfig()

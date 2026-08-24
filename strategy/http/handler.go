@@ -597,9 +597,8 @@ func WithHistoricalPriceStore(s breakout.HistoricalPriceStore) func(*Handler) {
 
 // WithTradeHistoryStore wires a breakout backtest trade source so the
 // OBV (On-Balance Volume) filter can be evaluated in backtests when
-// RequireVolumeConfirmation is true. Reads from trades_history. May be
-// nil; the backtester simply skips OBV accumulation when no store is
-// configured.
+// OBVWindow > 0. Reads from trades_history. May be nil; the backtester
+// simply skips OBV accumulation when no store is configured.
 func WithTradeHistoryStore(s breakout.TradeHistoryStore) func(*Handler) {
 	return func(h *Handler) {
 		h.tradeHistoryStore = s

@@ -46,7 +46,7 @@ func (s *recordingTradeStore) StreamTrades(
 }
 
 // TestBacktest_OBVAccumulatedFromTradeHistory verifies that when
-// RequireVolumeConfirmation is true and a trade history store is
+// OBVWindow > 0 and a trade history store is
 // configured, the backtester ingests trades into the OBV accumulator
 // alongside observations. Also exercises the pending-trade carry-over
 // (a trade between two observations) and verifies trades after the

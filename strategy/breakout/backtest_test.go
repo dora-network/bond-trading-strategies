@@ -66,6 +66,76 @@ func TestBacktest_SingleBreakoutTrade(t *testing.T) {
 	// the flat period; we don't assert the ratio here.
 }
 
+// TestBacktest_ForceCloseCarriesEntryArmedRatio verifies that the
+// force-close exit TradeRecord carries the entry's armed compression
+// ratio. Decision.ArmedCompressionRatio is only populated on signal
+// ticks (and reset after firing), so the final HOLD decision has the
+// zero value — the exit row must source the ratio from the open trade,
+// not from the last decision. Unlike the flat-series tests, the quiet
+// phase here oscillates so the armed ratio is non-zero and the
+// equality assertion is non-vacuous.
+func TestBacktest_ForceCloseCarriesEntryArmedRatio(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 2
+	cfg.StopLossATR = decimal.MustNew(30, 1) // 3.0 — wide, no SL interference
+	s := breakout.New(cfg, nil)
+
+	// 26 ticks alternating 100/110 — violent, fills the long window
+	// with |diffs| of 10. 6 ticks alternating 109/110 — quiet, arms
+	// compression with a non-zero ShortVol/LongVol ratio (~0.11).
+	// 140 then 155 — the trigger is recomputed as prevClose+1.5·ATR
+	// each tick, so the second confirmation close must clear the
+	// raised trigger; 155 > 140+1.5·ATR fires the BUY. 8 rising ticks
+	// — hold, force-close at end of history.
+	obs := make([]types.YieldObservation, 0, 26+6+2+8)
+	for i := range 26 {
+		price := int64(100)
+		if i%2 == 1 {
+			price = 110
+		}
+		obs = append(obs, flatObs(i, price))
+	}
+	for i := range 6 {
+		price := int64(110)
+		if i%2 == 0 {
+			price = 109
+		}
+		obs = append(obs, flatObs(26+i, price))
+	}
+	obs = append(obs, flatObs(32, 140), flatObs(33, 155))
+	for i := range 8 {
+		obs = append(obs, flatObs(34+i, 156+int64(i)))
+	}
+
+	bt := breakout.NewBacktester(s, nil)
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	require.Len(t, res.ClosedTrades, 1, "expected the breakout long to be force-closed")
+	assert.Equal(t, breakout.ExitReasonStrategyExit, res.ClosedTrades[0].ExitReason,
+		"rising tail should hold the position open to end of history")
+	require.Len(t, res.TradeRecords, 2, "entry + force-close exit rows")
+	entry, exit := res.TradeRecords[0], res.TradeRecords[1]
+	assert.True(t, entry.CompressionRatio.IsPos(),
+		"fixture must arm with a non-zero ratio for this test to discriminate; got %s",
+		entry.CompressionRatio)
+	assert.True(t, exit.CompressionRatio.Equal(entry.CompressionRatio),
+		"exit row must carry the entry's armed ratio (last decision is HOLD → zero); got entry=%s exit=%s",
+		entry.CompressionRatio, exit.CompressionRatio)
+}
+
+// TestBacktest_EmptyObservations verifies Run returns an empty result
+// (no panic) when the historical store yields no observations.
+func TestBacktest_EmptyObservations(t *testing.T) {
+	t.Parallel()
+	bt := breakout.NewBacktester(breakout.New(defaultCfg(), nil), nil)
+	res, err := bt.Run(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, res.ClosedTrades)
+	assert.Empty(t, res.TradeRecords)
+}
+
 // TestBacktest_NoTradesOnFlatSeries asserts that a perfectly flat price
 // series produces no closed trades — the strategy arms compression but
 // never sees a breakout.
@@ -119,11 +189,18 @@ func TestBacktest_ReversalClosesOpenPosition(t *testing.T) {
 	ct := res.ClosedTrades[0]
 	assert.Equal(t, types.SignalBuy, ct.Signal, "open signal should be BUY")
 	assert.Equal(t, decimal.MustNew(110, 0), ct.EntryPrice,
-		"entry price should be the BUY breakout tick (110)")
+		"entry price should be the breakout tick (110)")
 	assert.Equal(t, decimal.MustNew(90, 0), ct.ExitPrice,
 		"exit price should be the SELL signal tick (90)")
 	assert.Equal(t, breakout.ExitReasonReversal, ct.ExitReason,
 		"SELL signal closes the long before end-of-history; this should be a reversal")
+	// The exit TradeRecord must carry the entry's armed compression ratio:
+	// ArmedCompressionRatio is only populated on signal ticks, so sourcing
+	// it from the exit decision shows 0 on HOLD ticks.
+	require.Len(t, res.TradeRecords, 2, "entry + exit trade records")
+	assert.True(t, res.TradeRecords[0].CompressionRatio.Equal(res.TradeRecords[1].CompressionRatio),
+		"exit row must carry the entry's armed compression ratio, got entry=%s exit=%s",
+		res.TradeRecords[0].CompressionRatio, res.TradeRecords[1].CompressionRatio)
 }
 
 // TestBacktest_StopLossClosesAgainstMove constructs a BUY followed by a

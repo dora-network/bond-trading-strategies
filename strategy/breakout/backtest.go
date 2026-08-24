@@ -59,6 +59,10 @@ func NewBacktester(s *Strategy, writer stats.BacktestTradeWriter) *Backtester {
 //
 //nolint:funlen // backtest simulation with multiple phases
 func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (BacktestResult, error) {
+	if len(obs) == 0 {
+		return BacktestResult{}, nil
+	}
+
 	var (
 		closedTrades []ClosedTrade
 		tradeRecords []TradeRecord
@@ -117,13 +121,16 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 					exitQty := openTrade.Quantity
 
 					tradeRecords = append(tradeRecords, TradeRecord{
-						Time:             decision.Time(),
-						BondID:           openTrade.BondID,
-						Signal:           openTrade.Signal,
-						Price:            exitPrice,
-						Quantity:         exitQty,
-						PositionSize:     exitQty,
-						CompressionRatio: decision.ArmedCompressionRatio,
+						Time:         decision.Time(),
+						BondID:       openTrade.BondID,
+						Signal:       openTrade.Signal,
+						Price:        exitPrice,
+						Quantity:     exitQty,
+						PositionSize: exitQty,
+						// ArmedCompressionRatio is only set on the entry tick;
+						// carry the entry's recorded ratio so exit rows don't
+						// show 0 on HOLD ticks.
+						CompressionRatio: openTrade.CompressionRatio,
 					})
 
 					// Cash flow: opposite of entry.
@@ -249,13 +256,15 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		}
 
 		tradeRecords = append(tradeRecords, TradeRecord{
-			Time:             last.Time,
-			BondID:           openTrade.BondID,
-			Signal:           openTrade.Signal,
-			Price:            exitPrice,
-			Quantity:         exitQty,
-			PositionSize:     exitQty,
-			CompressionRatio: lastDecision.ArmedCompressionRatio,
+			Time:         last.Time,
+			BondID:       openTrade.BondID,
+			Signal:       openTrade.Signal,
+			Price:        exitPrice,
+			Quantity:     exitQty,
+			PositionSize: exitQty,
+			// Same as reversal exits: the armed ratio lives on the entry
+			// record, lastDecision's copy is zero on HOLD ticks.
+			CompressionRatio: openTrade.CompressionRatio,
 		})
 
 		ct := ClosedTrade{

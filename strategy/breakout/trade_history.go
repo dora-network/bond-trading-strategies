@@ -27,7 +27,7 @@ type Trade struct {
 
 // TradeHistoryStore is the backtest's read-only data source for
 // historical trades on a specific order book. Used to compute OBV
-// (On-Balance Volume) for the RequireVolumeConfirmation filter.
+// (On-Balance Volume) for the volume confirmation filter (OBVWindow > 0).
 type TradeHistoryStore interface {
 	// StreamTrades returns a channel of trades for the given order book
 	// within [start, end], in chronological order. The error channel
