@@ -4,7 +4,7 @@ import (
 	"log/slog"
 
 	"github.com/dora-network/bond-trading-strategies/strategy"
-	"github.com/dora-network/bond-trading-strategies/strategy/types"
+
 	"github.com/dora-network/dora-client-go/doraclient"
 )
 
@@ -31,12 +31,12 @@ func initializeBalancesFromPortfolio(
 		s.cfg.InitialBalance = bal.USD
 	}
 	s.openSignal = signal
-	logger.Info("initialised balances from portfolio",
+	logger.Info(
+		"initialised balances from portfolio",
 		"runID", s.runID,
 		"fromGlobalPosition", fromGlobalPosition,
 		"usdBal", s.usdBal,
 		"bondQty", s.bondQty,
 		"initialBalance", s.cfg.InitialBalance,
 	)
-	_ = types.SignalHold // keep types import alive when strategy.InitialBalancesFromPortfolio signature changes
 }

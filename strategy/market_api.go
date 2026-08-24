@@ -58,26 +58,3 @@ func LookupAssetID(ctx context.Context, client MarketAPIClient, orderBookID uuid
 	}
 	return assetID, nil
 }
-
-// LookupAssetID resolves a DORA order book UUID to its base asset ID string
-// using the provided MarketAPIClient. Returns an error if the client is nil,
-// the order book ID is nil, or the lookup fails.
-//
-// Both meanreversion and breakout strategies use this to map orderBookID → assetID
-// before querying historical price data (which is keyed by asset_id, not order_book_id).
-func LookupAssetID(ctx context.Context, client MarketAPIClient, orderBookID uuid.UUID) (string, error) {
-	if client == nil {
-		return "", errors.New("market API client is not configured")
-	}
-	if orderBookID == uuid.Nil {
-		return "", errors.New("order book ID is required")
-	}
-	assetID, err := client.BaseAssetID(ctx, orderBookID.String())
-	if err != nil {
-		return "", err
-	}
-	if assetID == "" {
-		return "", fmt.Errorf("order book %s returned an empty base asset ID", orderBookID)
-	}
-	return assetID, nil
-}

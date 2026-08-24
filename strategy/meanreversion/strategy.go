@@ -601,7 +601,8 @@ func (s *Strategy) executeDecision(ctx context.Context, decision Decision, asset
 	fromGlobalPosition := false
 
 	s.log.Info("opening position", "runID", s.runID, "assetID", assetID, "signal", decision.Signal())
-	s.log.Info("creating market order",
+	s.log.Info(
+		"creating market order",
 		"runID", s.runID,
 		"assetID", assetID,
 		"side", side,
@@ -774,7 +775,8 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 				// we must not evaluate exit conditions on that tick.
 				windowReadyBeforeUpdate := s.window.Ready()
 				decision, err := s.Update(obs)
-				s.log.Debug("decision generated",
+				s.log.Debug(
+					"decision generated",
 					"runID", s.runID,
 					"assetID", px.AssetID,
 					"time", px.Time,
@@ -841,12 +843,10 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 
 func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.Decimal {
 	// First, check the in-memory cache.
-	yield, ok := s.cachedBenchmarkYield(ts)
+	yield, date, ok := s.cachedBenchmarkYield(ts)
 	normedTS := fred.NormalizeDate(ts)
-	if ok {
-		if latestDate, has := s.latestCachedBenchmarkDate(); has && !latestDate.Before(normedTS) {
-			return yield
-		}
+	if ok && !date.Before(normedTS) {
+		return yield
 	}
 
 	// Cache miss or stale — fetch from FRED.
@@ -902,7 +902,7 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 
 	// Return the yield from the in-memory cache (FRED yields are converted to
 	// percentage format during merge, consistent with DORA YTM).
-	yield, ok = s.cachedBenchmarkYield(ts)
+	yield, _, ok = s.cachedBenchmarkYield(ts)
 	if !ok {
 		return decimal.Zero
 	}
@@ -1104,7 +1104,8 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 		d.CreatedAt = time.Now().UTC()
 	}
 	if err := s.decisionStore.SaveDecision(ctx, d); err != nil {
-		s.log.Error("save strategy decision",
+		s.log.Error(
+			"save strategy decision",
 			"err", err,
 			"run_id", d.RunID,
 			"seq", d.Seq,
@@ -1114,5 +1115,3 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 		)
 	}
 }
-
-// mustParseUUID is provided by the strategy package as strategy.MustParseUUID.
