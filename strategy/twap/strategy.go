@@ -355,3 +355,59 @@ func (s *Strategy) placeChunk(ctx context.Context, chunkIdx int, assetID string,
 		"chunk_size", chunkSize,
 	)
 }
+
+// ForTesting exposes internal executor wiring for the cross-package
+// handler resume test (strategy/http/handler_resume_test.go). Not
+// intended for production callers — names are stable enough for
+// tests but not part of the strategy's public API.
+
+// MarketClientWired reports whether the strategy's executor has a
+// non-nil Market client (truthy proof of the resume path's
+// decrypt/API-key switch).
+func (s *Strategy) MarketClientWired() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.exec.Market != nil
+}
+
+// StateStoreWired reports whether the strategy's executor has a
+// non-nil state Store (truthy proof of attachStateStore's
+// vwap/twap wiring).
+func (s *Strategy) StateStoreWired() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.exec.Store != nil
+}
+
+// DecisionSeqForTest returns the in-memory decision sequence counter.
+// resumePersistedRun's SetDecisionSeq switch must seed this from
+// MaxSeq so the first post-restart decision doesn't collide on
+// strategy_decisions.
+func (s *Strategy) DecisionSeqForTest() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.decSeq
+}
+
+// RunStateForTest returns the in-memory state counters after
+// loadState has run.
+func (s *Strategy) RunStateForTest() (decimal.Decimal, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.runState.TotalSubmitted, s.runState.ChunksProcessed
+}
+
+// LoadStateForTest invokes the strategy's loadState path. Exposed
+// so the resume test can drive the load and then read back the
+// in-memory state via RunStateForTest.
+func (s *Strategy) LoadStateForTest(ctx context.Context) { s.loadState(ctx) }
+
+// RunIDForTest sets the strategy's run id and executor RunID. The
+// production Run method does the same — this lets a test drive
+// loadState without going through Run.
+func (s *Strategy) RunIDForTest(id uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runID = id
+	s.exec.RunID = id
+}

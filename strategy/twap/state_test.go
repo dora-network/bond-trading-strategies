@@ -73,9 +73,10 @@ func TestIsTerminal(t *testing.T) {
 	}{
 		{"OPEN", false},
 		{"FILLED", true},
-		{"PARTIAL_FILL", true},
+		{"PARTIAL_FILL", false},
 		{"CANCELLED", true},
-		{"UNKNOWN", true},
+		{"PENDING", false},
+		{"UNKNOWN", false},
 	}
 	for _, c := range cases {
 		t.Run(c.status, func(t *testing.T) {

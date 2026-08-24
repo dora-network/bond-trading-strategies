@@ -106,6 +106,10 @@ func TestProcessOrderUpdate_PartialFillTracksQty(t *testing.T) {
 	require.Equal(t, "1000", s.runState.TotalFilled.String())
 }
 
+// TestProcessOrderUpdate_TerminalTransitionsAddOnce verifies that
+// PARTIAL_FILL events while an order is in-flight do not advance
+// TotalFilled (the counter tracks settled fills); the
+// PARTIAL_FILL -> FILLED transition adds the final quantity once.
 func TestProcessOrderUpdate_TerminalTransitionsAddOnce(t *testing.T) {
 	t.Parallel()
 	s := &Strategy{
@@ -130,14 +134,16 @@ func TestProcessOrderUpdate_TerminalTransitionsAddOnce(t *testing.T) {
 		Status:         "PARTIAL_FILL",
 		FilledQuantity: decimal.MustNew(300, 0),
 	})
-	require.Equal(t, "300", s.runState.TotalFilled.String())
+	require.Equal(t, "0", s.runState.TotalFilled.String(),
+		"PARTIAL_FILL while in-flight must not advance TotalFilled")
 
 	s.processOrderUpdate(context.TODO(), OrderFillEvent{
 		ClientOrderID:  "twap.run1.uuid1",
-		Status:         "PARTIAL_FILL",
+		Status:         "FILLED",
 		FilledQuantity: decimal.MustNew(300, 0),
 	})
-	require.Equal(t, "300", s.runState.TotalFilled.String())
+	require.Equal(t, "300", s.runState.TotalFilled.String(),
+		"transition to terminal adds the final fill once")
 }
 
 func TestProcessOrderUpdate_UnknownClientOrderID(t *testing.T) {

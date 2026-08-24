@@ -19,6 +19,7 @@ import (
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
+	"github.com/dora-network/bond-trading-strategies/strategy/exec"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/twap"
@@ -55,10 +56,11 @@ const (
 	defaultStopLossObserverInterval = time.Second
 )
 
-// twapOrderUpdatesBuffer is the channel buffer size for the per-run
-// TWAP order-update event channel. 16 events cover a reasonable burst
-// of fills from a single TWAP run before the run loop reads.
-const twapOrderUpdatesBuffer = 16
+// orderUpdatesBuffer is the channel buffer size for the per-run
+// order-update event channel shared by TWAP and VWAP. 16 events
+// cover a reasonable burst of fills from a single run before the
+// run loop reads.
+const orderUpdatesBuffer = 16
 
 type Handler struct {
 	service            strategycore.Service
@@ -1534,6 +1536,7 @@ func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid
 	h.getBacktestMetadata(w, r, id)
 }
 
+//nolint:funlen // wiring count grew with the vwap notifier + completion watcher integration
 func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	var req CreateRunRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -1627,6 +1630,8 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.startOrderUpdater(detail, strat)
+
 	h.startStopLossObserver(detail, strat)
 	h.startCompletionWatcher(detail)
 
@@ -1703,6 +1708,9 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 		detail.StoppedAt = &stoppedAt
 	}
 	if cancel, ok := h.stopLossObservers[id]; ok {
+		cancel()
+	}
+	if cancel, ok := h.runCompletionWatchers[id]; ok {
 		cancel()
 	}
 	h.mu.Unlock()
@@ -1934,6 +1942,8 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		case *twap.Strategy:
 			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
+		case *vwap.Strategy:
+			vwap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
 		}
 	}
 
@@ -1960,13 +1970,12 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 				s.SetDecisionSeq(maxSeq)
 			case *twap.Strategy:
 				s.SetDecisionSeq(maxSeq)
+			case *vwap.Strategy:
+				s.SetDecisionSeq(maxSeq)
 			}
 		}
 	}
-
-	if twapStrat, ok := strat.(*twap.Strategy); ok && h.notifier != nil && detail.DORAUserID != "" {
-		h.startTWAPOrderUpdater(detail, twapStrat)
-	}
+	h.startOrderUpdater(detail, strat)
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}
@@ -1980,68 +1989,112 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 	return nil
 }
 
-// startTWAPOrderUpdater spawns a goroutine that subscribes to the
+// startOrderUpdater spawns a per-run goroutine that subscribes to the
 // notifications bus for the run's DORA user, filters events for this
-// run, parses the payload, and forwards OrderFillEvents to the TWAP
-// subscription closes.
-func (h *Handler) startTWAPOrderUpdater(detail *RunDetail, strat *twap.Strategy) {
-	ch := make(chan twap.OrderFillEvent, twapOrderUpdatesBuffer)
-	strat.SetOrderUpdatesChannel(ch)
+// run, and forwards OrderFillEvents to the strategy's updates
+// channel. Supports both execution strategies:
+//
+//   - *twap.Strategy forwards via SetOrderUpdatesChannel(<-chan OrderFillEvent).
+//   - *vwap.Strategy forwards via SetOrderUpdatesChannel(<-chan OrderFillEvent).
+//
+// Both strategies use the same OrderFillEvent shape (it's a type
+// alias of exec.OrderFillEvent), so the parsed event value is
+// directly assignable to either channel. No-ops when the strategy
+// type is not one of the execution strategies, when h.notifier is
+// nil, or when the run has no DORA user (it was created without
+// one and will not receive DORA order events).
+func (h *Handler) startOrderUpdater(detail *RunDetail, strat strategycore.Strategy) {
+	if h.notifier == nil || detail.DORAUserID == "" {
+		return
+	}
+	switch s := strat.(type) {
+	case *twap.Strategy:
+		c := make(chan twap.OrderFillEvent, orderUpdatesBuffer)
+		s.SetOrderUpdatesChannel(c)
+		h.runOrderUpdater(detail, func(ctx context.Context, evt twap.OrderFillEvent) error {
+			select {
+			case c <- evt:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	case *vwap.Strategy:
+		c := make(chan vwap.OrderFillEvent, orderUpdatesBuffer)
+		s.SetOrderUpdatesChannel(c)
+		h.runOrderUpdater(detail, func(ctx context.Context, evt vwap.OrderFillEvent) error {
+			select {
+			case c <- evt:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	default:
+		return
+	}
+}
+
+// runOrderUpdater subscribes to the notifications bus for the run's
+// DORA user, filters events for this run, and forwards each parsed
+// OrderFillEvent to the strategy via the supplied callback. The
+// callback receives a context derived from h.service.BaseContext()
+// (or context.Background if none is configured). Closing the
+// callback's channel is the strategy's responsibility; runOrderUpdater
+// returns when the context is cancelled or the subscription ends.
+func (h *Handler) runOrderUpdater(detail *RunDetail, forward func(ctx context.Context, evt exec.OrderFillEvent) error) {
 	parentCtx := context.Background()
 	if h.service != nil {
 		parentCtx = h.service.BaseContext()
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
 	h.mu.Lock()
 	h.stopLossObservers[detail.ID] = cancel
 	h.mu.Unlock()
 
-	go func() {
-		defer cancel()
-		defer close(ch)
-		sub, err := h.notifier.Subscribe(ctx, detail.DORAUserID)
-		if err != nil {
-			slog.Error("twap: subscribe to order updates failed",
-				"run_id", detail.ID, "err", err)
-			return
-		}
-		defer func() {
-			if closer, ok := sub.(interface{ Close() error }); ok {
-				_ = closer.Close()
-			}
-		}()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case evt, ok := <-sub.Events():
-				if !ok {
-					return
-				}
-				if evt.Type != notifications.EventOrderUpdate {
-					continue
-				}
-				if evt.RunID != detail.ID.String() {
-					continue
-				}
-				payload, _ := evt.Payload.(map[string]any)
-				if payload == nil {
-					continue
-				}
-				parsed, perr := parseOrderFillEvent(payload)
-				if perr != nil {
-					slog.Debug("twap: skip order update (missing fields)",
-						"run_id", detail.ID, "err", perr)
-					continue
-				}
-				select {
-				case ch <- parsed:
-				case <-ctx.Done():
-					return
-				}
-			}
+	sub, err := h.notifier.Subscribe(ctx, detail.DORAUserID)
+	if err != nil {
+		slog.Error("order updates: subscribe failed",
+			"strategy_type", detail.StrategyType,
+			"run_id", detail.ID, "err", err)
+		return
+	}
+	defer func() {
+		if closer, ok := sub.(interface{ Close() error }); ok {
+			_ = closer.Close()
 		}
 	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-sub.Events():
+			if !ok {
+				return
+			}
+			if evt.Type != notifications.EventOrderUpdate {
+				continue
+			}
+			if evt.RunID != detail.ID.String() {
+				continue
+			}
+			payload, _ := evt.Payload.(map[string]any)
+			if payload == nil {
+				continue
+			}
+			parsed, perr := parseOrderFillEvent(payload)
+			if perr != nil {
+				slog.Debug("order updates: skip event (missing fields)",
+					"run_id", detail.ID, "err", perr)
+				continue
+			}
+			if err := forward(ctx, parsed); err != nil {
+				return
+			}
+		}
+	}
 }
 
 // parseOrderFillEvent extracts the TWAP fields from a DORA order
@@ -2408,6 +2461,9 @@ func (h *Handler) attachStateStore(strat strategycore.Strategy) {
 	}
 	if s, ok := strat.(*twap.Strategy); ok {
 		twap.WithStateStore(h.stateStore)(s)
+	}
+	if s, ok := strat.(*vwap.Strategy); ok {
+		vwap.WithStateStore(h.stateStore)(s)
 	}
 }
 

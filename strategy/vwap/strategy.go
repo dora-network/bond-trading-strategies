@@ -436,3 +436,39 @@ func (s *Strategy) placeBucket(ctx context.Context, bucketIdx int, assetID strin
 		"bucket_size", bucketSize,
 	)
 }
+
+// ForTesting accessors for the cross-package resume test
+// (strategy/http/handler_resume_test.go). See strategy/twap/strategy.go
+// for the contract — identical surface.
+
+func (s *Strategy) MarketClientWired() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.exec.Market != nil
+}
+
+func (s *Strategy) StateStoreWired() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.exec.Store != nil
+}
+
+func (s *Strategy) DecisionSeqForTest() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.decSeq
+}
+
+func (s *Strategy) RunStateForTest() (decimal.Decimal, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.TotalSubmitted, s.state.ChunksProcessed
+}
+
+func (s *Strategy) LoadStateForTest(ctx context.Context) { s.loadState(ctx) }
+func (s *Strategy) RunIDForTest(id uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runID = id
+	s.exec.RunID = id
+}

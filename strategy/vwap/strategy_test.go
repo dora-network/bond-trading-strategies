@@ -195,6 +195,12 @@ func TestProcessOrderUpdate_PartialFillTracksQty(t *testing.T) {
 	require.Equal(t, "1000", s.state.TotalFilled.String())
 }
 
+// TestProcessOrderUpdate_TerminalTransitionsAddOnce verifies the
+// PARTIAL_FILL events while the order is still in-flight do NOT
+// advance TotalFilled (the counter tracks settled fills, not the
+// running cumulative); the eventual PARTIAL_FILL -> FILLED transition
+// adds the final quantity once. A duplicate FILLED event that
+// restates the same quantity is a no-op.
 func TestProcessOrderUpdate_TerminalTransitionsAddOnce(t *testing.T) {
 	t.Parallel()
 	s := &Strategy{
@@ -222,14 +228,32 @@ func TestProcessOrderUpdate_TerminalTransitionsAddOnce(t *testing.T) {
 		Status:         "PARTIAL_FILL",
 		FilledQuantity: decimal.MustNew(300, 0),
 	})
-	require.Equal(t, "300", s.state.TotalFilled.String())
+	require.Equal(t, "0", s.state.TotalFilled.String(),
+		"PARTIAL_FILL while in-flight must not advance TotalFilled")
 
 	s.processOrderUpdate(context.TODO(), OrderFillEvent{
 		ClientOrderID:  "vwap.run1.uuid1",
 		Status:         "PARTIAL_FILL",
 		FilledQuantity: decimal.MustNew(300, 0),
 	})
-	require.Equal(t, "300", s.state.TotalFilled.String())
+	require.Equal(t, "0", s.state.TotalFilled.String(),
+		"subsequent in-flight PARTIAL_FILL is a no-op")
+
+	s.processOrderUpdate(context.TODO(), OrderFillEvent{
+		ClientOrderID:  "vwap.run1.uuid1",
+		Status:         "FILLED",
+		FilledQuantity: decimal.MustNew(300, 0),
+	})
+	require.Equal(t, "300", s.state.TotalFilled.String(),
+		"in-flight -> terminal transition adds the final fill once")
+
+	s.processOrderUpdate(context.TODO(), OrderFillEvent{
+		ClientOrderID:  "vwap.run1.uuid1",
+		Status:         "FILLED",
+		FilledQuantity: decimal.MustNew(300, 0),
+	})
+	require.Equal(t, "300", s.state.TotalFilled.String(),
+		"duplicate terminal event restating the same quantity is a no-op")
 }
 
 func TestProcessOrderUpdate_UnknownClientOrderID(t *testing.T) {

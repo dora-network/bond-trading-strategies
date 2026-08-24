@@ -39,3 +39,23 @@
 - Copytrading Min/Max strategy parameters:
   - Max order size should not be exceeded by the Percentage of available calculation
   - Min order size should not submit order if size is smaller than min, except when closing positions, then min order size should be ignored
+
+## Needs product decision (VWAP/TWAP review, 2026-08-24)
+
+Two findings from the vwap/twap code review are money-path concerns where the
+fix requires an architectural call rather than a localized edit. Captured
+here so they get revisited, not abandoned.
+
+- **At-least-once crash window between order placement and state checkpoint**
+  — `PlaceOrder` runs before `SaveState` (`strategy/exec/exec.go:~135`),
+  with no idempotency key, so a crash/rollback in that gap re-places the
+  chunk. Fixing requires either persisting order intent pre-submit or
+  relying on DORA-side order-id dedup. Decision required before
+  implementing.
+
+- **Silent under-execution on partial/cancel** — rebalance keys on
+  `TotalSubmitted` (requested), never re-places the `requested − filled`
+  shortfall when a chunk is only partially filled or cancelled.
+  Documented intent in `strategy/twap/state.go` and mirrored in
+  `strategy/vwap/state.go`. Decision required whether fills should be
+  recovered.
