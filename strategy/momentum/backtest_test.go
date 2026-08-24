@@ -16,13 +16,13 @@ import (
 func uptrendThenReversal() []types.YieldObservation {
 	o := make([]types.YieldObservation, 0, 14)
 	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		o = append(o, types.YieldObservation{
 			Time:   base.Add(time.Duration(i) * time.Minute),
 			BondID: "b", Price: decimal.MustNew(int64(100+i), 0),
 		})
 	}
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		o = append(o, types.YieldObservation{
 			Time:   base.Add(time.Duration(7+i) * time.Minute),
 			BondID: "b", Price: decimal.MustNew(int64(106-i), 0),
@@ -61,7 +61,7 @@ func TestBacktest_StopLossExits(t *testing.T) {
 	// Up then sharp drop — fastMA still > slowMA, but stop-loss fires on the drop.
 	obs := make([]types.YieldObservation, 0, 9)
 	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		obs = append(obs, types.YieldObservation{
 			Time:   base.Add(time.Duration(i) * time.Minute),
 			BondID: "b", Price: decimal.MustNew(int64(100+i), 0),

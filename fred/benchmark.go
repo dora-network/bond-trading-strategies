@@ -2,6 +2,7 @@ package fred
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -47,10 +48,8 @@ func ParseBenchmarkTenor(value string) (Tenor, error) {
 		if normalised == tenor.Code {
 			return tenor.Value, nil
 		}
-		for _, alias := range tenor.Aliases {
-			if normalised == alias {
-				return tenor.Value, nil
-			}
+		if slices.Contains(tenor.Aliases, normalised) {
+			return tenor.Value, nil
 		}
 	}
 	return 0, fmt.Errorf("unsupported tenor %q", value)
