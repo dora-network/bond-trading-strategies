@@ -150,6 +150,10 @@ not be lost.
 
 - `strategy/momentum/strategy.go:332` mutates `s.lastPrice` before the zero-YTM
   drop check, skewing ATR gaps. Move the assignment after the drop check.
+  **Resolved by 218e905 + 9668bfd:** Slice B restructured the run-loop
+  to short-circuit on nil-YTM before calling Update, and Slice H
+  removed the dead branch entirely. With nil-YTM never reaching
+  Update(), the lastPrice assignment order is moot.
 - `strategy/momentum/strategy.go:834-840` ticker case dead-reads `s.paused`
   into `_`; remove the lock cycle.
 - `mcp/tools_strategy.go` declares `min_order_size` / `max_order_size` as
