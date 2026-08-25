@@ -74,13 +74,11 @@ func DoraclientSide(signal types.Signal) doraclient.Side {
 	return doraclient.SIDE_BUY
 }
 
-// MustParseUUID parses a UUID string, returning uuid.Nil on failure.
-func MustParseUUID(s string) uuid.UUID {
-	u, err := uuid.Parse(s)
-	if err != nil {
-		return uuid.Nil
-	}
-	return u
+// MustParseUUID parses a UUID string, returning uuid.Nil on failure
+// or empty input. Delegates to the canonical implementation in
+// strategy/uuid.go; this alias keeps the legacy import path working.
+func MustParseUUID(id string) uuid.UUID {
+	return strategy.MustParseUUID(id)
 }
 
 // RunState is the persisted checkpoint for an execution run. TWAP and
