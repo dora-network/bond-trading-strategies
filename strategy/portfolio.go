@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"fmt"
 	"log/slog"
 
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
@@ -45,54 +46,84 @@ func FindAccountAndBalance(
 	fromGlobalPosition bool,
 	baseAssetID string,
 	quoteAssetID string,
-) (AccountBalance, bool) {
-	if bal, ok := FindBalancesInAccounts(accounts, fromGlobalPosition, baseAssetID, quoteAssetID); ok {
-		return bal, true
+) (AccountBalance, bool, error) {
+	bal, ok, err := FindBalancesInAccounts(accounts, fromGlobalPosition, baseAssetID, quoteAssetID)
+	if err != nil {
+		return AccountBalance{}, false, err
+	}
+	if ok {
+		return bal, true, nil
 	}
 	if !fromGlobalPosition {
-		if bal, ok := FindBalancesInAccounts(accounts, true, baseAssetID, quoteAssetID); ok {
-			return bal, true
+		bal, ok, err = FindBalancesInAccounts(accounts, true, baseAssetID, quoteAssetID)
+		if err != nil {
+			return AccountBalance{}, false, err
+		}
+		if ok {
+			return bal, true, nil
 		}
 	}
-	return AccountBalance{}, false
+	return AccountBalance{}, false, nil
 }
 
 // FindBalancesInAccounts walks the portfolio and extracts USD and
 // bond balances from accounts matching the global/isolated filter.
+// Returns (balance, found, err): err is non-nil if a decimal.Parse
+// fails on a quote or base asset we encountered. Silently dropping
+// a balance would leave the strategy undercapitalized without any
+// signal to the caller.
 func FindBalancesInAccounts(
 	accounts map[string]map[string]doraclient.AccountV2,
 	wantGlobal bool,
 	baseAssetID string,
 	quoteAssetID string,
-) (AccountBalance, bool) {
+) (AccountBalance, bool, error) {
 	var bal AccountBalance
+	found := false
 	for _, assetPositions := range accounts {
 		for assetID, acct := range assetPositions {
 			if acct.GetIsGlobal() != wantGlobal {
 				continue
 			}
-			if assetID == quoteAssetID {
-				if avail, err := decimal.Parse(acct.Available); err == nil {
-					bal.USD = avail
-				}
-			}
-			if assetID == baseAssetID {
+			switch assetID {
+			case quoteAssetID:
 				avail, err := decimal.Parse(acct.Available)
-				borrowed, bErr := decimal.Parse(acct.Borrowed)
-				if err == nil && bErr == nil {
-					if !borrowed.IsZero() {
-						bal.Bond = borrowed.Neg()
-					} else {
-						bal.Bond = avail
+				if err != nil {
+					return AccountBalance{}, false, fmt.Errorf("parse quote asset %s available %q: %w",
+						assetID, acct.Available, err)
+				}
+				bal.USD = avail
+				found = true
+			case baseAssetID:
+				avail, err := decimal.Parse(acct.Available)
+				if err != nil {
+					return AccountBalance{}, false, fmt.Errorf("parse base asset %s available %q: %w",
+						assetID, acct.Available, err)
+				}
+				// Empty borrowed string means no debt (DORA returns '' when
+				// borrowed is zero); surface non-empty Parse failures only.
+				var borrowed decimal.Decimal
+				if acct.Borrowed != "" {
+					var bErr error
+					borrowed, bErr = decimal.Parse(acct.Borrowed)
+					if bErr != nil {
+						return AccountBalance{}, false, fmt.Errorf("parse base asset %s borrowed %q: %w",
+							assetID, acct.Borrowed, bErr)
 					}
 				}
+				if !borrowed.IsZero() {
+					bal.Bond = borrowed.Neg()
+				} else {
+					bal.Bond = avail
+				}
+				found = true
 			}
 		}
 	}
-	if bal.isZero() {
-		return AccountBalance{}, false
+	if !found || bal.isZero() {
+		return AccountBalance{}, false, nil
 	}
-	return bal, true
+	return bal, true, nil
 }
 
 // InitialBalancesFromPortfolio extracts the initial USD and bond
@@ -107,23 +138,26 @@ func InitialBalancesFromPortfolio(
 	baseAssetID string,
 	quoteAssetID string,
 	logger *slog.Logger,
-) (AccountBalance, types.Signal, bool) {
+) (AccountBalance, types.Signal, bool, error) {
 	accounts := portfolio.GetAccounts()
 	if len(accounts) == 0 {
 		logger.Warn("initialise balances: no accounts in portfolio")
-		return AccountBalance{}, types.SignalHold, false
+		return AccountBalance{}, types.SignalHold, false, nil
 	}
-	bal, ok := FindAccountAndBalance(accounts, fromGlobalPosition, baseAssetID, quoteAssetID)
+	bal, ok, err := FindAccountAndBalance(accounts, fromGlobalPosition, baseAssetID, quoteAssetID)
+	if err != nil {
+		return AccountBalance{}, types.SignalHold, false, fmt.Errorf("init balances from portfolio: %w", err)
+	}
 	if !ok {
 		logger.Warn("initialise balances: no matching account found in portfolio, falling back to legacy path")
-		return AccountBalance{}, types.SignalHold, false
+		return AccountBalance{}, types.SignalHold, false, nil
 	}
 	signal := signalFromBondQty(bal.Bond)
 	logger.Info("initialised balances from portfolio",
 		"fromGlobalPosition", fromGlobalPosition,
 		"usdBal", bal.USD, "bondQty", bal.Bond,
 	)
-	return bal, signal, true
+	return bal, signal, true, nil
 }
 
 // signalFromBondQty reconstructs the open-position signal direction

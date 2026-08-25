@@ -1,6 +1,7 @@
 package meanreversion
 
 import (
+	"fmt"
 	"log/slog"
 
 	"github.com/dora-network/bond-trading-strategies/strategy"
@@ -19,7 +20,12 @@ func initializeBalancesFromPortfolio(
 	fromGlobalPosition bool,
 	logger *slog.Logger,
 ) {
-	bal, signal, ok := strategy.InitialBalancesFromPortfolio(portfolio, fromGlobalPosition, baseAssetID, quoteAssetID, logger)
+	bal, signal, ok, err := strategy.InitialBalancesFromPortfolio(portfolio, fromGlobalPosition, baseAssetID, quoteAssetID, logger)
+	if err != nil {
+		s.mu.Lock()
+		s.errs = append(s.errs, fmt.Errorf("initialise balances: %w", err))
+		s.mu.Unlock()
+	}
 	if !ok {
 		return
 	}

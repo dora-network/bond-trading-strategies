@@ -1,6 +1,7 @@
 package momentum
 
 import (
+	"fmt"
 	"log/slog"
 
 	"github.com/dora-network/bond-trading-strategies/strategy"
@@ -17,7 +18,10 @@ func initializeBalancesFromPortfolio(
 	fromGlobalPosition bool,
 	logger *slog.Logger,
 ) {
-	bal, signal, ok := strategy.InitialBalancesFromPortfolio(portfolio, fromGlobalPosition, baseAssetID, quoteAssetID, logger)
+	bal, signal, ok, err := strategy.InitialBalancesFromPortfolio(portfolio, fromGlobalPosition, baseAssetID, quoteAssetID, logger)
+	if err != nil {
+		s.recordErr(fmt.Errorf("initialise balances: %w", err))
+	}
 	if !ok {
 		return
 	}
