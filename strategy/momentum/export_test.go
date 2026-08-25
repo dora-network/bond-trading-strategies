@@ -109,3 +109,21 @@ func RunLoop(s *Strategy, ctx context.Context, msgs <-chan strategyPkg.Message, 
 func MergeBenchmarkObservations(s *Strategy, obs []fred.Observation) {
 	s.mergeBenchmarkObservations(obs)
 }
+
+// PrefillWindow drives s.prefillWindow so tests can exercise the
+// historical-data prefill path without needing the prices handler.
+func PrefillWindow(s *Strategy, ctx context.Context, assetID string) error {
+	return s.prefillWindow(ctx, assetID)
+}
+
+// LatestCachedBenchmarkDate exposes s.latestCachedBenchmarkDate so
+// tests can verify the cache's most-recent-date invariant.
+func LatestCachedBenchmarkDate(s *Strategy) (time.Time, bool) {
+	return s.latestCachedBenchmarkDate()
+}
+
+// UpdateObs exposes s.Update so tests can drive the rolling-window
+// path against fixtures with known control over the observation.
+func UpdateObs(s *Strategy, obs types.YieldObservation) (Decision, error) {
+	return s.Update(obs)
+}
