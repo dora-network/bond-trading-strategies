@@ -73,17 +73,22 @@ func (s *Strategy) getObservations(ctx context.Context, start, end time.Time) ([
 	}
 
 	observations := make([]types.YieldObservation, 0, len(history))
+	// The PG price store filters ytm IS NOT NULL on load
+	// (prices/store.go:LoadHistoricalPrices / LoadLastPrices), so a nil
+	// YTM here is a contract violation. The store guarantees a value;
+	// momentum uses it as the spread/ytm source regardless of mode
+	// (price mode just doesn't depend on it). Surface the bug rather
+	// than silently skipping.
 	for _, price := range history {
-		if price.YTM == nil && s.cfg.SignalSource != SignalSourcePrice {
-			continue
+		if price.YTM == nil {
+			return nil, fmt.Errorf("load historical prices: asset %s at %s has nil YTM (store contract violation)",
+				price.AssetID, price.Time.UTC().Format(time.RFC3339))
 		}
 		obs := types.YieldObservation{
 			Time:   price.Time,
 			BondID: price.AssetID,
 			Price:  price.Price,
-		}
-		if price.YTM != nil {
-			obs.YTM = *price.YTM
+			YTM:    *price.YTM,
 		}
 		if s.cfg.SignalSource == SignalSourceSpread {
 			benchmarkYield, ok := s.cachedBenchmarkYield(price.Time)
@@ -259,16 +264,15 @@ func (s *Strategy) prefillWindow(ctx context.Context, assetID string) error {
 	}
 
 	for _, price := range history {
-		if price.YTM == nil && s.cfg.SignalSource != SignalSourcePrice {
-			continue
+		if price.YTM == nil {
+			return fmt.Errorf("load last prices: asset %s at %s has nil YTM (store contract violation)",
+				price.AssetID, price.Time.UTC().Format(time.RFC3339))
 		}
 		obs := types.YieldObservation{
 			Time:   price.Time,
 			BondID: price.AssetID,
 			Price:  price.Price,
-		}
-		if price.YTM != nil {
-			obs.YTM = *price.YTM
+			YTM:    *price.YTM,
 		}
 		if s.cfg.SignalSource == SignalSourceSpread {
 			benchmarkYield, ok := s.cachedBenchmarkYield(price.Time)

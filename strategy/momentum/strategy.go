@@ -770,8 +770,13 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 				if px.AssetID != assetID {
 					continue
 				}
-				// ytm/spread modes require YTM; price mode doesn't.
-				if s.cfg.SignalSource != SignalSourcePrice && px.YTM == nil {
+				// The price stream never emits nil YTM (prices/store.go
+				// filters ytm IS NOT NULL on insert, so live prices inherit
+				// the same guarantee). Surface the contract violation
+				// rather than silently dropping the tick.
+				if px.YTM == nil {
+					s.recordErr(fmt.Errorf("live tick asset %s at %s has nil YTM (store contract violation)",
+						px.AssetID, px.Time.UTC().Format(time.RFC3339)))
 					continue
 				}
 
@@ -790,9 +795,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 					Time:   px.Time,
 					BondID: px.AssetID,
 					Price:  px.Price,
-				}
-				if px.YTM != nil {
-					obs.YTM = *px.YTM
+					YTM:    *px.YTM,
 				}
 				if s.cfg.SignalSource == SignalSourceSpread {
 					obs.BenchmarkYield = benchmarkYield

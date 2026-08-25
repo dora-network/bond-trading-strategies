@@ -40,12 +40,13 @@ func TestGetObservations_SpreadMode_AttachesBenchmarkYield(t *testing.T) {
 	lookup := &strategyfakes.FakeMarketAPIClient{}
 	lookup.BaseAssetIDReturns("asset-123", nil)
 
-	ytmA := decimal.MustNew(52, 3) // 0.052
-	ytmB := decimal.MustNew(54, 3) // 0.054
+	ytmA := decimal.MustNew(52, 3)   // 0.052
+	ytmMid := decimal.MustNew(53, 3) // 0.053 (was nil, now required by store contract)
+	ytmB := decimal.MustNew(54, 3)   // 0.054
 	history := &momentumfakes.FakeHistoricalPriceStore{}
 	history.LoadHistoricalPricesReturns([]prices.AssetPrice{
 		{AssetID: "asset-123", YTM: &ytmA, Time: time.Date(2024, 1, 2, 15, 0, 0, 0, time.UTC)},
-		{AssetID: "asset-123", YTM: nil, Time: time.Date(2024, 1, 3, 15, 0, 0, 0, time.UTC)},
+		{AssetID: "asset-123", YTM: &ytmMid, Time: time.Date(2024, 1, 3, 15, 0, 0, 0, time.UTC)},
 		{AssetID: "asset-123", YTM: &ytmB, Time: time.Date(2024, 1, 4, 15, 0, 0, 0, time.UTC)},
 	}, nil)
 
@@ -61,19 +62,27 @@ func TestGetObservations_SpreadMode_AttachesBenchmarkYield(t *testing.T) {
 		time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
 
 	require.NoError(t, err)
-	// Row with nil YTM is dropped; the rest get benchmark yields.
-	require.Len(t, obs, 2)
+	// All three rows have non-nil YTM (the store contract) and get
+	// the LATEST cached benchmark yield <= their timestamp. Jan 2
+	// gets 4.5 (its own date), Jan 3 gets 4.5 (LATEST <= 3 is Jan 2),
+	// Jan 4 gets 4.7 (its own date).
+	require.Len(t, obs, 3)
 	assert.True(t, obs[0].BenchmarkYield.Equal(decimal.MustNew(45, 1)),
 		"obs[0].BenchmarkYield = %s, want 4.5 (45 * 100)", obs[0].BenchmarkYield.String())
-	assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(47, 1)),
-		"obs[1].BenchmarkYield = %s, want 4.7 (47 * 100)", obs[1].BenchmarkYield.String())
+	assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(45, 1)),
+		"obs[1].BenchmarkYield = %s, want 4.5 (LATEST <= Jan 3)", obs[1].BenchmarkYield.String())
+	assert.True(t, obs[2].BenchmarkYield.Equal(decimal.MustNew(47, 1)),
+		"obs[2].BenchmarkYield = %s, want 4.7 (47 * 100)", obs[2].BenchmarkYield.String())
 	// FRED client fetched once for the price-history window.
 	assert.Equal(t, 1, benchmark.FetchHistoricalYieldsCallCount())
 }
 
-// TestGetObservations_PriceMode_AllowsNilYTM verifies that price mode
-// keeps rows even when YTM is nil (price mode doesn't need YTM).
-func TestGetObservations_PriceMode_AllowsNilYTM(t *testing.T) {
+// TestGetObservations_NilYTM_ReturnsContractError verifies that nil
+// YTM is a contract violation, not silently dropped. The PG store
+// filters ytm IS NOT NULL on insert (prices/store.go:LoadHistoricalPrices
+// / LoadLastPrices), so a nil here means the upstream schema changed
+// or a test fake drifted - we surface the error rather than masking it.
+func TestGetObservations_NilYTM_ReturnsContractError(t *testing.T) {
 	cfg := momentum.DefaultConfig()
 	cfg.SignalSource = momentum.SignalSourcePrice
 	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
@@ -86,19 +95,15 @@ func TestGetObservations_PriceMode_AllowsNilYTM(t *testing.T) {
 	history := &momentumfakes.FakeHistoricalPriceStore{}
 	history.LoadHistoricalPricesReturns([]prices.AssetPrice{
 		{AssetID: "asset-123", YTM: nil, Time: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Price: decimal.MustNew(101, 0)},
-		{AssetID: "asset-123", YTM: nil, Time: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Price: decimal.MustNew(102, 0)},
 	}, nil)
 	momentum.SetHistoricalPriceStore(s, history)
 
-	obs, err := momentum.GetObservations(s, context.Background(),
+	_, err := momentum.GetObservations(s, context.Background(),
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
 
-	require.NoError(t, err)
-	require.Len(t, obs, 2)
-	for _, o := range obs {
-		assert.True(t, o.YTM.IsZero(), "price mode should leave YTM zero")
-	}
+	require.Error(t, err)
+	require.ErrorContains(t, err, "store contract violation")
 }
 
 // TestGetObservations_SpreadMode_PropagatesErrors covers the error
@@ -227,11 +232,15 @@ func TestPrefillWindow_FillsWindowsFromHistory(t *testing.T) {
 	lookup.BaseAssetIDReturns("asset-123", nil)
 	momentum.SetLookupClient(s, lookup)
 
-	// SlowWindow=5, so prefillWindow loads 10 prices.
+	// SlowWindow=5, so prefillWindow loads 10 prices. Each row needs
+	// a non-nil YTM to satisfy the store contract (PG filters
+	// ytm IS NOT NULL on load).
+	ytm := decimal.MustNew(50, 3) // 0.05 fixed
 	obsPrices := make([]prices.AssetPrice, 10)
 	for i := range obsPrices {
 		obsPrices[i] = prices.AssetPrice{
 			AssetID: "asset-123",
+			YTM:     &ytm,
 			Time:    time.Date(2024, 1, i+1, 0, 0, 0, 0, time.UTC),
 			Price:   decimal.MustNew(int64(100+i), 0),
 		}
