@@ -571,6 +571,7 @@ func TestStrategyConfigSchemaIsTyped(t *testing.T) {
 						Items struct {
 							Type string `json:"type"`
 						} `json:"items"`
+						Enum []string `json:"enum,omitempty"`
 					} `json:"properties"`
 				} `json:"properties"`
 			}
@@ -589,8 +590,12 @@ func TestStrategyConfigSchemaIsTyped(t *testing.T) {
 			}
 			checkField("percentage_of_available", "number")
 			checkField("leverage", "number")
-			checkField("min_order_size", "integer")
-			checkField("max_order_size", "integer")
+			// min/max_order_size are shared between copytrading (integer
+			// values) and momentum (decimal values); the server-side
+			// decoder parses via decimal.NewFromFloat64 so the type
+			// stays number to accept both.
+			checkField("min_order_size", "number")
+			checkField("max_order_size", "number")
 			checkField("lookback_window", "integer")
 			checkField("entry_z_score", "number")
 			checkField("exit_z_score", "number")
@@ -603,6 +608,10 @@ func TestStrategyConfigSchemaIsTyped(t *testing.T) {
 
 			// Momentum fields.
 			checkField("signal_source", "string")
+			enumField, ok := config.Properties["signal_source"]
+			require.True(t, ok, "momentum.config.signal_source must be declared")
+			require.ElementsMatch(t, []string{"price", "ytm", "spread"}, enumField.Enum,
+				"signal_source enum must include price/ytm/spread exactly; got %v", enumField.Enum)
 			checkField("fast_window", "integer")
 			checkField("slow_window", "integer")
 			checkField("atr_window", "integer")

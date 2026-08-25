@@ -88,9 +88,6 @@ func configProperties() map[string]any {
 	fraction := func(desc string) map[string]any {
 		return map[string]any{"type": "number", "description": desc, "minimum": 0, "exclusiveMinimum": true, "maximum": 1}
 	}
-	nonNegInt := func(desc string) map[string]any {
-		return map[string]any{"type": "integer", "description": desc, "minimum": 0}
-	}
 	intMin := func(min int, desc string) map[string]any {
 		return map[string]any{"type": "integer", "description": desc, "minimum": min}
 	}
@@ -108,8 +105,13 @@ func configProperties() map[string]any {
 		"followed_trader":         map[string]any{"type": "string", "format": "uuid", "description": "UUID of the trader to copy."},
 		"percentage_of_available": fraction("Fraction of available capital to allocate per trade, in (0,1]."),
 		"leverage":                posNum("Leverage multiplier. Must be greater than 0."),
-		"min_order_size":          nonNegInt("Minimum copied order size."),
-		"max_order_size":          nonNegInt("Maximum copied order size."),
+		// min_order_size / max_order_size: nonNegNum (not nonNegInt) so
+		// momentum callers can submit decimal values; the shared
+		// momentum schema validator parses via decimal.NewFromFloat64
+		// on the server side. copytrading happens to use integer
+		// values, but the type stays number for both.
+		"min_order_size": nonNegNum("Minimum copied order size."),
+		"max_order_size": nonNegNum("Maximum copied order size."),
 		"disallowed_bonds": map[string]any{
 			"type":        "array",
 			"description": "Bond UUIDs to skip.",
