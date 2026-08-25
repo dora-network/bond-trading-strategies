@@ -851,6 +851,12 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.Decimal {
 	normedTS := fred.NormalizeDate(ts)
 
+	// cachedYield is the stale-cache fallback. On any FRED / parse / client
+	// error we return it rather than decimal.Zero so spread-mode signals
+	// keep tracking the most recent known benchmark instead of degrading
+	// to raw YTM (which has the inverted sign convention in spread mode).
+	cachedYield, cachedOK := s.cachedBenchmarkYield(ts)
+
 	yield, ok := s.cachedBenchmarkYield(ts)
 	if ok {
 		if latestDate, has := s.latestCachedBenchmarkDate(); has && !latestDate.Before(normedTS) {
@@ -861,12 +867,18 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 	tenor, err := fred.ParseBenchmarkTenor(s.cfg.Tenor)
 	if err != nil {
 		s.recordErr(fmt.Errorf("get benchmark yield: parse tenor: %w", err))
+		if cachedOK {
+			return cachedYield
+		}
 		return decimal.Zero
 	}
 
 	client, err := s.getBenchmarkYieldClient()
 	if err != nil {
 		s.recordErr(fmt.Errorf("get benchmark yield: get client: %w", err))
+		if cachedOK {
+			return cachedYield
+		}
 		return decimal.Zero
 	}
 
@@ -874,14 +886,27 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 	obs, err := client.FetchHistoricalYields(ctx, tenor, start, normedTS)
 	if err != nil {
 		s.recordErr(fmt.Errorf("get benchmark yield: fred fetch: %w", err))
+		if cachedOK {
+			return cachedYield
+		}
 		return decimal.Zero
 	}
 	if len(obs) == 0 {
+		// FRED returned no data; fall back to stale cache if we have it.
+		if cachedOK {
+			return cachedYield
+		}
 		return decimal.Zero
 	}
 	s.mergeBenchmarkObservations(obs)
-	yield, _ = s.cachedBenchmarkYield(ts)
-	return yield
+	fresh, freshOK := s.cachedBenchmarkYield(ts)
+	if freshOK {
+		return fresh
+	}
+	if cachedOK {
+		return cachedYield
+	}
+	return decimal.Zero
 }
 
 // recordDecision forwards a strategy.Decision row to the configured

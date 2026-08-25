@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategyPkg "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
@@ -99,4 +100,12 @@ func RunLoop(s *Strategy, ctx context.Context, msgs <-chan strategyPkg.Message, 
 			s.cancel()
 		}
 	}
+}
+
+// MergeBenchmarkObservations seeds the strategy's in-memory benchmark
+// cache with the supplied observations, applying the same percentage
+// conversion the production code applies. Used by tests that want to
+// exercise the cache-freshness path without re-fetching from FRED.
+func MergeBenchmarkObservations(s *Strategy, obs []fred.Observation) {
+	s.mergeBenchmarkObservations(obs)
 }
