@@ -76,3 +76,68 @@ func TestBacktest_StopLossExits(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res.GetClosedTrades())
 }
+
+// TestBacktest_ForceClosePersistsExitAndRecordsExitSignal exercises
+// the end-of-history force-close path. Pre-fix the force-close
+// appended only to closedTrades, leaving tradeRecords with a dangling
+// open entry, and it constructed the close Decision with signal:
+// openTrade.Signal so ClosedTrade.ExitSignal equaled the open
+// direction instead of the strategy's signal at the final observation.
+//
+// The fixture is a strictly-rising series so the MA crossover fires
+// a Buy and never reverses. No stop-loss / take-profit. End of
+// history triggers the force-close.
+func TestBacktest_ForceClosePersistsExitAndRecordsExitSignal(t *testing.T) {
+	cfg := momentum.DefaultConfig()
+	cfg.SignalSource = momentum.SignalSourcePrice
+	cfg.FastWindow = 2
+	cfg.SlowWindow = 3
+	cfg.StopLossATR = decimal.Zero // no stops
+	cfg.TakeProfitATR = decimal.Zero
+	cfg.InitialBalance = decimal.MustNew(1000, 0)
+	cfg.MinOrderSize = decimal.Zero
+	cfg.MaxOrderSize = decimal.Zero
+	s := momentum.New(cfg, nil)
+	bt := momentum.NewBacktester(s, nil)
+
+	// 8 strictly-rising prices: MA crossover fires a Buy on tick 3,
+	// continues Buy through tick 7. No reversal, no force-close in
+	// the loop. End-of-history force-close fires after tick 7.
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	obs := make([]types.YieldObservation, 0, 8)
+	for i := range 8 {
+		obs = append(obs, types.YieldObservation{
+			Time:   base.Add(time.Duration(i) * time.Minute),
+			BondID: "b",
+			Price:  decimal.MustNew(int64(100+i), 0),
+		})
+	}
+
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	closedTradesAny := res.GetClosedTrades()
+	recordsAny := res.GetTradeRecords()
+	closedTrades, ok := closedTradesAny.([]momentum.ClosedTrade)
+	require.True(t, ok, "closedTrades type mismatch: %T", closedTradesAny)
+	tradeRecords, ok := recordsAny.([]momentum.TradeRecord)
+	require.True(t, ok, "tradeRecords type mismatch: %T", recordsAny)
+
+	// Force-close produces exactly 1 closed trade (round-trip).
+	require.Len(t, closedTrades, 1, "force-close must close exactly 1 position")
+
+	// And exactly 2 trade_records: entry + exit. Pre-fix this would
+	// be 1 (entry only), causing /trades to show a dangling open row.
+	require.Len(t, tradeRecords, 2,
+		"force-close must append an exit TradeRecord so /trades shows "+
+			"a matched pair, not a dangling open entry")
+
+	ct := closedTrades[0]
+	require.Equal(t, types.SignalBuy, ct.Signal, "open direction is Buy")
+	require.Equal(t, momentum.ExitReasonStrategyExit, ct.ExitReason,
+		"force-close must tag the close with ExitReasonStrategyExit")
+
+	// Sanity: the trade_records pair brackets the closed trade.
+	require.Equal(t, tradeRecords[0].Time, ct.OpenTime)
+	require.Equal(t, tradeRecords[1].Time, ct.CloseTime)
+}

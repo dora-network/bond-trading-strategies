@@ -30,11 +30,17 @@ func NewBacktester(s *Strategy, writer stats.BacktestTradeWriter) *Backtester {
 // Run replays obs chronologically and returns a BacktestResult. Exits
 // follow the priority stop_loss > take_profit > reversal (delegated to
 // Strategy.ShouldExit).
+//
+//nolint:funlen // lastDecision tracking + force-close exit record bump over the 100-line limit
 func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (BacktestResult, error) {
 	var (
 		closedTrades []ClosedTrade
 		tradeRecords []TradeRecord
 		openTrade    *TradeRecord
+		// lastDecision is captured for the force-close path so the
+		// ClosedTrade.ExitSignal reflects the strategy's signal at the
+		// final observation, not the open direction.
+		lastDecision Decision
 	)
 
 	effectiveCapital, err := b.strategy.cfg.InitialBalance.Mul(b.strategy.collateralWeight)
@@ -57,6 +63,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		if err != nil {
 			return BacktestResult{}, err
 		}
+		lastDecision = decision
 
 		if openTrade != nil {
 			exit, reason := b.strategy.ShouldExit(openTrade.Signal, decision, openTrade.Price, openTrade.EntryATR)
@@ -108,12 +115,25 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 	// Force-close any position still open at end of history.
 	if openTrade != nil {
 		last := obs[len(obs)-1]
-		d := Decision{time: last.Time, bondID: openTrade.BondID, price: last.Price, signal: openTrade.Signal}
+		// Use lastDecision.Signal() for the close, not openTrade.Signal:
+		// the ClosedTrade.ExitSignal field should record the strategy's
+		// signal at the moment of close, which is whatever the last
+		// observation produced. meanreversion does the same.
+		d := Decision{
+			time:   last.Time,
+			bondID: openTrade.BondID,
+			price:  last.Price,
+			signal: lastDecision.Signal(),
+		}
 		ct, _, err := b.closeAtPrice(openTrade, d, remainingBalance, ExitReasonStrategyExit)
 		if err != nil {
 			return BacktestResult{}, err
 		}
 		closedTrades = append(closedTrades, ct)
+		// Mirror the in-loop exit path: persist a trade_records entry
+		// for the close so /trades shows a matched pair instead of a
+		// dangling open entry with no exit.
+		tradeRecords = append(tradeRecords, exitRecord(openTrade, d))
 	}
 
 	if b.writer != nil {
