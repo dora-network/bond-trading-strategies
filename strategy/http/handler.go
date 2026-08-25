@@ -957,20 +957,11 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	// Inject the user's API key into the strategy so it can authenticate
 	// with DORA when resolving the asset ID for the order book.
 	info, _ := authctx.AuthInfoFromContext(r.Context())
-	if info != nil && info.APIKey != "" {
-		if withClient, ok := strat.(*meanreversion.Strategy); ok {
-			withClientOpts := meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))
-			withClientOpts(withClient)
-		}
-		if withClient, ok := strat.(*breakout.Strategy); ok {
-			withClientOpts := breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))
-			withClientOpts(withClient)
-		}
-		if withClient, ok := strat.(*momentum.Strategy); ok {
-			withClientOpts := momentum.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))
-			withClientOpts(withClient)
-		}
+	var apiKey string
+	if info != nil {
+		apiKey = info.APIKey
 	}
+	h.applyUserAPIKey(strat, apiKey)
 
 	resultCh, err := h.service.RunBacktest(r.Context(), id, strat, req.Start, req.End)
 	if err != nil {
@@ -1554,7 +1545,6 @@ func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid
 	h.getBacktestMetadata(w, r, id)
 }
 
-//nolint:funlen // wiring count grew with the vwap notifier + completion watcher integration
 func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	var req CreateRunRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -1584,22 +1574,11 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 
 	// Inject the user's API key into the strategy so it can authenticate with DORA.
 	info, _ := authctx.AuthInfoFromContext(r.Context())
-	if info != nil && info.APIKey != "" {
-		switch withClient := strat.(type) {
-		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *breakout.Strategy:
-			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *momentum.Strategy:
-			momentum.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *twap.Strategy:
-			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *vwap.Strategy:
-			vwap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		}
+	var apiKey string
+	if info != nil {
+		apiKey = info.APIKey
 	}
+	h.applyUserAPIKey(strat, apiKey)
 
 	// Attach the per-run decision recorder so every successful live
 	// market order is written to strategy_decisions. nil disables
@@ -1953,20 +1932,7 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		if err2 != nil {
 			return fmt.Errorf("decrypt api key for run %s: %w", detail.ID, err2)
 		}
-		switch withClient := strat.(type) {
-		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *breakout.Strategy:
-			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *momentum.Strategy:
-			momentum.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *twap.Strategy:
-			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *vwap.Strategy:
-			vwap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		}
+		h.applyUserAPIKey(strat, string(apiKeyDecrypted))
 	}
 
 	// Attach the per-run decision recorder. nil disables recording.
@@ -2474,6 +2440,32 @@ func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
 		twap.WithDecisionStore(h.decisionStore)(s)
 	case *vwap.Strategy:
 		vwap.WithDecisionStore(h.decisionStore)(s)
+	}
+}
+
+// applyUserAPIKey injects the per-request DORA API key into the
+// strategy so it can authenticate against DORA with the caller's
+// credentials instead of the server-global key. No-op when key is
+// empty. Used by createBacktest, createRun, and resumePersistedRun
+// to fold the type switch into a single helper.
+func (h *Handler) applyUserAPIKey(strat strategycore.Strategy, apiKey string) {
+	if apiKey == "" {
+		return
+	}
+	client := strategycore.NewDoraClientWithKey(apiKey)
+	switch s := strat.(type) {
+	case *meanreversion.Strategy:
+		meanreversion.WithMarketAPIClient(client)(s)
+	case *copytrading.Strategy:
+		copytrading.WithMarketAPIClient(client)(s)
+	case *breakout.Strategy:
+		breakout.WithMarketAPIClient(client)(s)
+	case *momentum.Strategy:
+		momentum.WithMarketAPIClient(client)(s)
+	case *twap.Strategy:
+		twap.WithMarketAPIClient(client)(s)
+	case *vwap.Strategy:
+		vwap.WithMarketAPIClient(client)(s)
 	}
 }
 
