@@ -156,6 +156,9 @@ not be lost.
   Update(), the lastPrice assignment order is moot.
 - `strategy/momentum/strategy.go:834-840` ticker case dead-reads `s.paused`
   into `_`; remove the lock cycle.
+  **Resolved by 9668bfd:** Slice B simplified the `<-ticker.C` branch
+  to `_ = struct{}{}` - no RLock/RUnlock on the paused field and no
+  blank-identifier consumption.
 - `mcp/tools_strategy.go` declares `min_order_size` / `max_order_size` as
   integer but momentum's `Config` is `decimal.Decimal` (the same PR's own
   OpenAPI MomentumConfig uses `number`). Widen to `nonNegNum` and update
@@ -170,3 +173,20 @@ not be lost.
   table-driven `fred/benchmark_test.go`.
 - `strategy.MustParseUUID` duplicates `strategy/exec/exec.go:78 MustParseUUID`.
   Pick one canonical location and delete the other.
+
+## Momentum minor nits completed (2026-08-25)
+
+The following TODO.md items have been resolved by separate commits
+and are no longer outstanding:
+
+- min_order_size / max_order_size schema type (Slice I-a) -
+  resolved by 0487347.
+- signal_source enum assertion (Slice I-b) - resolved by 0487347.
+- portfolio.go Parse failure masked (Slice I-c) - resolved by
+  b4851c0.
+- fred/benchmark.go untested (Slice I-d) - resolved by a5c2f96.
+- MustParseUUID duplicated (Slice I-e) - resolved by 8588afc.
+
+Net: 5 commits, ~280 lines changed, 4 new test files (fred/benchmark_test.go,
+strategy/portfolio_test.go) plus test assertion expansions in
+mcp/server_test.go.
