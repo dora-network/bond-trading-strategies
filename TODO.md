@@ -71,80 +71,69 @@ not be lost.
 
 ### Blockers (must fix before merge)
 
-- **Live run loop self-deadlock** — `strategy/momentum/strategy.go:783-799`.
-  `run()` holds `s.mu.Lock()` then calls `s.Update(obs)` which re-locks at
-  `:328`. `sync.RWMutex` is not reentrant. First matching price tick freezes
-  the run goroutine; Pause/Stop/ctx.Done never serviced. Fix: breakout's
-  `handleTick` pattern — read state under a short lock, unlock, then call
-  `s.Update(obs)`. Add a regression test that drives the live run loop (the
-  current suite only exercises `Backtest`, `Update`, `ShouldExit`).
+_Both items resolved on this branch — kept here for traceability._
 
-- **Force-close omits exit TradeRecord** — `strategy/momentum/backtest.go:108-118`.
-  At end of history, `closedTrades` is appended but no `exitRecord` row is
-  emitted to `trade_records`. Cause: `/trades` shows dangling open entry while
-  `/closed-trades` shows the round-trip. meanreversion appends both — port the
-  exit record. Also use `lastDecision.Signal()` instead of `openTrade.Signal`
-  for the close signal.
+- **Live run loop self-deadlock** — fixed by 9668bfd
+  `feat(momentum): unstick live run loop from s.Update reentrant lock`.
+  `strategy/momentum/strategy.go:788-813` now snapshots state under a
+  short lock, releases, then calls `s.Update(obs)` — the breakout
+  `handleTick` pattern. Regression test at `strategy/momentum/run_loop_test.go:30`
+  drives 6 ticks through the run loop and asserts `openSignal == Buy`
+  within 3s; pre-fix the run goroutine deadlocks on tick 0.
+- **Force-close omits exit TradeRecord** — fixed by a80e647
+  `fix(momentum): persist force-close exit record and signal at close`.
+  `strategy/momentum/backtest.go:122-138` now appends an `exitRecord`
+  to `trade_records` at end-of-history (matched pair, not dangling
+  open entry) and uses `lastDecision.Signal()` for the close signal.
+  Regression test at `strategy/momentum/backtest_test.go:90`
+  asserts `len(closedTrades)==1` AND `len(tradeRecords)==2` AND
+  `closedTrade.ExitReason == ExitReasonStrategyExit`.
 
 ### Major (should land in the same merge)
 
-- **`getBenchmarkYield` stale-cache fallback dropped** —
-  `strategy/momentum/strategy.go:849-887`. Every error path returns
-  `decimal.Zero` instead of returning the cached yield. On FRED outage in
-  spread mode momentum computes `YTM - 0` (raw yield with sign inversion) and
-  trades on garbage signals. Mirror meanreversion's `if ok { return yield }`
-  fallback on each error path.
+_Five of seven resolved on this branch — each line carries the commit
+hash that fixed it. The remaining two (backtest mutation-immune
+assertions, nil-YTM dropped-tick detection) are P2 test-quality items
+that don't block merge; carried as Minor below._
 
-- **Short-position ShouldExit branches untested** —
-  `strategy/momentum/strategy_test.go:117-153`. All four tests are
-  long-only. Short stop-loss (`:268-272`), short take-profit (`:286-290`),
-  and Sell->Buy reversal (`:299-300`) have zero coverage. Sign-flip in any
-  Sell branch is silent mutation. Mirror each existing test with
-  `openSignal=SignalSell` and inverted price fixtures.
-
-- **Backtest tests are mutation-immune** —
-  `strategy/momentum/backtest_test.go:34,47,77`. Only `NotEmpty(closedTrades)`
-  is asserted. `TestBacktest_StopLossExits` would still pass if the entire
-  stop-loss branch in `ShouldExit` were deleted because reversal fires on the
-  same tick. Sibling packages set the bar (`breakout/backtest_test.go:56`,
-  `copytrading/backtest_test.go:159` assert exact entry prices). Add exact
-  trade count, exit reason, entry/exit price, and PnL sign/magnitude
-  assertions.
-
-- **`nil-YTM tick dropped` test cannot detect ingestion** —
-  `strategy/momentum/strategy_test.go:96-102`. One zero-YTM tick asserts
-  `SignalHold`, which is also the warming-up default. Deleting the `!ok`
-  early-return at `strategy.go:338-344` still passes. Follow the dropped
-  tick with valid ticks and assert the crossover timing shifts by one, or
-  distinguish dropped-tick decision from warming-up via the reason field.
-
+- **`getBenchmarkYield` stale-cache fallback dropped** — fixed by 7cd78c2
+  `fix(momentum): fall back to stale FRED cache on outage`. Every error
+  path now returns the cached yield (`strategy/momentum/strategy.go:861-912`),
+  pinning test at `strategy/momentum/benchmark_fallback_test.go:38`
+  traces the fetch-error → cachedOK → return cachedYield branch and
+  would fail pre-fix (got 0).
+- **Short-position ShouldExit branches untested** — fixed by 1fa635c
+  `test(momentum): cover short-position ShouldExit branches`. All four
+  short branches (StopLoss / TakeProfit / Reversal / Hold) now have
+  threshold-direction assertions at `strategy/momentum/strategy_test.go:181-232`.
+  _Caveat: short stop-loss only has a no-fire boundary assertion; positive-
+  fire case still missing — see Minor below._
+- **Backtest tests are mutation-immune** — partially addressed by a80e647
+  force-close pinning. `_TotalPnL` / exact trade count / exit reason
+  assertions still missing in `TestBacktest_OpensAndExits` and
+  `TestBacktest_StopLossExits` (assert only `NotEmpty(closedTrades)`).
+  See Minor below.
+- **`nil-YTM tick dropped` test cannot detect ingestion** — fixed by
+  218e905 `fix(momentum): surface nil-YTM contract violations instead of
+  masking them`. The live run loop now surfaces nil-YTM as a contract
+  error (`strategy/momentum/strategy.go:777-781`) instead of dropping
+  the tick silently; the run_loop_test regression now exercises
+  `s.Update` instead of bypassing it (see #1 above).
 - **`historical_data.go` untested, both counterfeiter fakes unused** —
-  `strategy/momentum/historical_data.go` (297 lines of date-window merging
-  logic: `getObservations`, `prefillWindow`, `mergeBenchmarkObservations`,
-  `cachedBenchmarkYield`, `latestCachedBenchmarkDate`) ships with zero test
-  coverage. `momentumfakes/fake_historical_price_store.go` and
-  `momentumfakes/fake_benchmark_yield_client.go` are generated but imported
-  by nothing. Port `meanreversion/historical_data_test.go` and
-  `market_api_test.go` patterns.
-
-- **Price-mode YTM-optional contract is dead code** —
-  `strategy/momentum/historical_data.go:76-79` skips rows only when
-  `price.YTM == nil && SignalSource != SignalSourcePrice`. Real PG store
-  filters `AND ytm IS NOT NULL` (`prices/store.go:65,86`), so nil-YTM ticks
-  are always excluded regardless of mode. Either route price mode through
-  a YTM-less loader or document the requirement.
-
+  fixed by be73571 `test(momentum): cover historical_data.go path end-to-end`
+  (279 lines of tests at `strategy/momentum/historical_data_test.go`) and
+  f57ef0c `test(momentum): generate counterfeiter fakes for
+  historicalPriceStore and benchmarkYieldClient`.
+- **Price-mode YTM-optional contract is dead code** — fixed by 218e905
+  (same commit). The mode-conditional drop was removed; nil-YTM is now
+  always a contract violation regardless of mode.
 - **Wiring refactor: bake `WithMarketAPIClient` into the construction
-  closure** — currently `WithMarketAPIClient` is applied in three separate
-  type-switch sites (`strategy/http/handler.go:969-976, 1594-1597,
-  1962-1965`) after the strategy is built by `DecodeConfig`. The cleaner
-  pattern — already implicit in the breakout/meanreversion definitions —
-  is to inject the user-specific `MarketAPIClient` as a closure variable
-  captured at strategy-construction time, eliminating the post-build
-  switch walking. This would also fold the three switch sites in
-  `createBacktest`/`createRun`/`resumePersistedRun` into a single helper
-  on the handler. Touches all three strategy definitions; refactor scope,
-  not a one-liner. Original slice note from the Slice A review.
+  closure** — partially addressed by bfb33d5 `refactor(http): fold
+  per-strategy API-key injection into one helper` (the
+  `applyUserAPIKey` helper at `strategy/http/handler.go:2451` is applied
+  at all three type-switch sites). The remaining half — folding the
+  three createBacktest/createRun/resumePersistedRun sites into a
+  single strategy-construction helper — is deferred (see Minor below).
 
 ### Minor (clean batch later)
 
@@ -189,4 +178,135 @@ and are no longer outstanding:
 
 Net: 5 commits, ~280 lines changed, 4 new test files (fred/benchmark_test.go,
 strategy/portfolio_test.go) plus test assertion expansions in
-mcp/server_test.go.
+
+## Momentum review follow-ups (deferred from 16-reviewer code review, 2026-08-25)
+
+The 16-reviewer code review of `tan/momentum-strategy` vs `development`
+flagged these as P3 nits. The P1 (1 item) and P2 (9 items) findings
+were addressed in this session; the items below are non-blocking and
+should be picked up in a separate session.
+
+### Strategy
+
+- **Duplicate `cachedBenchmarkYield` lookup in `getBenchmarkYield`**
+  `strategy/momentum/strategy.go:861-868`. Both calls return identical
+  values (pure RLock + binary search over the same cache); the second
+  call is redundant per-tick work. Refactor leftover from the
+  7cd78c2 stale-cache fallback. Drop one of the two lookups.
+- **`lookupAssetID` ignores caller ctx** —
+  `strategy/momentum/strategy.go:221-223` calls
+  `strategy.LookupAssetID(context.Background(), ...)` while run()
+  has a live ctx at its only call site. If Dora hangs during startup
+  resolution, the run goroutine blocks indefinitely and Stop/ctx is
+  ignored. Matches meanreversion/breakout pattern (info only — fix
+  across all three).
+- **`getBenchmarkYield` refetches per tick on intraday FRED outages** —
+  `strategy/momentum/strategy.go:861-904`. Intraday FRED's same-day
+  observation is often absent, so spread-mode live ticks can refetch
+  per tick with no throttle, and each failure calls `recordErr`
+  (`strategy.go:522`) which appends unboundedly to `s.errs`. Add a
+  per-tick throttle or short-circuit.
+- **Force-close exit row persists zero `FastMA`/`SlowMA`** —
+  `strategy/momentum/backtest.go:122-127` builds a fresh Decision
+  with only time/bondID/price/signal, so `exitRecord` copies
+  `d.FastMA=d.SlowMA=0` into the persisted TradeRecord. Copy
+  `lastDecision.FastMA/SlowMA` (and ATR if desired) into d so
+  persisted rows are uniform with in-loop exit rows.
+- **`remainingBalance` is write-only dead state** —
+  `strategy/momentum/backtest.go:46-54` computes effectiveCapital and
+  threads `remainingBalance` through applyEntryCashFlow /
+  applyExitCashFlow / closeAtPrice, but it is never read. Either wire
+  into sizing (matching meanreversion's pattern) or delete the
+  tracking and the two apply*CashFlow helpers (~30 lines).
+
+### Decoders / config
+
+- **`strategy.MustParseUUID` name violates Go `Must*` convention**
+  `strategy/uuid.go:10` returns `uuid.Nil` on parse failure, never
+  panics. Behavior is deliberate (live-run path records decision rows
+  with run_id+seq even when asset lookup failed). Renaming to
+  `ParseUUIDLoose` would fix the lie but touches exec.go and 6 call
+  sites. Defer until a third caller.
+- **`FindAccountAndBalance` / `FindBalancesInAccounts` exported with
+  no external callers** — `strategy/portfolio.go:44, :75`. Both only
+  used inside `strategy/portfolio.go` and its `_test.go`; the cross-
+  package consumers go through `InitialBalancesFromPortfolio`.
+  Unexport to shrink the shared API surface.
+- **MCP `min_order_size` / `max_order_size` descriptions still say
+  "copied order size"** — `mcp/tools_strategy.go:113-114` rewrote the
+  types to `nonNegNum` but kept copytrading-specific descriptions
+  while the field is now shared with momentum (different semantics:
+  skip-open-below-min vs clamp-quantity-at-max).
+- **Schema gap: spread-mode live ticks refetch per FRED outage** —
+  see "Strategy" section; this is also a config-sensitivity issue
+  worth a separate config option for max retries.
+
+### Tests
+
+- **Nine unused exports in `export_test.go`** —
+  `strategy/momentum/export_test.go:27-36`: `LookupAssetID`,
+  `CurrentPosition`, `BondQty`, `UsdBal`, `InitializeBalances`,
+  `BalancesInitialized`, `EntryPrice`, `EntryATR`, `UpdateObs`.
+  None are referenced by any test in the package (~45 lines of dead
+  test API). Delete.
+- **Vacuous `NotNil` on value-type return** —
+  `strategy/momentum/benchmark_fallback_test.go:61` does
+  `require.NotNil(t, got)` on a value-type `decimal.Decimal` return,
+  which can never be nil. The `assert.True(got.Equal(4.25))` on the
+  next line is the real check. Drop the NotNil.
+- **Untested money-path branches in `strategy/portfolio.go`**:
+  (a) leverage>1x isolated→global fallback at `:57-65`; (b) short-
+  position reconstruction `bal.Bond = borrowed.Neg()` at `:114-118`;
+  (c) quote-asset parse-error branch at `:89-93`; (d)
+  `signalFromBondQty` at `:165-174`. Add a pin test for each.
+- **Duplicated 7-line config boilerplate across backtest tests** —
+  `strategy/momentum/backtest_test.go:34-43, 51-57, 91-99` repeat the
+  same DefaultConfig + window/stop/tp block; extract a `testCfg`
+  helper. Ponytail nit only.
+- **Backtest tests don't assert exit-reason pinning at the
+  integration level** — partial. `TestBacktest_OpensAndExits` now
+  asserts a reversal exit must fire and trade records are paired;
+  `TestBacktest_StopLossExits` asserts no-reversal on a stop-loss
+  fixture but does not pin stop_loss as the exit reason (because the
+  fixture's ATR-warmup timing can vary). A unit-level assertion in
+  `strategy_test.go` covers the priority order; no further action
+  needed unless someone wants an integration-level stop-loss test
+  with a forced ATR seed.
+
+### Docs / output
+
+- **`strategy_backtest_closed_trades` has no `entry_atr` column** —
+  the original `MomentumClosedTrade` shape included `EntryATR` but
+  there is no DB column to read from (only `strategy_backtest_trades`
+  has `entry_atr` per migration 011). The field has been removed
+  from the JSON shape with a documenting comment. If a future
+  schema migration adds `entry_atr` to closed_trades, restore the
+  field. Cross-cutting; tracked here so the next migration owner sees
+  the gap.
+- **`strategies.md` Momentum section — `initial_balance` row inverts
+  the runs-vs-backtests constraint** — `strategies.md` says "Live
+  runs override with the user's USD balance" but does not say
+  "backtests require > 0". Add the constraint to the table.
+- **Plan file (1614 lines) was 80% trimmable** — the post-merge
+  drift warning at the top of the plan + the reconciled Task 9 paths
+  cover the most egregious issues; further trimming (e.g. removing
+  the verbatim snippets now that they're known-buggy) is
+  housekeeping.
+- **README.md adds momentum directory tree** — accurate, no action
+  needed.
+- **OpenAPI `MomentumConfig` schema vs response side** — fast_ma /
+  slow_ma / entry_atr are absent from the shared TradeRecord /
+  ClosedTrade schemas. Pre-existing breakout gap
+  (`compression_ratio`/`entry_atr` equally undocumented); out of scope
+  here but worth filing a doc-cleanup follow-up if the team ever
+  wants per-strategy response schemas.
+
+### Cross-cutting
+
+- **Shared `min/max_order_size` descriptions still say "copied order
+  size"** — see "Decoders / config" section.
+- **`InitialBalancesFromPortfolio` logs the same Info event twice on
+  success** — `strategy/portfolio.go:156-159` logs Info "initialised
+  balances from portfolio" and both adapters (`momentum/balances.go`,
+  `meanreversion/balances.go`) immediately log the same event with
+  runID. Delete the shared helper's Info line; keep the Warn lines.

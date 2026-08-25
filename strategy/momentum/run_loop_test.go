@@ -33,14 +33,28 @@ func TestRunLoop_ProcessesTicksWithoutDeadlock(t *testing.T) {
 	cfg.FastWindow = 3
 	cfg.SlowWindow = 5
 	cfg.ATRWindow = 3
+	cfg.InitialBalance = decimal.MustNew(1000, 0) // without this, the fake's zero USD position zeroes the budget and cappedOrderQuantity returns (0, false)
 	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
-
 	fake := &strategyfakes.FakeMarketAPIClient{}
 	fake.BaseAssetIDStub = func(_ context.Context, _ string) (string, error) {
 		return "asset-A", nil
 	}
+	fake.QuoteAssetIDStub = func(_ context.Context, _ string) (string, error) {
+		return "asset-USD", nil
+	}
+	// Without this, the fake's zero collateral weight zeroes the
+	// budget and cappedOrderQuantity returns (0, false). The
+	// production path defaults to 1.0 on lookup failure; mirror
+	// that by returning 1.0 here.
+	fake.AssetCollateralWeightStub = func(_ context.Context, _ string) (decimal.Decimal, error) {
+		return decimal.One, nil
+	}
+	// Return a zero position so the strategy starts in Hold and the
+	// poll genuinely observes the MA crossover through s.Update. A
+	// non-zero stub would set openSignal to Buy before any tick
+	// arrives, masking the regression.
 	fake.AssetPositionStub = func(_ context.Context, _ string) (decimal.Decimal, decimal.Decimal, error) {
-		return decimal.MustNew(1, 0), decimal.Zero, nil
+		return decimal.Zero, decimal.Zero, nil
 	}
 
 	s := momentum.New(cfg, nil, momentum.WithMarketAPIClient(fake))
@@ -55,15 +69,24 @@ func TestRunLoop_ProcessesTicksWithoutDeadlock(t *testing.T) {
 		teardown()
 	}()
 
-	// Send 5 rising ticks; after tick 5 both windows are full and the
-	// fast MA has crossed above the slow MA, so openSignal flips to Buy.
+	// Set a non-nil YTM so the run loop does not drop the tick at the
+	// nil-YTM contract guard (strategy.go drops nil-YTM ticks before
+	// they reach s.Update, which would mask the deadlock regression).
+	ytmVal := decimal.MustNew(5, 2)
 	assetID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
-	for i := range 5 {
+	// Send 6 ticks: slowWin has size 5 so on the 5th tick slowWin is
+	// still one short of full. The 6th tick captures windowReady=true
+	// AND fastMA > slowMA, so executeDecision runs and openSignal
+	// flips to Buy. Pre-fix the run goroutine deadlocks on tick 0
+	// and openSignal never flips — the regression test must drive a
+	// tick through to Update, not just into the run loop.
+	for i := range 6 {
 		tick := map[uuid.UUID]prices.AssetPrice{
 			assetID: {
 				Time:    time.Unix(int64(i), 0).UTC(),
 				AssetID: "asset-A",
 				Price:   decimal.MustNew(int64(100+i), 0),
+				YTM:     &ytmVal,
 			},
 		}
 		select {

@@ -3263,31 +3263,44 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 		return momentum.Config{}, nil, fmt.Errorf("config.max_position_size: %w", err)
 	}
 
-	var amount, leverage decimal.Decimal
+	amount := defaults.InitialBalance
 	if payload.InitialBalance != nil {
-		amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
-		if err != nil {
-			return momentum.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+		if *payload.InitialBalance < 0 {
+			return momentum.Config{}, nil, fmt.Errorf("config.initial_balance must be non-negative")
 		}
-	} else {
-		amount = defaults.InitialBalance
+		if *payload.InitialBalance == 0 {
+			// For backtests, initial_balance must be > 0 because it is the
+			// seed capital. For runs, the live path overrides cfg.InitialBalance
+			// from the user's DORA portfolio (strategy/momentum/strategy.go:504)
+			// so 0 means "fetch my USD balance".
+			if !forRun {
+				return momentum.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0 for backtests")
+			}
+		} else {
+			amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
+			if err != nil {
+				return momentum.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+			}
+		}
 	}
+	leverage := defaults.Leverage
 	if payload.Leverage != nil {
+		if *payload.Leverage <= 0 {
+			return momentum.Config{}, nil, fmt.Errorf("config.leverage must be greater than 0")
+		}
 		leverage, err = decimal.NewFromFloat64(*payload.Leverage)
 		if err != nil {
 			return momentum.Config{}, nil, fmt.Errorf("config.leverage: %w", err)
 		}
-	} else {
-		leverage = defaults.Leverage
 	}
 
-	if forRun {
-		if amount.Sign() <= 0 {
-			return momentum.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0 for runs")
-		}
-		if leverage.Sign() <= 0 {
-			return momentum.Config{}, nil, fmt.Errorf("config.leverage must be greater than 0 for runs")
-		}
+	// MaxOrderSize >= MinOrderSize when both are positive. Mirror copytrading's
+	// cross-check (decodeCopyTradingConfig); design §5 promises it explicitly.
+	// Without this, the strategy silently never opens because cappedOrderQuantity
+	// (strategy/momentum/strategy.go:208-213) clamps qty to MaxOrderSize then
+	// skips when clamped qty < MinOrderSize.
+	if payload.MinOrderSize > 0 && payload.MaxOrderSize > 0 && payload.MaxOrderSize < payload.MinOrderSize {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size must be greater than or equal to min_order_size")
 	}
 
 	var orderBookID uuid.UUID

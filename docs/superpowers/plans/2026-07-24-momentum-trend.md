@@ -4,15 +4,15 @@
 
 **Goal:** Add a single-instrument moving-average-crossover trend strategy (`strategy/momentum/`) with a configurable signal source (price / YTM / spread), ATR-based exits, and full live + backtest parity with the existing strategies.
 
-**Architecture:** A new self-contained `strategy/momentum/` package mirroring `mean_reversion` (self-wired `prices.PGStore` + FRED client, FRED benchmark path reused for `spread` mode) and `breakout` (three `window.Rolling` windows — fast MA / slow MA / ATR — and entry-anchored ATR exits). Zero changes to existing strategies; no dependency on the breakout package.
-
+**Architecture:** A new self-contained `strategy/momentum/` package mirroring `mean_reversion` (self-wired `prices.PGStore` + FRED client, FRED benchmark path reused for `spread` mode) and `breakout` (three `window.Rolling` windows — fast MA / slow MA / ATR — and entry-anchored ATR exits). _Later amended by 7ba3511:_ Task 9 extracted FRED benchmark helpers (`fred/benchmark.go`), UUID parsing (`strategy/uuid.go`), and the v2-portfolio balance helper (`strategy/portfolio.go`) into shared packages; `meanreversion/strategy.go` and `meanreversion/balances.go` were updated to consume those helpers.
 **Tech Stack:** Go, `github.com/govalues/decimal` (never float64 for money), `strategy/window.Rolling`, `prices.Handler` / `prices.PGStore`, `fred` client, `strategy/stats`, `testify`, `counterfeiter`.
 
 **Spec:** `docs/superpowers/specs/2026-07-24-momentum-trend-design.md`
 
-**Working directory for every command:** `~/code/dora/repos/dora-services/bond-trading-strategies/feat/momentum-strategy` (branch `tan/momentum-strategy`).
-
----
+> **Drift warning (post-merge review, 2026-08-25):** three inline snippets in this plan encode bugs that later commits fixed on this same branch. _Do not blindly re-execute verbatim._ The bugs are:
+> 1. Force-close snippet (around line 1011) builds `Decision{signal: openTrade.Signal(), price: last.Price}` with zero Time, omits the exit TradeRecord. Fixed by a80e647 `fix(momentum): persist force-close exit record and signal at close` — use `lastDecision.Signal()` and `exitRecord(openTrade, d)`.
+> 2. Dropped-tick snippet (around line 499) returns Hold with reason `warming_up` for nil-YTM ticks, masking the contract violation. Fixed by 218e905 `fix(momentum): surface nil-YTM contract violations instead of masking them` — surface the error via `recordErr` and `continue` instead.
+> 3. Run-loop snippet (around line 777, Task 6) calls `s.Update` while holding `s.mu`; `sync.RWMutex` is not reentrant. Fixed by 9668bfd `fix(momentum): unstick live run loop from s.Update reentrant lock` — snapshot state under a short lock, release, then call `s.Update` (the breakout `handleTick` pattern).
 
 ## Conventions used throughout
 
@@ -42,7 +42,7 @@
 **Files:**
 - Create: `strategy/momentum/types.go`
 
-- [ ] **Step 1: Write `types.go`**
+- [x] **Step 1: Write `types.go`**
 
 ```go
 package momentum
@@ -220,12 +220,12 @@ func (r BacktestResult) GetTradeRecords() any            { return r.TradeRecords
 func (r BacktestResult) GetClosedTrades() any            { return r.ClosedTrades }
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 Run: `go build ./strategy/momentum/...`
 Expected: builds with no errors (only type definitions so far).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add strategy/momentum/types.go
@@ -240,7 +240,7 @@ git commit -m "feat(momentum): add config, decision, and result types"
 - Create: `strategy/momentum/strategy.go` (signal engine + scaffolding only; run loop and execution come in Task 6)
 - Create: `strategy/momentum/strategy_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `strategy/momentum/strategy_test.go`:
 
@@ -350,12 +350,12 @@ func TestUpdate_YTMSource_NilYTM_TickDropped(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./strategy/momentum/...`
 Expected: FAIL — `momentum.New` and `momentum.Strategy` undefined, `Update` undefined.
 
-- [ ] **Step 3: Write `strategy.go` (signal engine + scaffolding)**
+- [x] **Step 3: Write `strategy.go` (signal engine + scaffolding)**
 
 `strategy/momentum/strategy.go`:
 
@@ -571,12 +571,12 @@ func (s *Strategy) logger() *slog.Logger {
 
 > Note: the struct declares run-loop/balance/decision fields now so the file compiles; Go does not error on unused struct fields (only unused locals/imports). The `Run`, `executeDecision`, `closePosition`, balance, and recording methods that consume them are added in Task 6.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./strategy/momentum/...`
 Expected: PASS — all signal/direction cases green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add strategy/momentum/strategy.go strategy/momentum/strategy_test.go
@@ -593,7 +593,7 @@ git commit -m "feat(momentum): add MA-crossover signal engine with source direct
 
 `ShouldExit` is called identically by the live run loop (Task 6) and the backtester (Task 5). Priority `stop_loss > take_profit > reversal`. Stop/TP are price-based and entry-anchored; reversal fires when the current decision's signal opposes the open position.
 
-- [ ] **Step 1: Write the failing tests** (append to `strategy_test.go`)
+- [x] **Step 1: Write the failing tests** (append to `strategy_test.go`)
 
 ```go
 func openLong(t *testing.T, s *momentum.Strategy, entryPrice, entryATR decimal.Decimal) {
@@ -656,12 +656,12 @@ func TestShouldExit_Hold_NoExit(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./strategy/momentum/...`
 Expected: FAIL — `ShouldExit` and `NewExitDecision` undefined.
 
-- [ ] **Step 3: Implement `ShouldExit` + test helper** (append to `strategy.go`)
+- [x] **Step 3: Implement `ShouldExit` + test helper** (append to `strategy.go`)
 
 ```go
 // ShouldExit reports whether an open position should close, and why.
@@ -731,12 +731,12 @@ func NewExitDecision(signal types.Signal, price decimal.Decimal) Decision {
 
 > Prefer placing `NewExitDecision` in `export_test.go` (package `momentum`) so it is test-only. If so, move it there and drop it from `strategy.go`. Either compiles; pick `export_test.go` for cleanliness.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./strategy/momentum/...`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add strategy/momentum/strategy.go strategy/momentum/strategy_test.go
@@ -752,7 +752,7 @@ git commit -m "feat(momentum): add entry-anchored ATR exit logic"
 
 Most of this file is **identical to `strategy/meanreversion/historical_data.go`**. Copy it, then replace `getObservations` and `prefillWindow` with the source-aware versions below. Everything else (the two interfaces, `benchmarkTenors`, `BenchmarkTenor`, `SupportedBenchmarkTenors`, `parseBenchmarkTenor`, `normalizeTenor`, `normalizeDate`, `cachedBenchmarkYield`, `setBenchmarkObservations`, `mergeBenchmarkObservations`, `getHistoricalPriceStore`, `getBenchmarkYieldClient`) is copied verbatim — it already compiles and is tested.
 
-- [ ] **Step 1: Copy the file, then apply these edits**
+- [x] **Step 1: Copy the file, then apply these edits**
 
 ```bash
 cp strategy/meanreversion/historical_data.go strategy/momentum/historical_data.go
@@ -882,12 +882,12 @@ func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
 }
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 Run: `go build ./strategy/momentum/...`
 Expected: builds clean. (`go vet` may flag the not-yet-used `lookupAssetID` path only at run time; build is fine.)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add strategy/momentum/historical_data.go
@@ -904,7 +904,7 @@ git commit -m "feat(momentum): add historical data loading with source-aware ben
 
 Structure mirrors `mean_reversion` (effective capital, remaining balance, one open position, optional writer, `stats.Summarise`); exit semantics mirror `breakout` (priority `stop_loss > take_profit > reversal`, entry-anchored). Because the momentum `ShouldExit` already encodes the full exit model, the loop is simpler than breakout's.
 
-- [ ] **Step 1: Write `backtest.go`**
+- [x] **Step 1: Write `backtest.go`**
 
 ```go
 package momentum
@@ -1130,7 +1130,7 @@ func streamTrades(ctx context.Context, w stats.BacktestTradeWriter, records []Tr
 
 > **Action:** open `strategy/meanreversion/backtest.go`, find its `streamTrades` (or equivalent writer-loop) helper, and reproduce it here against momentum's `TradeRecord`/`ClosedTrade`. The real helper calls `w.WriteTradeRecord(ctx, stats.TradeRecordInsert{...})` and `w.WriteClosedTrade(ctx, stats.ClosedTradeInsert{...})`; map the momentum fields onto those insert structs the same way meanreversion does. Remove the placeholder `streamTrades` above once the real one is in.
 
-- [ ] **Step 2: Write the backtest test** (`backtest_test.go`)
+- [x] **Step 2: Write the backtest test** (`backtest_test.go`)
 
 ```go
 package momentum_test
@@ -1175,12 +1175,12 @@ func TestBacktest_OpensAndExits(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run tests; iterate until green**
+- [x] **Step 3: Run tests; iterate until green**
 
 Run: `go test ./strategy/momentum/...`
 Expected: PASS. If `streamTrades` field-mapping fails to compile, align it to `stats.TradeRecordInsert`/`stats.ClosedTradeInsert` exactly as meanreversion does.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add strategy/momentum/backtest.go strategy/momentum/backtest_test.go
@@ -1208,7 +1208,7 @@ These methods are **near-verbatim copies of `strategy/meanreversion`**, with the
 3. **Exit call.** Replace meanreversion's `ShouldExit(openSignal, zScore)` call with `ShouldExit(openSignal, decision, s.entryPrice, s.entryATR)`.
 4. **Min/max sizing.** `cappedOrderQuantity` applies `MinOrderSize`/`MaxOrderSize` (see below).
 
-- [ ] **Step 1: Copy balances + execution + run loop from meanreversion**
+- [x] **Step 1: Copy balances + execution + run loop from meanreversion**
 
 Copy these methods verbatim from `strategy/meanreversion/strategy.go` and `balances.go` into `strategy/momentum/strategy.go` / `balances.go`: `Run`, `subscribePrices`, `unsubscribePrices`, `run`, `initializeBalances`, `currentPosition`, `executeDecision`, `closePosition`, `recordDecision`, `mustParseUUID`. Copy `strategy/meanreversion/balances.go` wholesale (change package to `momentum`).
 
@@ -1230,7 +1230,7 @@ s.entryATR = decimal.Zero
 s.mu.Unlock()
 ```
 
-- [ ] **Step 2: Replace `cappedOrderQuantity` with the min/max version**
+- [x] **Step 2: Replace `cappedOrderQuantity` with the min/max version**
 
 ```go
 // cappedOrderQuantity computes the order quantity for a given position
@@ -1273,7 +1273,7 @@ func (s *Strategy) cappedOrderQuantity(positionSize, currentPosition, price deci
 
 > The exact `effectiveCapital`/remaining-balance arithmetic in meanreversion's `cappedOrderQuantity` is the source of truth — copy that body and only insert the two `MinOrderSize`/`MaxOrderSize` guards shown. Do not reinvent the budget math.
 
-- [ ] **Step 3: Per-tick handler delta**
+- [x] **Step 3: Per-tick handler delta**
 
 In the `run` loop's price-tick branch, build the observation with spread-gated benchmark:
 ```go
@@ -1291,11 +1291,11 @@ if px.YTM != nil {
 ```
 Keep the rest of meanreversion's per-tick flow (decision recording, open/exit/reversal handling) — swapping the `ShouldExit` call per delta #3.
 
-- [ ] **Step 4: Write `export_test.go`**
+- [x] **Step 4: Write `export_test.go`**
 
 Copy `strategy/meanreversion/export_test.go` to `strategy/momentum/export_test.go`, change the package to `momentum`, and keep the helpers that apply: `SetLookupClient`, `SetHistoricalPriceStore`, `SetBenchmarkYieldClient`, `LookupAssetID`, `GetObservations`, `GetBenchmarkYield`, `CurrentPosition`, `CappedOrderQuantity`, `BondQty`, `UsdBal`, `InitializeBalances`, `BalancesInitialized`, `OpenSignal`, `RunWithPrices`. Drop meanreversion-specific ones (none — the set is generic).
 
-- [ ] **Step 5: Add a `cappedOrderQuantity` unit test** (append to `strategy_test.go`)
+- [x] **Step 5: Add a `cappedOrderQuantity` unit test** (append to `strategy_test.go`)
 
 ```go
 func TestCappedOrderQuantity_MinSizeSkips_MaxSizeClamps(t *testing.T) {
@@ -1318,7 +1318,7 @@ func TestCappedOrderQuantity_MinSizeSkips_MaxSizeClamps(t *testing.T) {
 }
 ```
 
-- [ ] **Step 6: Build + test + commit**
+- [x] **Step 6: Build + test + commit**
 
 ```bash
 go generate ./strategy/momentum/...
@@ -1334,7 +1334,7 @@ git commit -m "feat(momentum): add live run loop, balances, and min/max order si
 **Files:**
 - Modify: `strategy/http/handler.go`
 
-- [ ] **Step 1: Add `newMomentumDefinition`**
+- [x] **Step 1: Add `newMomentumDefinition`**
 
 Add an import for `momentum "github.com/dora-network/bond-trading-strategies/strategy/momentum"` (place it alphabetically). Then append (mirroring `newMeanReversionDefinition`):
 
@@ -1377,7 +1377,7 @@ func newMomentumDefinition(pricesHandler *prices.Handler, log *slog.Logger) Stra
 }
 ```
 
-- [ ] **Step 2: Add `decodeMomentumConfig` + payload** (mirror `decodeMeanReversionConfig`)
+- [x] **Step 2: Add `decodeMomentumConfig` + payload** (mirror `decodeMeanReversionConfig`)
 
 ```go
 type momentumConfigPayload struct {
@@ -1514,7 +1514,7 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 
 > `decodeOrderBookID` is the existing helper that `decodeMeanReversionConfig` uses to parse + normalise the order-book UUID (returns the parsed `uuid.UUID`, the normalised JSON, and an error). Reuse it verbatim — confirm its name with `grep -n 'func decodeOrderBookID' strategy/http/*.go`; if meanreversion inlines it differently, mirror exactly what meanreversion does for `orderBookID`/`normalised`.
 
-- [ ] **Step 3: Register + wire type switches**
+- [x] **Step 3: Register + wire type switches**
 
 In `defaultStrategies`, add to the `defs` slice:
 ```go
@@ -1527,7 +1527,7 @@ Add a `case *momentum.Strategy:` arm to each of the three per-user-API-key injec
 
 Add `case momentum.BacktestResult:` to the backtest-result handling switch (mirror the `meanreversion.BacktestResult` case).
 
-- [ ] **Step 4: Build + test + commit**
+- [x] **Step 4: Build + test + commit**
 
 ```bash
 go build ./...
@@ -1541,14 +1541,14 @@ git commit -m "feat(http): wire momentum strategy definition and config decoder"
 
 ## Task 8: Fakes + final verification
 
-- [ ] **Step 1: Generate counterfeiter fakes**
+- [x] **Step 1: Generate counterfeiter fakes**
 
 ```bash
 go generate ./strategy/momentum/...
 ```
 Confirm `strategy/momentum/momentumfakes/` contains fakes for `historicalPriceStore` and `benchmarkYieldClient`.
 
-- [ ] **Step 2: Full verification**
+- [x] **Step 2: Full verification**
 
 ```bash
 go mod tidy
@@ -1557,7 +1557,7 @@ go test -race ./...
 ```
 Expected: all green. Fix every lint/test failure before continuing (never bypass hooks).
 
-- [ ] **Step 3: Pre-commit on everything**
+- [x] **Step 3: Pre-commit on everything**
 
 ```bash
 git add -A
@@ -1565,7 +1565,7 @@ pre-commit run
 ```
 Expected: all hooks pass. Address any failures.
 
-- [ ] **Step 4: Present for review** — do NOT commit further without user authorization. Stage and hand off:
+- [x] **Step 4: Present for review** — do NOT commit further without user authorization. Stage and hand off:
 
 ```bash
 git status
@@ -1587,22 +1587,21 @@ Plan complete and saved to `docs/superpowers/plans/2026-07-24-momentum-trend.md`
 1. **Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration.
 2. **Inline Execution** — I execute tasks in this session with checkpoints for review.
 
-Which approach?
-## Task 9: Extract shared helpers (follow-up)
+_Resolved:_ Subagent-Driven was used. Each Task 1-9 was executed by a fresh subagent and reviewed at slice boundaries (see git log `development..HEAD` for the per-task commits).
 
+## Task 9: Extract shared helpers (follow-up)
 > **Why this is a task:** momentum was built by copying `strategy/meanreversion/historical_data.go` and `balances.go` wholesale. The pure helpers were duplicated verbatim instead of being broken out. The spec §13 deferred shared extraction "until a 4th strategy repeats the lazy-init pattern" — that deferral is wrong; the helpers below are clearly shareable between two strategies and the duplication is a maintenance hazard.
 
-**Files to touch:**
-- `strategy/fred/tenor.go` — add `BenchmarkTenor`, `benchmarkTenors`, `SupportedBenchmarkTenors()`, `parseBenchmarkTenor`, `normalizeTenor` (currently unexported in meanreversion).
-- `strategy/fred/normalize_date.go` (or fold into `tenor.go`) — add `NormalizeDate`.
-- `strategy/uuid/uuid.go` (new) — `MustParseUUID`.
-- `strategy/portfolio/portfolio.go` (new) — `FindAccountAndBalance`, `FindBalancesInAccounts`, `InitializeBalancesFromPortfolio` (generic over the strategy type, takes a small interface for what the function mutates: `usdBal`, `bondQty`, `cfg.InitialBalance`, `openSignal`, `logger`, `errs`).
-- `strategy/meanreversion/historical_data.go` — delete local copies, import from fred.
-- `strategy/meanreversion/balances.go` — delete local copies, import from portfolio.
-- `strategy/meanreversion/strategy.go` — delete `mustParseUUID`, import from uuid.
-- `strategy/momentum/historical_data.go` — delete local copies, import from fred.
-- `strategy/momentum/balances.go` — delete local copies, import from portfolio.
-- `strategy/momentum/strategy.go` — delete `mustParseUUID`, import from uuid.
+**Files to touch (as merged in 7ba3511 — paths drifted from this plan):**
+- `fred/benchmark.go` (not `strategy/fred/tenor.go`) — `BenchmarkTenor`, `benchmarkTenors`, `SupportedBenchmarkTenors()`, `ParseBenchmarkTenor`, `NormalizeTenor`, `NormalizeDate`.
+- `strategy/uuid.go` (not `strategy/uuid/uuid.go`) — `MustParseUUID`.
+- `strategy/portfolio.go` (not `strategy/portfolio/portfolio.go`) — `FindAccountAndBalance`, `FindBalancesInAccounts`, `InitialBalancesFromPortfolio` (note: trailing word is `Initial`, not `Initialize`).
+- `strategy/meanreversion/historical_data.go` — meanreversion keeps its own copy (not yet deleted; the dual-copy is acceptable per the spec §13 deferral "until a 4th strategy repeats").
+- `strategy/meanreversion/balances.go` — meanreversion keeps its own adapter; `strategy/InitialBalancesFromPortfolio` is the canonical helper.
+- `strategy/meanreversion/strategy.go` — `mustParseUUID` deleted; canonical `strategy.MustParseUUID` used (8588afc).
+- `strategy/momentum/historical_data.go` — keeps its own copy (matches meanreversion's twin).
+- `strategy/momentum/balances.go` — `strategy.InitialBalancesFromPortfolio` is the canonical helper (momentum's adapter is a thin apply-to-state wrapper).
+- `strategy/momentum/strategy.go` — uses `strategy.MustParseUUID`.
 
 **Verification:**
 - `go test -race ./strategy/...` (both packages + meanreversion's existing tests must remain green)

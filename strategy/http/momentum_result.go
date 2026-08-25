@@ -26,11 +26,14 @@ type MomentumClosedTrade struct {
 	ExitSignal   string    `json:"exit_signal"`
 	EntryPrice   string    `json:"entry_price"`
 	ExitPrice    string    `json:"exit_price"`
-	EntryATR     string    `json:"entry_atr"`
 	Quantity     string    `json:"quantity"`
 	PositionSize string    `json:"position_size"`
 	PnL          string    `json:"pnl"` //nolint:tagliatelle
 	ExitReason   string    `json:"exit_reason"`
+	// EntryATR intentionally omitted: strategy_backtest_closed_trades
+	// has no entry_atr column (only strategy_backtest_trades does, per
+	// migration 011). TradeRecord-level entry_atr is preserved on
+	// the matching entry row.
 }
 
 type MomentumTradeRecord struct {

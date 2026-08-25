@@ -233,6 +233,30 @@ func TestHandlerListsStrategies(t *testing.T) {
 	assert.Equal(t, "bucket_minutes", vwap.ConfigFields[6].Name)
 	assert.True(t, vwap.SupportsRun)
 	assert.False(t, vwap.SupportsBacktest)
+
+	mom, ok := byType["momentum"]
+	require.True(t, ok, "momentum should be in the strategies list")
+	assert.Equal(t, "available", mom.Status)
+	require.Len(t, mom.ConfigFields, 13)
+	// Field order mirrors newMomentumDefinition (handler.go:3346-3438).
+	assert.Equal(t, "signal_source", mom.ConfigFields[0].Name)
+	assert.Equal(t, "fast_window", mom.ConfigFields[1].Name)
+	assert.Equal(t, "slow_window", mom.ConfigFields[2].Name)
+	assert.Equal(t, "atr_window", mom.ConfigFields[3].Name)
+	assert.Equal(t, "stop_loss_atr", mom.ConfigFields[4].Name)
+	assert.Equal(t, "take_profit_atr", mom.ConfigFields[5].Name)
+	assert.Equal(t, "min_order_size", mom.ConfigFields[6].Name)
+	assert.Equal(t, "max_order_size", mom.ConfigFields[7].Name)
+	assert.Equal(t, "max_position_size", mom.ConfigFields[8].Name)
+	assert.Equal(t, "tenor", mom.ConfigFields[9].Name)
+	assert.Equal(t, "order_book_id", mom.ConfigFields[10].Name)
+	assert.True(t, mom.ConfigFields[10].Required, "order_book_id must be required for momentum")
+	assert.Equal(t, "initial_balance", mom.ConfigFields[11].Name)
+	assert.Equal(t, "number", mom.ConfigFields[11].Type)
+	assert.Equal(t, "leverage", mom.ConfigFields[12].Name)
+	assert.Equal(t, "number", mom.ConfigFields[12].Type)
+	assert.True(t, mom.SupportsRun)
+	assert.True(t, mom.SupportsBacktest)
 }
 
 func TestHandlerListsTenors(t *testing.T) {
@@ -1690,6 +1714,130 @@ func TestHandlerValidationErrors(t *testing.T) {
 	})
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "config.initial_balance must be non-negative")
+}
+
+// TestHandlerMomentumValidationErrors pins the validation branches of
+// decodeMomentumConfig. Each row exercises one rejection; mutation
+// tests against these assertions would catch a regression where the
+// branch is silently removed. Mirrors the meanreversion block in
+// TestHandlerValidationErrors above.
+func TestHandlerMomentumValidationErrors(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	tests := []struct {
+		name        string
+		body        map[string]any
+		path        string
+		wantCode    int
+		wantContain string
+	}{
+		{
+			name: "backtest requires positive initial_balance",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"initial_balance": 0},
+				"start":         time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
+				"end":           time.Now().Format(time.RFC3339),
+			},
+			path:        "/v1/backtests",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.initial_balance must be greater than 0 for backtests",
+		},
+		{
+			name: "run allows zero initial_balance (fetched from DORA)",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"initial_balance": 0},
+			},
+			path:     "/v1/runs",
+			wantCode: http.StatusCreated,
+		},
+		{
+			name: "negative initial_balance rejected for runs",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"initial_balance": -1},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.initial_balance must be non-negative",
+		},
+		{
+			name: "negative leverage rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"leverage": -1},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.leverage must be greater than 0",
+		},
+		{
+			name: "max_order_size below min_order_size rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"min_order_size": 5, "max_order_size": 2},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.max_order_size must be greater than or equal to min_order_size",
+		},
+		{
+			name: "fast_window must be >= 2",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"fast_window": 1},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.fast_window must be at least 2",
+		},
+		{
+			name: "slow_window must be greater than fast_window",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"fast_window": 5, "slow_window": 5},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.slow_window must be greater than fast_window",
+		},
+		{
+			name: "spread signal_source requires tenor",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"signal_source": "spread"},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.tenor is required when signal_source is spread",
+		},
+		{
+			name: "unknown signal_source rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"signal_source": "bogus"},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.signal_source must be one of price, ytm, spread",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := performJSONRequest(t, handler, tt.path, tt.body)
+			require.Equal(t, tt.wantCode, rec.Code)
+			if tt.wantContain != "" {
+				assert.Contains(t, rec.Body.String(), tt.wantContain)
+			}
+		})
+	}
 }
 
 func performJSONRequest(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {

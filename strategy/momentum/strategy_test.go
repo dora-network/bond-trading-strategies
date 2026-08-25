@@ -191,6 +191,24 @@ func TestShouldExit_StopLoss_Short(t *testing.T) {
 			"threshold 110; should NOT fire stop-loss, got reason=%q", reason)
 }
 
+// TestShouldExit_StopLoss_ShortFires is the positive-fire companion
+// to TestShouldExit_StopLoss_Short. With entry 100 and stopDist 10
+// (short stop at entry+stopDist = 110), price 111 must trigger
+// ExitReasonStopLoss. Without this test, deleting the entire
+// SignalSell arm of the stop-loss switch in strategy.go would
+// leave every test green.
+func TestShouldExit_StopLoss_ShortFires(t *testing.T) {
+	cfg := momentum.DefaultConfig()
+	cfg.StopLossATR = decimal.MustNew(2, 0)
+	s := momentum.New(cfg, nil)
+	entryPrice := decimal.MustNew(100, 0)
+	entryATR := decimal.MustNew(5, 0) // stopDist = 10
+	d := momentum.NewExitDecision(types.SignalSell, decimal.MustNew(111, 0))
+	exit, reason := s.ShouldExit(types.SignalSell, d, entryPrice, entryATR)
+	require.True(t, exit, "price 111 >= short stop 110 must fire stop-loss")
+	require.Equal(t, momentum.ExitReasonStopLoss, reason)
+}
+
 // TestShouldExit_TakeProfit_Short mirrors TestShouldExit_TakeProfit_Long.
 // Take-profit for shorts is BELOW the entry price.
 func TestShouldExit_TakeProfit_Short(t *testing.T) {
