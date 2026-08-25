@@ -110,8 +110,13 @@ func configProperties() map[string]any {
 		// momentum schema validator parses via decimal.NewFromFloat64
 		// on the server side. copytrading happens to use integer
 		// values, but the type stays number for both.
-		"min_order_size": nonNegNum("Minimum copied order size."),
-		"max_order_size": nonNegNum("Maximum copied order size."),
+		// Strategy-agnostic wording: copytrading uses these as skip/
+		// clamp thresholds for the copied trade; momentum uses them
+		// as skip-open-below-min / clamp-quantity-at-max for the
+		// MA-crossover entry size. Both interpretations share the
+		// same numeric meaning (zero disables the bound).
+		"min_order_size": nonNegNum("Minimum order size to open a position. 0 disables."),
+		"max_order_size": nonNegNum("Maximum order size to open a position. 0 disables."),
 		"disallowed_bonds": map[string]any{
 			"type":        "array",
 			"description": "Bond UUIDs to skip.",
@@ -212,7 +217,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_copy_traders_list",
+		mcp.NewTool(
+			"strategy_copy_traders_list",
 			mcp.WithDescription("List copy traders available to be followed by a copy-trading run."),
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

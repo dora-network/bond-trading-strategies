@@ -186,9 +186,8 @@ signal), mirroring mean-reversion's behaviour.
 | `max_position_size` | float | 1 | Capital fraction cap per trade. Must be in (0, 1]. |
 | `order_book_id` | uuid | – | DORA order book UUID used to locate the traded asset. |
 | `tenor` | string | – | Benchmark Treasury tenor (e.g. `2Y`, `5Y`, `10Y`). Required when `signal_source` is `spread`. |
-| `initial_balance` | float | 1 | Starting capital for backtests. Must be greater than 0 for backtests. |
+| `initial_balance` | float | 1 | Starting capital for backtests. Backtests require > 0; live runs may pass 0 and the strategy uses the user's USD balance from DORA. |
 | `leverage` | float | 1 | Leverage multiplier for live orders. Must be greater than 0. |
-
 ### How the fields affect the strategy
 
 - **`signal_source`** is the most consequential choice. `price` is the

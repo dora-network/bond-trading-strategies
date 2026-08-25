@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
@@ -58,7 +57,6 @@ func TestGetBenchmarkYield_StaleCacheFallbackOnFREDError(t *testing.T) {
 	ts24 := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	got := momentum.GetBenchmarkYield(context.Background(), s, ts24)
 
-	require.NotNil(t, got)
 	assert.True(t, got.Equal(decimal.MustNew(425, 2)),
 		"FRED outage on a stale-cache day must return the exact cached "+
 			"yield (4.25), not decimal.Zero (which would corrupt spread-mode "+

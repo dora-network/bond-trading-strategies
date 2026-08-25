@@ -3,7 +3,6 @@ package momentum
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -30,8 +29,6 @@ func NewBacktester(s *Strategy, writer stats.BacktestTradeWriter) *Backtester {
 // Run replays obs chronologically and returns a BacktestResult. Exits
 // follow the priority stop_loss > take_profit > reversal (delegated to
 // Strategy.ShouldExit).
-//
-//nolint:funlen // lastDecision tracking + force-close exit record bump over the 100-line limit
 func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (BacktestResult, error) {
 	var (
 		closedTrades []ClosedTrade
@@ -39,19 +36,11 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		openTrade    *TradeRecord
 		// lastDecision is captured for the force-close path so the
 		// ClosedTrade.ExitSignal reflects the strategy's signal at the
-		// final observation, not the open direction.
+		// final observation, not the open direction. FastMA/SlowMA/ATR
+		// are also inherited so the persisted force-close TradeRecord
+		// matches the in-loop exit shape.
 		lastDecision Decision
 	)
-
-	effectiveCapital, err := b.strategy.cfg.InitialBalance.Mul(b.strategy.collateralWeight)
-	if err != nil {
-		return BacktestResult{}, err
-	}
-	effectiveCapital, err = effectiveCapital.Mul(b.strategy.cfg.Leverage)
-	if err != nil {
-		return BacktestResult{}, err
-	}
-	remainingBalance := effectiveCapital
 
 	for _, o := range obs {
 		select {
@@ -68,11 +57,10 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		if openTrade != nil {
 			exit, reason := b.strategy.ShouldExit(openTrade.Signal, decision, openTrade.Price, openTrade.EntryATR)
 			if exit {
-				ct, newBalance, err := b.closeAtPrice(openTrade, decision, remainingBalance, reason)
+				ct, err := closeAtPrice(openTrade, decision, reason)
 				if err != nil {
 					return BacktestResult{}, err
 				}
-				remainingBalance = newBalance
 				closedTrades = append(closedTrades, ct)
 				tradeRecords = append(tradeRecords, exitRecord(openTrade, decision))
 				openTrade = nil
@@ -95,14 +83,6 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		if !ok || quantity.IsZero() {
 			continue
 		}
-		cashFlow, err := price.Mul(quantity)
-		if err != nil {
-			return BacktestResult{}, err
-		}
-		remainingBalance, err = applyEntryCashFlow(remainingBalance, decision.Signal(), cashFlow)
-		if err != nil {
-			return BacktestResult{}, err
-		}
 		rec := TradeRecord{
 			Time: decision.Time(), BondID: decision.BondID(), Signal: decision.Signal(),
 			Price: price, Quantity: quantity, PositionSize: decision.PositionSize(),
@@ -118,14 +98,19 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		// Use lastDecision.Signal() for the close, not openTrade.Signal:
 		// the ClosedTrade.ExitSignal field should record the strategy's
 		// signal at the moment of close, which is whatever the last
-		// observation produced. meanreversion does the same.
+		// observation produced. meanreversion does the same. Inherit
+		// FastMA/SlowMA/ATR from lastDecision so the persisted force-
+		// close TradeRecord has the same MA state as in-loop exits.
 		d := Decision{
 			time:   last.Time,
 			bondID: openTrade.BondID,
 			price:  last.Price,
 			signal: lastDecision.Signal(),
+			FastMA: lastDecision.FastMA,
+			SlowMA: lastDecision.SlowMA,
+			ATR:    lastDecision.ATR,
 		}
-		ct, _, err := b.closeAtPrice(openTrade, d, remainingBalance, ExitReasonStrategyExit)
+		ct, err := closeAtPrice(openTrade, d, ExitReasonStrategyExit)
 		if err != nil {
 			return BacktestResult{}, err
 		}
@@ -150,21 +135,17 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 	return summarise(closedTrades, tradeRecords, start, end)
 }
 
-func (b *Backtester) closeAtPrice(
+// closeAtPrice converts an open TradeRecord + a closing Decision into a
+// ClosedTrade. Cash flow is intentionally not tracked — momentum's
+// sizing uses cfg.InitialBalance × collateralWeight × Leverage and
+// holds one position at a time, so per-trade balance evolution is
+// not a meaningful signal.
+func closeAtPrice(
 	open *TradeRecord,
 	d Decision,
-	balance decimal.Decimal,
 	reason string,
-) (ClosedTrade, decimal.Decimal, error) {
+) (ClosedTrade, error) {
 	exitPrice := d.Price()
-	cashFlow, err := exitPrice.Mul(open.Quantity)
-	if err != nil {
-		return ClosedTrade{}, balance, err
-	}
-	newBalance, err := applyExitCashFlow(balance, open.Signal, cashFlow)
-	if err != nil {
-		return ClosedTrade{}, balance, err
-	}
 	ct := ClosedTrade{
 		BondID: open.BondID, OpenTime: open.Time, CloseTime: d.Time(),
 		Signal: open.Signal, ExitSignal: d.Signal(),
@@ -173,32 +154,10 @@ func (b *Backtester) closeAtPrice(
 	}
 	pnl, err := computePnL(ct)
 	if err != nil {
-		return ClosedTrade{}, newBalance, err
+		return ClosedTrade{}, err
 	}
 	ct.PnL = pnl
-	return ct, newBalance, nil
-}
-
-func applyEntryCashFlow(balance decimal.Decimal, sig types.Signal, cashFlow decimal.Decimal) (decimal.Decimal, error) {
-	switch sig {
-	case types.SignalBuy:
-		return balance.Sub(cashFlow)
-	case types.SignalSell:
-		return balance.Add(cashFlow)
-	default:
-		return balance, fmt.Errorf("entry: unexpected signal %s", sig)
-	}
-}
-
-func applyExitCashFlow(balance decimal.Decimal, openSignal types.Signal, cashFlow decimal.Decimal) (decimal.Decimal, error) {
-	switch openSignal {
-	case types.SignalBuy:
-		return balance.Add(cashFlow) // receive proceeds
-	case types.SignalSell:
-		return balance.Sub(cashFlow) // pay to buy back
-	default:
-		return balance, fmt.Errorf("exit: unexpected open signal %s", openSignal)
-	}
+	return ct, nil
 }
 
 func exitRecord(open *TradeRecord, d Decision) TradeRecord {

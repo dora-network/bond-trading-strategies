@@ -21,7 +21,7 @@ func (b AccountBalance) isZero() bool {
 	return b.USD.IsZero() && b.Bond.IsZero()
 }
 
-// FindAccountAndBalance locates the correct account and extracts the
+// findAccountAndBalance locates the correct account and extracts the
 // available USD balance and the bond (base asset) position from it.
 //
 // Account selection (the fromGlobalPosition rule):
@@ -41,13 +41,15 @@ func (b AccountBalance) isZero() bool {
 //
 // Returns the balance and ok=true when a matching account was found;
 // ok=false means the caller should fall back to legacy AssetPosition.
-func FindAccountAndBalance(
+// Unexported because every external consumer goes through
+// InitialBalancesFromPortfolio.
+func findAccountAndBalance(
 	accounts map[string]map[string]doraclient.AccountV2,
 	fromGlobalPosition bool,
 	baseAssetID string,
 	quoteAssetID string,
 ) (AccountBalance, bool, error) {
-	bal, ok, err := FindBalancesInAccounts(accounts, fromGlobalPosition, baseAssetID, quoteAssetID)
+	bal, ok, err := findBalancesInAccounts(accounts, fromGlobalPosition, baseAssetID, quoteAssetID)
 	if err != nil {
 		return AccountBalance{}, false, err
 	}
@@ -55,7 +57,7 @@ func FindAccountAndBalance(
 		return bal, true, nil
 	}
 	if !fromGlobalPosition {
-		bal, ok, err = FindBalancesInAccounts(accounts, true, baseAssetID, quoteAssetID)
+		bal, ok, err = findBalancesInAccounts(accounts, true, baseAssetID, quoteAssetID)
 		if err != nil {
 			return AccountBalance{}, false, err
 		}
@@ -66,13 +68,14 @@ func FindAccountAndBalance(
 	return AccountBalance{}, false, nil
 }
 
-// FindBalancesInAccounts walks the portfolio and extracts USD and
+// findBalancesInAccounts walks the portfolio and extracts USD and
 // bond balances from accounts matching the global/isolated filter.
 // Returns (balance, found, err): err is non-nil if a decimal.Parse
 // fails on a quote or base asset we encountered. Silently dropping
 // a balance would leave the strategy undercapitalized without any
-// signal to the caller.
-func FindBalancesInAccounts(
+// signal to the caller. Unexported; same-package tests reach it
+// via the lowercase name.
+func findBalancesInAccounts(
 	accounts map[string]map[string]doraclient.AccountV2,
 	wantGlobal bool,
 	baseAssetID string,
@@ -144,7 +147,7 @@ func InitialBalancesFromPortfolio(
 		logger.Warn("initialise balances: no accounts in portfolio")
 		return AccountBalance{}, types.SignalHold, false, nil
 	}
-	bal, ok, err := FindAccountAndBalance(accounts, fromGlobalPosition, baseAssetID, quoteAssetID)
+	bal, ok, err := findAccountAndBalance(accounts, fromGlobalPosition, baseAssetID, quoteAssetID)
 	if err != nil {
 		return AccountBalance{}, types.SignalHold, false, fmt.Errorf("init balances from portfolio: %w", err)
 	}
@@ -153,10 +156,10 @@ func InitialBalancesFromPortfolio(
 		return AccountBalance{}, types.SignalHold, false, nil
 	}
 	signal := signalFromBondQty(bal.Bond)
-	logger.Info("initialised balances from portfolio",
-		"fromGlobalPosition", fromGlobalPosition,
-		"usdBal", bal.USD, "bondQty", bal.Bond,
-	)
+	// Info log intentionally omitted: every caller (momentum/balances.go,
+	// meanreversion/balances.go) logs the same event with runID context.
+	// Logging here produced a duplicate Info line per init. Adapters
+	// also pass the structured logger and surface the same fields.
 	return bal, signal, true, nil
 }
 

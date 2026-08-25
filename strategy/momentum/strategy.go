@@ -62,22 +62,23 @@ type Strategy struct {
 	backtestWriter stats.BacktestTradeWriter
 
 	// Live-run state.
-	log                 *slog.Logger
-	runID               uuid.UUID
-	cancel              context.CancelFunc
-	isRunning           bool
-	paused              bool
-	pricesReqID         uuid.UUID
-	pricesHandler       *prices.Handler
-	balancesInitialized bool
-	bondQty             decimal.Decimal
-	usdBal              decimal.Decimal
-	openSignal          types.Signal
-	entryPrice          decimal.Decimal
-	entryATR            decimal.Decimal
-	decisionStore       strategy.DecisionRecorder
-	decisionSeq         int64
-	errs                []error
+	log                  *slog.Logger
+	runID                uuid.UUID
+	cancel               context.CancelFunc
+	isRunning            bool
+	paused               bool
+	pricesReqID          uuid.UUID
+	pricesHandler        *prices.Handler
+	balancesInitialized  bool
+	bondQty              decimal.Decimal
+	usdBal               decimal.Decimal
+	lastBenchmarkFetchAt time.Time
+	openSignal           types.Signal
+	entryPrice           decimal.Decimal
+	entryATR             decimal.Decimal
+	decisionStore        strategy.DecisionRecorder
+	decisionSeq          int64
+	errs                 []error
 }
 
 // New creates a Strategy with the given Config, prices handler, and
@@ -854,22 +855,38 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.Decimal {
 	normedTS := fred.NormalizeDate(ts)
 
-	// cachedYield is the stale-cache fallback. On any FRED / parse / client
-	// error we return it rather than decimal.Zero so spread-mode signals
+	// stale-cache fallback: on any FRED / parse / client error we return
+	// the cached yield rather than decimal.Zero so spread-mode signals
 	// keep tracking the most recent known benchmark instead of degrading
 	// to raw YTM (which has the inverted sign convention in spread mode).
 	cachedYield, cachedOK := s.cachedBenchmarkYield(ts)
-
-	yield, ok := s.cachedBenchmarkYield(ts)
-	if ok {
+	if cachedOK {
 		if latestDate, has := s.latestCachedBenchmarkDate(); has && !latestDate.Before(normedTS) {
-			return yield
+			return cachedYield
 		}
+	}
+
+	// Per-tick throttle: if the most recent FRED fetch attempt for this
+	// benchmark is still fresh (within today UTC), skip the network call.
+	// Without this, intraday ticks where FRED has not yet published
+	// today's observation refetch per tick, each failure appends to
+	// s.errs unboundedly. A 5-minute window keeps the data close to
+	// real-time without hammering the upstream.
+	const fetchMinInterval = 5 * time.Minute
+	s.mu.RLock()
+	lastFetchedAt := s.lastBenchmarkFetchAt
+	s.mu.RUnlock()
+	if !lastFetchedAt.IsZero() && ts.Sub(lastFetchedAt) < fetchMinInterval {
+		if cachedOK {
+			return cachedYield
+		}
+		return decimal.Zero
 	}
 
 	tenor, err := fred.ParseBenchmarkTenor(s.cfg.Tenor)
 	if err != nil {
 		s.recordErr(fmt.Errorf("get benchmark yield: parse tenor: %w", err))
+		s.noteBenchmarkFetch(ts)
 		if cachedOK {
 			return cachedYield
 		}
@@ -879,6 +896,7 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 	client, err := s.getBenchmarkYieldClient()
 	if err != nil {
 		s.recordErr(fmt.Errorf("get benchmark yield: get client: %w", err))
+		s.noteBenchmarkFetch(ts)
 		if cachedOK {
 			return cachedYield
 		}
@@ -887,6 +905,7 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 
 	start := normedTS.AddDate(0, 0, -10)
 	obs, err := client.FetchHistoricalYields(ctx, tenor, start, normedTS)
+	s.noteBenchmarkFetch(ts)
 	if err != nil {
 		s.recordErr(fmt.Errorf("get benchmark yield: fred fetch: %w", err))
 		if cachedOK {
@@ -910,6 +929,16 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 		return cachedYield
 	}
 	return decimal.Zero
+}
+
+// noteBenchmarkFetch records the timestamp of the most recent FRED fetch
+// attempt so getBenchmarkYield can throttle repeated calls within a
+// short window. Lock-free read for the throttle check; writes hold
+// s.mu for one assignment.
+func (s *Strategy) noteBenchmarkFetch(ts time.Time) {
+	s.mu.Lock()
+	s.lastBenchmarkFetchAt = ts
+	s.mu.Unlock()
 }
 
 // recordDecision forwards a strategy.Decision row to the configured

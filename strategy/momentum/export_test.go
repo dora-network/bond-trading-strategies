@@ -12,6 +12,14 @@ import (
 	"github.com/govalues/decimal"
 )
 
+// White-box test helpers. Only helpers that some test in this package
+// actually calls are exported; dead helpers (LookupAssetID,
+// CurrentPosition, BondQty, UsdBal, InitializeBalances,
+// BalancesInitialized, EntryPrice, EntryATR, UpdateObs) were trimmed
+// per the 16-reviewer P3 follow-up "Nine unused exports in
+// export_test.go". Keep this set aligned with what the *_test.go
+// files actually import from the momentum package.
+
 func SetLookupClient(s *Strategy, client strategyPkg.MarketAPIClient) {
 	s.marketAPIClient = client
 }
@@ -24,10 +32,6 @@ func SetBenchmarkYieldClient(s *Strategy, client benchmarkYieldClient) {
 	s.benchmarkClient = client
 }
 
-func LookupAssetID(s *Strategy, orderBookID uuid.UUID) (string, error) {
-	return s.lookupAssetID(orderBookID)
-}
-
 func GetObservations(s *Strategy, ctx context.Context, start, end time.Time) ([]types.YieldObservation, error) {
 	return s.getObservations(ctx, start, end)
 }
@@ -36,52 +40,14 @@ func GetBenchmarkYield(ctx context.Context, s *Strategy, ts time.Time) decimal.D
 	return s.getBenchmarkYield(ctx, ts)
 }
 
-func CurrentPosition(s *Strategy, ctx context.Context, assetID string) (decimal.Decimal, error) {
-	return s.currentPosition(ctx, assetID)
-}
-
 func CappedOrderQuantity(s *Strategy, positionSize, currentPosition, price decimal.Decimal) (decimal.Decimal, bool, error) {
 	return s.cappedOrderQuantity(positionSize, currentPosition, price)
-}
-
-func BondQty(s *Strategy) decimal.Decimal {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.bondQty
-}
-
-func UsdBal(s *Strategy) decimal.Decimal {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.usdBal
-}
-
-func InitializeBalances(s *Strategy, ctx context.Context, assetID string) {
-	s.initializeBalances(ctx, assetID)
-}
-
-func BalancesInitialized(s *Strategy) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.balancesInitialized
 }
 
 func OpenSignal(s *Strategy) types.Signal {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.openSignal
-}
-
-func EntryPrice(s *Strategy) decimal.Decimal {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.entryPrice
-}
-
-func EntryATR(s *Strategy) decimal.Decimal {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.entryATR
 }
 
 // RunLoop drives the strategy's internal run loop with the supplied
@@ -104,26 +70,15 @@ func RunLoop(s *Strategy, ctx context.Context, msgs <-chan strategyPkg.Message, 
 
 // MergeBenchmarkObservations seeds the strategy's in-memory benchmark
 // cache with the supplied observations, applying the same percentage
-// conversion the production code applies. Used by tests that want to
-// exercise the cache-freshness path without re-fetching from FRED.
+// conversion the production code applies.
 func MergeBenchmarkObservations(s *Strategy, obs []fred.Observation) {
 	s.mergeBenchmarkObservations(obs)
 }
 
-// PrefillWindow drives s.prefillWindow so tests can exercise the
-// historical-data prefill path without needing the prices handler.
 func PrefillWindow(s *Strategy, ctx context.Context, assetID string) error {
 	return s.prefillWindow(ctx, assetID)
 }
 
-// LatestCachedBenchmarkDate exposes s.latestCachedBenchmarkDate so
-// tests can verify the cache's most-recent-date invariant.
 func LatestCachedBenchmarkDate(s *Strategy) (time.Time, bool) {
 	return s.latestCachedBenchmarkDate()
-}
-
-// UpdateObs exposes s.Update so tests can drive the rolling-window
-// path against fixtures with known control over the observation.
-func UpdateObs(s *Strategy, obs types.YieldObservation) (Decision, error) {
-	return s.Update(obs)
 }

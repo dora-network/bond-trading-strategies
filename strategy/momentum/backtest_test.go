@@ -31,14 +31,24 @@ func uptrendThenReversal() []types.YieldObservation {
 	return o
 }
 
-func TestBacktest_OpensAndExits(t *testing.T) {
+// defaults (price source, ATR window, $1000 seed capital, no stops)
+// and applies the per-test overrides the caller passes. Centralises
+// the 7-line boilerplate that every backtest test repeated.
+func testCfg(fast, slow int, stopLossATR, takeProfitATR decimal.Decimal) momentum.Config {
 	cfg := momentum.DefaultConfig()
 	cfg.SignalSource = momentum.SignalSourcePrice
-	cfg.FastWindow = 3
-	cfg.SlowWindow = 5
-	cfg.StopLossATR = decimal.Zero
-	cfg.TakeProfitATR = decimal.Zero
+	cfg.FastWindow = fast
+	cfg.SlowWindow = slow
+	cfg.StopLossATR = stopLossATR
+	cfg.TakeProfitATR = takeProfitATR
 	cfg.InitialBalance = decimal.MustNew(1000, 0)
+	cfg.MinOrderSize = decimal.Zero
+	cfg.MaxOrderSize = decimal.Zero
+	return cfg
+}
+
+func TestBacktest_OpensAndExits(t *testing.T) {
+	cfg := testCfg(3, 5, decimal.Zero, decimal.Zero)
 	s := momentum.New(cfg, nil)
 	bt := momentum.NewBacktester(s, nil)
 
@@ -77,12 +87,7 @@ func TestBacktest_OpensAndExits(t *testing.T) {
 }
 
 func TestBacktest_StopLossExits(t *testing.T) {
-	cfg := momentum.DefaultConfig()
-	cfg.SignalSource = momentum.SignalSourcePrice
-	cfg.FastWindow = 2
-	cfg.SlowWindow = 3
-	cfg.StopLossATR = decimal.MustNew(2, 0)
-	cfg.TakeProfitATR = decimal.Zero
+	cfg := testCfg(2, 3, decimal.MustNew(2, 0), decimal.Zero)
 	s := momentum.New(cfg, nil)
 	bt := momentum.NewBacktester(s, nil)
 	// Up then sharp drop — fastMA still > slowMA, but stop-loss fires on the drop.
@@ -121,29 +126,13 @@ func TestBacktest_StopLossExits(t *testing.T) {
 
 // TestBacktest_ForceClosePersistsExitAndRecordsExitSignal exercises
 // appended only to closedTrades, leaving tradeRecords with a dangling
-// open entry, and it constructed the close Decision with signal:
-// openTrade.Signal so ClosedTrade.ExitSignal equaled the open
-// direction instead of the strategy's signal at the final observation.
-//
-// The fixture is a strictly-rising series so the MA crossover fires
-// a Buy and never reverses. No stop-loss / take-profit. End of
-// history triggers the force-close.
+// hits Buy on tick 3 and never reverses. No stop-loss / take-profit. End
+// of history triggers the force-close.
 func TestBacktest_ForceClosePersistsExitAndRecordsExitSignal(t *testing.T) {
-	cfg := momentum.DefaultConfig()
-	cfg.SignalSource = momentum.SignalSourcePrice
-	cfg.FastWindow = 2
-	cfg.SlowWindow = 3
-	cfg.StopLossATR = decimal.Zero // no stops
-	cfg.TakeProfitATR = decimal.Zero
-	cfg.InitialBalance = decimal.MustNew(1000, 0)
-	cfg.MinOrderSize = decimal.Zero
-	cfg.MaxOrderSize = decimal.Zero
+	cfg := testCfg(2, 3, decimal.Zero, decimal.Zero)
 	s := momentum.New(cfg, nil)
 	bt := momentum.NewBacktester(s, nil)
 
-	// 8 strictly-rising prices: MA crossover fires a Buy on tick 3,
-	// continues Buy through tick 7. No reversal, no force-close in
-	// the loop. End-of-history force-close fires after tick 7.
 	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	obs := make([]types.YieldObservation, 0, 8)
 	for i := range 8 {
@@ -181,4 +170,15 @@ func TestBacktest_ForceClosePersistsExitAndRecordsExitSignal(t *testing.T) {
 	// Sanity: the trade_records pair brackets the closed trade.
 	require.Equal(t, tradeRecords[0].Time, ct.OpenTime)
 	require.Equal(t, tradeRecords[1].Time, ct.CloseTime)
+
+	// The force-close exit TradeRecord must carry the same MA / ATR
+	// state as the in-loop exit rows; pre-fix this was zero because
+	// the force-close Decision was built without inheriting from
+	// lastDecision. Required so persisted rows are uniform across
+	// exit paths.
+	exitRec := tradeRecords[1]
+	require.True(t, exitRec.FastMA.IsPos(),
+		"force-close exit TradeRecord FastMA must match lastDecision, got %s", exitRec.FastMA)
+	require.True(t, exitRec.SlowMA.IsPos(),
+		"force-close exit TradeRecord SlowMA must match lastDecision, got %s", exitRec.SlowMA)
 }
