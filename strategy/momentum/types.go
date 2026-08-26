@@ -133,7 +133,8 @@ type TradeRecord struct {
 	FastMA       decimal.Decimal
 	SlowMA       decimal.Decimal
 	// EntryATR is the ATR at open; stable for the position's life so
-	// stop/take thresholds don't drift. Only set on the opening record.
+	// stop/take thresholds don't drift. Set on the opening record and
+	// mirrored onto the matching exit row (uniform persisted rows).
 	EntryATR decimal.Decimal
 }
 

@@ -1853,13 +1853,14 @@ func TestHandlerMomentumValidationErrors(t *testing.T) {
 	}
 }
 
-// TestHandlerMomentumExplicitZeroATR pins the "0 disables" contract the
-// config-field docs promise: an explicit stop_loss_atr/take_profit_atr
-// of 0 must round-trip as 0 in the normalized config, not be silently
-// rewritten to the default. Round-4 review P2: the decoder previously
-// rewrote explicit 0 to the default 20, making the documented disable
-// unreachable over HTTP.
-func TestHandlerMomentumExplicitZeroATR(t *testing.T) {
+// TestHandlerMomentumExplicitZeroRoundTrip pins the "0 disables"/"0 means
+// fetch my balance" contracts the config-field docs promise: explicit
+// stop_loss_atr/take_profit_atr/initial_balance of 0 must round-trip as 0
+// in the normalized config, not be silently rewritten to the default.
+// Round-4 review P2: the decoder previously rewrote explicit 0 to the
+// default 20, making the documented disable unreachable over HTTP; and
+// persisted initial_balance 0 as the default 1 for runs.
+func TestHandlerMomentumExplicitZeroRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	handler := strategyhttp.NewHandler(
@@ -1874,19 +1875,23 @@ func TestHandlerMomentumExplicitZeroATR(t *testing.T) {
 			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
 			"stop_loss_atr":   0,
 			"take_profit_atr": 0,
+			"initial_balance": 0,
 		},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	var detail struct {
 		Config struct {
-			StopLossATR   float64 `json:"stop_loss_atr"`
-			TakeProfitATR float64 `json:"take_profit_atr"`
+			StopLossATR    float64 `json:"stop_loss_atr"`
+			TakeProfitATR  float64 `json:"take_profit_atr"`
+			InitialBalance float64 `json:"initial_balance"`
 		} `json:"config"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
 	assert.Zero(t, detail.Config.StopLossATR, "explicit stop_loss_atr 0 must persist as 0 (0 disables)")
 	assert.Zero(t, detail.Config.TakeProfitATR, "explicit take_profit_atr 0 must persist as 0 (0 disables)")
+	assert.Zero(t, detail.Config.InitialBalance,
+		"explicit initial_balance 0 for a run must persist as 0 (0 = fetch my USD balance), not the default 1")
 }
 
 func performJSONRequest(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {

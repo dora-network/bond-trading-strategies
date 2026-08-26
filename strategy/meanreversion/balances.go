@@ -22,6 +22,7 @@ func initializeBalancesFromPortfolio(
 ) {
 	bal, signal, ok, err := strategy.InitialBalancesFromPortfolio(portfolio, fromGlobalPosition, baseAssetID, quoteAssetID, logger)
 	if err != nil {
+		logger.Error("initialise balances from portfolio", "runID", s.runID, "err", err)
 		s.mu.Lock()
 		s.errs = append(s.errs, fmt.Errorf("initialise balances: %w", err))
 		s.mu.Unlock()

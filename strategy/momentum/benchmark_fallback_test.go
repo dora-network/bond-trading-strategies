@@ -12,6 +12,7 @@ import (
 
 	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum/momentumfakes"
 )
 
 // TestGetBenchmarkYield_StaleCacheFallbackOnFREDError verifies that
@@ -46,7 +47,8 @@ func TestGetBenchmarkYield_StaleCacheFallbackOnFREDError(t *testing.T) {
 
 	// FRED client that always errors. Wired so the function takes
 	// the FRED-fetch path on the second call.
-	client := &alwaysErrorClient{err: errors.New("simulated FRED outage")}
+	client := &momentumfakes.FakeBenchmarkYieldClient{}
+	client.FetchHistoricalYieldsReturns(nil, errors.New("simulated FRED outage"))
 	momentum.SetBenchmarkYieldClient(s, client)
 
 	// Query for a date strictly later than the cached entry. This
@@ -61,10 +63,4 @@ func TestGetBenchmarkYield_StaleCacheFallbackOnFREDError(t *testing.T) {
 		"FRED outage on a stale-cache day must return the exact cached "+
 			"yield (4.25), not decimal.Zero (which would corrupt spread-mode "+
 			"signals); got %s", got.String())
-}
-
-type alwaysErrorClient struct{ err error }
-
-func (a *alwaysErrorClient) FetchHistoricalYields(_ context.Context, _ fred.Tenor, _, _ time.Time) ([]fred.Observation, error) {
-	return nil, a.err
 }

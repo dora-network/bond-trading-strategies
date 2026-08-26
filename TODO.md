@@ -370,9 +370,11 @@ Non-blocking items from the round-4 16-reviewer review, grouped by area:
   equivalent drift is pre-existing and still undocumented.
 - [x] **RunDetail.config oneOf missing MomentumConfig** (and BreakoutConfig)
   — RESOLVED (docs pass 2026-08-26): both refs added.
-- **initial_balance=0 for runs persisted as 1** — handler stores the
-  default in normalized config; masked by live balance override. (Still
-  open — code fix.)
+- [x] **initial_balance=0 for runs persisted as 1** — RESOLVED (code
+  hygiene pass 2026-08-26): explicit 0 for runs now persists 0
+  (decoder stores decimal.Zero; portfolio fetch failure then sizes off
+  0 rather than the default 1). Pinned by
+  TestHandlerMomentumExplicitZeroRoundTrip.
 - [x] **OpenAPI initial_balance description omits the backtest must-be->0
   rule** — RESOLVED (docs pass 2026-08-26).
 
@@ -389,25 +391,27 @@ Non-blocking items from the round-4 16-reviewer review, grouped by area:
 - **historical_data_test gaps** — spread-mode drop branch (price before
   first benchmark observation), prefillWindow spread/nil-YTM paths,
   TestPrefillWindow asserts call args only (not window population).
-- **meanreversion `s.errs` write-only** — b4851c0's surfaced errors are
-  invisible for meanreversion; add s.log.Error alongside the append.
+- [x] **meanreversion `s.errs` write-only** — RESOLVED (code hygiene
+  pass 2026-08-26): logger.Error added in initializeBalancesFromPortfolio.
 
 ### Code hygiene
-- **exec.MustParseUUID dead alias** — zero callers, comment falsely
-  claims legacy consumers; contradicts the "pick one canonical
-  location" resolution. Delete, call strategy.MustParseUUID internally.
-- **meanreversion duplicate tenor logic** — historical_data.go keeps
-  local parseBenchmarkTenor/normalizeDate/table after strategy.go
-  migrated to fred helpers; two sources of truth can drift.
+- [x] **exec.MustParseUUID dead alias** — RESOLVED (code hygiene pass
+  2026-08-26): alias deleted, internal sites call
+  strategy.MustParseUUID.
+- [x] **meanreversion duplicate tenor logic** — RESOLVED (code hygiene
+  pass 2026-08-26): local BenchmarkTenor table, parser, normalizer and
+  normalizeDate deleted; call sites (and the handler /tenors endpoint)
+  now use the fred package directly.
 - **historical_data ordering contracts undocumented** — binary search
   needs ascending observations; prefill needs oldest-first history.
   One-line doc on each interface.
-- **exitRecord copies EntryATR onto exit rows** contra types.go:135
-  comment ("only set on the opening record") — fix comment or copy.
-- **benchmark_fallback_test hand-rolled fake** where a counterfeiter
-  fake exists (convention nit).
-- **run_loop_test comment misstates slowWin fill tick** (fills on the
-  5th; the 6th is slack).
+- [x] **exitRecord copies EntryATR onto exit rows** — RESOLVED: comment
+  corrected to document the deliberate mirroring (matches the OpenAPI
+  MomentumTradeRecord description).
+- [x] **benchmark_fallback_test hand-rolled fake** — RESOLVED: swapped
+  for momentumfakes.FakeBenchmarkYieldClient.
+- [x] **run_loop_test comment misstates slowWin fill tick** — RESOLVED:
+  comment corrected.
 
 ### Spec doc drift (doc-only) — RESOLVED (docs pass, 2026-08-26)
 - [x] Spec §6.1 + strategies.md nil-YTM "dropped" wording → now describe the

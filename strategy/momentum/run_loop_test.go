@@ -74,10 +74,10 @@ func TestRunLoop_ProcessesTicksWithoutDeadlock(t *testing.T) {
 	// they reach s.Update, which would mask the deadlock regression).
 	ytmVal := decimal.MustNew(5, 2)
 	assetID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
-	// Send 6 ticks: slowWin has size 5 so on the 5th tick slowWin is
-	// still one short of full. The 6th tick captures windowReady=true
-	// AND fastMA > slowMA, so executeDecision runs and openSignal
-	// flips to Buy. Pre-fix the run goroutine deadlocks on tick 0
+	// Send 6 ticks: slowWin has size 5, so it fills on the 5th tick —
+	// which already yields fastMA > slowMA (rising prices), so
+	// executeDecision runs and openSignal flips to Buy on tick 5. The
+	// 6th tick is slack. Pre-fix the run goroutine deadlocks on tick 0
 	// and openSignal never flips — the regression test must drive a
 	// tick through to Update, not just into the run loop.
 	for i := range 6 {

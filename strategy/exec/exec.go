@@ -4,7 +4,7 @@
 // Shared stateless primitives:
 //   - DORA order-status constants
 //   - OrderEntry, OrderFillEvent, RunState types
-//   - IsTerminal, DoraclientSide, MustParseUUID helpers
+//   - IsTerminal, DoraclientSide helpers
 //
 // Shared I/O and state-update logic (Executor + RunStateView):
 //   - Each execution strategy's RunState alias satisfies RunStateView
@@ -72,13 +72,6 @@ func DoraclientSide(signal types.Signal) doraclient.Side {
 		return doraclient.SIDE_SELL
 	}
 	return doraclient.SIDE_BUY
-}
-
-// MustParseUUID parses a UUID string, returning uuid.Nil on failure
-// or empty input. Delegates to the canonical implementation in
-// strategy/uuid.go; this alias keeps the legacy import path working.
-func MustParseUUID(id string) uuid.UUID {
-	return strategy.MustParseUUID(id)
 }
 
 // RunState is the persisted checkpoint for an execution run. TWAP and
@@ -292,8 +285,8 @@ func (e *Executor) RecordDecision(
 		RunID:         e.RunID,
 		Seq:           seq,
 		StrategyType:  e.Name,
-		OrderBookID:   MustParseUUID(bondID),
-		Asset:         MustParseUUID(bondID),
+		OrderBookID:   strategy.MustParseUUID(bondID),
+		Asset:         strategy.MustParseUUID(bondID),
 		Side:          signal.String(),
 		Signal:        signal.String(),
 		Quantity:      quantity,

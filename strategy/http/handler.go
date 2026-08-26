@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/authctx"
+	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
@@ -728,7 +729,7 @@ func (h *Handler) handleTenors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	supported := meanreversion.SupportedBenchmarkTenors()
+	supported := fred.SupportedBenchmarkTenors()
 	items := make([]TenorSummary, 0, len(supported))
 	for _, tenor := range supported {
 		items = append(items, TenorSummary{
@@ -3272,12 +3273,16 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 		}
 		if *payload.InitialBalance == 0 {
 			// For backtests, initial_balance must be > 0 because it is the
-			// seed capital. For runs, the live path overrides cfg.InitialBalance
-			// from the user's DORA portfolio (strategy/momentum/strategy.go:504)
-			// so 0 means "fetch my USD balance".
+			// seed capital. For runs, 0 means "fetch my USD balance": the live
+			// path overrides cfg.InitialBalance from the user's DORA portfolio
+			// (strategy/momentum/strategy.go:504). Store the explicit 0 so the
+			// persisted config reflects the request; if the portfolio fetch
+			// never succeeds the strategy sizes off 0 (opens nothing) rather
+			// than off the default.
 			if !forRun {
 				return momentum.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0 for backtests")
 			}
+			amount = decimal.Zero
 		} else {
 			amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
 			if err != nil {
