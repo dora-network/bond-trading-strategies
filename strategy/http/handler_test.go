@@ -1792,6 +1792,33 @@ func TestHandlerMomentumValidationErrors(t *testing.T) {
 			wantContain: "config.leverage must be greater than 0",
 		},
 		{
+			name: "unsupported spread tenor rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"signal_source": "spread",
+					"tenor":         "99Y",
+					"order_book_id": uuid.Must(uuid.NewV7()).String(),
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.tenor: unsupported tenor",
+		},
+		{
+			name: "explicit fast_window 0 rejected, not defaulted",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"fast_window":   0,
+					"order_book_id": uuid.Must(uuid.NewV7()).String(),
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.fast_window must be at least 2",
+		},
+		{
 			name: "max_order_size below min_order_size rejected",
 			body: map[string]any{
 				"strategy_type": "momentum",

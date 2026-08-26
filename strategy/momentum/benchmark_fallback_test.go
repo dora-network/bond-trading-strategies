@@ -35,13 +35,13 @@ func TestGetBenchmarkYield_StaleCacheFallbackOnFREDError(t *testing.T) {
 	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	s := momentum.New(cfg, nil)
 
-	// Seed the cache with a 2026-08-23 observation at 4.25%.
-	// mergeBenchmarkObservations multiplies by 100; we pre-multiply
-	// so the cached value is the final 4.25.
+	// Seed the cache with a 2026-08-23 observation at 4.25% (0.0425 as a
+	// decimal fraction — the unit the cache and YTM share; the merge
+	// stores it unchanged).
 	momentum.MergeBenchmarkObservations(s, []fred.Observation{
 		{
 			Date:  time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC),
-			Yield: decimal.MustNew(425, 4), // 0.0425; merge converts to 4.25 (percentage)
+			Yield: decimal.MustNew(425, 4), // 0.0425
 		},
 	})
 
@@ -57,10 +57,10 @@ func TestGetBenchmarkYield_StaleCacheFallbackOnFREDError(t *testing.T) {
 	// so the function falls through to FetchHistoricalYields, which
 	// now errors. The fallback must return the cached 4.25.
 	ts24 := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	got := momentum.GetBenchmarkYield(context.Background(), s, ts24)
-
-	assert.True(t, got.Equal(decimal.MustNew(425, 2)),
+	got, ok := momentum.GetBenchmarkYield(context.Background(), s, ts24)
+	assert.True(t, ok, "stale cache must satisfy the benchmark request")
+	assert.True(t, got.Equal(decimal.MustNew(425, 4)),
 		"FRED outage on a stale-cache day must return the exact cached "+
-			"yield (4.25), not decimal.Zero (which would corrupt spread-mode "+
+			"yield (0.0425), not decimal.Zero (which would corrupt spread-mode "+
 			"signals); got %s", got.String())
 }

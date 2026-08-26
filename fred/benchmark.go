@@ -33,10 +33,16 @@ var benchmarkTenors = []BenchmarkTenor{
 	{Code: "30Y", Description: "30 Year Treasury", Value: Tenor30Year, Aliases: []string{"30YR", "30YEAR"}},
 }
 
-// SupportedBenchmarkTenors returns a copy of the known benchmark tenor
-// list so callers can render configuration UIs.
+// SupportedBenchmarkTenors returns a deep copy of the known benchmark
+// tenor list so callers can render configuration UIs without being able
+// to mutate the package-level table (including each row's alias list).
 func SupportedBenchmarkTenors() []BenchmarkTenor {
-	return append([]BenchmarkTenor(nil), benchmarkTenors...)
+	out := make([]BenchmarkTenor, len(benchmarkTenors))
+	for i, tenor := range benchmarkTenors {
+		tenor.Aliases = slices.Clone(tenor.Aliases)
+		out[i] = tenor
+	}
+	return out
 }
 
 // ParseBenchmarkTenor resolves a user-supplied tenor string (e.g. "2Y",

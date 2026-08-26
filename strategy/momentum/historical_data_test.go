@@ -34,8 +34,9 @@ func newSpreadStrategy(t *testing.T, lookup *strategyfakes.FakeMarketAPIClient, 
 }
 
 // TestGetObservations_SpreadMode_AttachesBenchmarkYield verifies that
-// spread mode attaches a benchmark yield (multiplied by 100 to
-// percentage) to every observation and drops rows without one.
+// spread mode attaches a benchmark yield (stored as a decimal
+// fraction, the same unit as YTM) to every observation and drops rows
+// without one.
 func TestGetObservations_SpreadMode_AttachesBenchmarkYield(t *testing.T) {
 	lookup := &strategyfakes.FakeMarketAPIClient{}
 	lookup.BaseAssetIDReturns("asset-123", nil)
@@ -64,15 +65,15 @@ func TestGetObservations_SpreadMode_AttachesBenchmarkYield(t *testing.T) {
 	require.NoError(t, err)
 	// All three rows have non-nil YTM (the store contract) and get
 	// the LATEST cached benchmark yield <= their timestamp. Jan 2
-	// gets 4.5 (its own date), Jan 3 gets 4.5 (LATEST <= 3 is Jan 2),
-	// Jan 4 gets 4.7 (its own date).
+	// gets 0.045 (its own date), Jan 3 gets 0.045 (LATEST <= 3 is
+	// Jan 2), Jan 4 gets 0.047 (its own date).
 	require.Len(t, obs, 3)
-	assert.True(t, obs[0].BenchmarkYield.Equal(decimal.MustNew(45, 1)),
-		"obs[0].BenchmarkYield = %s, want 4.5 (45 * 100)", obs[0].BenchmarkYield.String())
-	assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(45, 1)),
-		"obs[1].BenchmarkYield = %s, want 4.5 (LATEST <= Jan 3)", obs[1].BenchmarkYield.String())
-	assert.True(t, obs[2].BenchmarkYield.Equal(decimal.MustNew(47, 1)),
-		"obs[2].BenchmarkYield = %s, want 4.7 (47 * 100)", obs[2].BenchmarkYield.String())
+	assert.True(t, obs[0].BenchmarkYield.Equal(decimal.MustNew(45, 3)),
+		"obs[0].BenchmarkYield = %s, want 0.045", obs[0].BenchmarkYield.String())
+	assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(45, 3)),
+		"obs[1].BenchmarkYield = %s, want 0.045 (LATEST <= Jan 3)", obs[1].BenchmarkYield.String())
+	assert.True(t, obs[2].BenchmarkYield.Equal(decimal.MustNew(47, 3)),
+		"obs[2].BenchmarkYield = %s, want 0.047", obs[2].BenchmarkYield.String())
 	// FRED client fetched once for the price-history window.
 	assert.Equal(t, 1, benchmark.FetchHistoricalYieldsCallCount())
 }
@@ -176,15 +177,17 @@ func TestMergeBenchmarkObservations_DedupsByDate(t *testing.T) {
 
 	// Query for the duplicated date: original yield (0.046) wins,
 	// not the second-pass 0.099.
-	got := momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 2, 12, 0, 0, 0, time.UTC))
-	assert.True(t, got.Equal(decimal.MustNew(46, 1)),
-		"duplicated-date entry should keep its original yield (4.6), got %s",
+	got, ok := momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 2, 12, 0, 0, 0, time.UTC))
+	assert.True(t, ok)
+	assert.True(t, got.Equal(decimal.MustNew(46, 3)),
+		"duplicated-date entry should keep its original yield (0.046), got %s",
 		got.String())
 
 	// And the new date is present.
-	got = momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 3, 12, 0, 0, 0, time.UTC))
-	assert.True(t, got.Equal(decimal.MustNew(47, 1)),
-		"new date should be present with 4.7, got %s", got.String())
+	got, ok = momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 3, 12, 0, 0, 0, time.UTC))
+	assert.True(t, ok)
+	assert.True(t, got.Equal(decimal.MustNew(47, 3)),
+		"new date should be present with 0.047, got %s", got.String())
 }
 
 // TestCachedBenchmarkYield_BinarySearchNearest verifies that
@@ -201,19 +204,23 @@ func TestCachedBenchmarkYield_BinarySearchNearest(t *testing.T) {
 	})
 
 	// Query exactly on a cached date: returns it.
-	got := momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 2, 12, 0, 0, 0, time.UTC))
-	assert.True(t, got.Equal(decimal.MustNew(46, 1)))
+	got, ok := momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 2, 12, 0, 0, 0, time.UTC))
+	assert.True(t, ok, "cached date should satisfy the request")
+	assert.True(t, got.Equal(decimal.MustNew(46, 3)))
 
 	// Query between cached dates: returns the LATEST <= query.
-	got = momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 3, 12, 0, 0, 0, time.UTC))
-	assert.True(t, got.Equal(decimal.MustNew(46, 1)),
-		"query between dates should return the LATEST <= query (4.6 from Jan 2), got %s", got.String())
+	got, ok = momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 3, 12, 0, 0, 0, time.UTC))
+	assert.True(t, ok)
+	assert.True(t, got.Equal(decimal.MustNew(46, 3)),
+		"query between dates should return the LATEST <= query (0.046 from Jan 2), got %s", got.String())
 
-	// Empty cache: returns zero.
+	// Empty cache: no benchmark available (ok=false — callers must
+	// skip the tick, not evaluate a spread against zero).
 	cfg2 := momentum.DefaultConfig()
 	s2 := momentum.New(cfg2, nil)
-	got = momentum.GetBenchmarkYield(context.Background(), s2, time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
-	assert.True(t, got.IsZero(), "empty cache must return zero")
+	got, ok = momentum.GetBenchmarkYield(context.Background(), s2, time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
+	assert.False(t, ok, "empty cache must report no benchmark available")
+	assert.True(t, got.IsZero())
 }
 
 // TestPrefillWindow_FillsWindowsFromHistory verifies that prefillWindow

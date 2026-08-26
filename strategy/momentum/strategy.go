@@ -472,11 +472,16 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 
 	portfolio, err := s.marketAPIClient.GetPortfolioV2(ctx)
 	if err == nil && portfolio != nil {
-		initializeBalancesFromPortfolio(s, portfolio, baseAssetID, quoteAssetID, false, s.logger())
-		s.mu.Lock()
-		s.balancesInitialized = true
-		s.mu.Unlock()
-		return
+		if initializeBalancesFromPortfolio(s, portfolio, baseAssetID, quoteAssetID, false, s.logger()) {
+			s.mu.Lock()
+			s.balancesInitialized = true
+			s.mu.Unlock()
+			return
+		}
+		// Adapter did not converge (parse failure or no matching
+		// account): fall through to the legacy AssetPosition path so
+		// tracked state reflects the real position instead of staying
+		// zero while flagged initialized.
 	}
 	if err != nil {
 		s.logger().Warn("initialise balances: v2 portfolio unavailable, falling back to legacy path", "err", err)
@@ -501,9 +506,10 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 	} else {
 		s.mu.Lock()
 		s.usdBal = usdAvailable
-		if !usdAvailable.IsZero() {
-			s.cfg.InitialBalance = usdAvailable
-		}
+		// Always sync, including zero: an unfunded account must not
+		// keep sizing orders off the config default (synthetic
+		// capital).
+		s.cfg.InitialBalance = usdAvailable
 		s.mu.Unlock()
 	}
 
@@ -812,7 +818,14 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 
 				var benchmarkYield decimal.Decimal
 				if s.cfg.SignalSource == SignalSourceSpread {
-					benchmarkYield = s.getBenchmarkYield(ctx, px.Time)
+					var benchOK bool
+					benchmarkYield, benchOK = s.getBenchmarkYield(ctx, px.Time)
+					if !benchOK {
+						// No benchmark available (FRED down, empty cache):
+						// skip the tick rather than evaluate YTM - 0. The
+						// failed fetch is already logged (throttled).
+						continue
+					}
 				}
 
 				// Snapshot state under the lock; Update() re-acquires
@@ -880,8 +893,10 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 // getBenchmarkYield returns the FRED benchmark yield for the configured
 // tenor. Returns the cached yield if the cache has data for today
 // (UTC), otherwise fetches a fresh window from FRED and merges it in.
-// Spread mode only.
-func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.Decimal {
+// ok=false means no benchmark is available at all (FRED unreachable and
+// empty cache) — callers must skip the tick rather than evaluate a
+// spread against zero. Spread mode only.
+func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) (decimal.Decimal, bool) {
 	normedTS := fred.NormalizeDate(ts)
 
 	// stale-cache fallback: on any FRED / parse / client error we return
@@ -891,7 +906,7 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 	cachedYield, cachedOK := s.cachedBenchmarkYield(ts)
 	if cachedOK {
 		if latestDate, has := s.latestCachedBenchmarkDate(); has && !latestDate.Before(normedTS) {
-			return cachedYield
+			return cachedYield, true
 		}
 	}
 
@@ -907,9 +922,9 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 	s.mu.RUnlock()
 	if !lastFetchedAt.IsZero() && ts.Sub(lastFetchedAt) < fetchMinInterval {
 		if cachedOK {
-			return cachedYield
+			return cachedYield, true
 		}
-		return decimal.Zero
+		return decimal.Zero, false
 	}
 
 	tenor, err := fred.ParseBenchmarkTenor(s.cfg.Tenor)
@@ -917,9 +932,9 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 		s.recordErr(fmt.Errorf("get benchmark yield: parse tenor: %w", err))
 		s.noteBenchmarkFetch(ts)
 		if cachedOK {
-			return cachedYield
+			return cachedYield, true
 		}
-		return decimal.Zero
+		return decimal.Zero, false
 	}
 
 	client, err := s.getBenchmarkYieldClient()
@@ -927,9 +942,9 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 		s.recordErr(fmt.Errorf("get benchmark yield: get client: %w", err))
 		s.noteBenchmarkFetch(ts)
 		if cachedOK {
-			return cachedYield
+			return cachedYield, true
 		}
-		return decimal.Zero
+		return decimal.Zero, false
 	}
 
 	start := normedTS.AddDate(0, 0, -10)
@@ -938,26 +953,26 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 	if err != nil {
 		s.recordErr(fmt.Errorf("get benchmark yield: fred fetch: %w", err))
 		if cachedOK {
-			return cachedYield
+			return cachedYield, true
 		}
-		return decimal.Zero
+		return decimal.Zero, false
 	}
 	if len(obs) == 0 {
 		// FRED returned no data; fall back to stale cache if we have it.
 		if cachedOK {
-			return cachedYield
+			return cachedYield, true
 		}
-		return decimal.Zero
+		return decimal.Zero, false
 	}
 	s.mergeBenchmarkObservations(obs)
 	fresh, freshOK := s.cachedBenchmarkYield(ts)
 	if freshOK {
-		return fresh
+		return fresh, true
 	}
 	if cachedOK {
-		return cachedYield
+		return cachedYield, true
 	}
-	return decimal.Zero
+	return decimal.Zero, false
 }
 
 // noteBenchmarkFetch records the timestamp of the most recent FRED fetch

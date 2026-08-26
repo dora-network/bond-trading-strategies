@@ -147,6 +147,18 @@ func TestNormalizeDate(t *testing.T) {
 	assert.Equal(t, time.Date(2024, 12, 31, 0, 0, 0, 0, time.UTC), got)
 }
 
+// TestSupportedBenchmarkTenors_DeepCopy verifies that mutating a
+// returned row's alias list cannot corrupt the package-level parser
+// table (the copy must be deep, not slice-header sharing).
+func TestSupportedBenchmarkTenors_DeepCopy(t *testing.T) {
+	list := SupportedBenchmarkTenors()
+	list[0].Aliases[0] = "10YR" // would remap 1MO's first alias if shared
+
+	if got, err := ParseBenchmarkTenor("1MO"); err != nil || got != Tenor1Month {
+		t.Fatalf("alias table corrupted by caller mutation: ParseBenchmarkTenor(1MO) = %v, %v", got, err)
+	}
+}
+
 // TestSupportedBenchmarkTenors verifies the list shape: 11 entries
 // spanning 1M..30Y, sorted ascending by tenor, each with a non-empty
 // Code and at least one alias. Catches accidentally edited table.

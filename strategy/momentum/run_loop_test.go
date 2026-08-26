@@ -49,11 +49,16 @@ func TestRunLoop_ProcessesTicksWithoutDeadlock(t *testing.T) {
 	fake.AssetCollateralWeightStub = func(_ context.Context, _ string) (decimal.Decimal, error) {
 		return decimal.One, nil
 	}
-	// Return a zero position so the strategy starts in Hold and the
-	// poll genuinely observes the MA crossover through s.Update. A
-	// non-zero stub would set openSignal to Buy before any tick
-	// arrives, masking the regression.
-	fake.AssetPositionStub = func(_ context.Context, _ string) (decimal.Decimal, decimal.Decimal, error) {
+	// Return a zero BOND position so the strategy starts in Hold and
+	// the poll genuinely observes the MA crossover through s.Update. A
+	// non-zero bond stub would set openSignal to Buy before any tick
+	// arrives, masking the regression. The quote asset reports the
+	// funded USD balance (initial_balance syncs the live USD value,
+	// including zero — a zero here would zero the sizing budget).
+	fake.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
+		if assetID == "asset-USD" {
+			return decimal.MustNew(1000, 0), decimal.Zero, nil
+		}
 		return decimal.Zero, decimal.Zero, nil
 	}
 

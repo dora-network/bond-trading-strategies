@@ -36,7 +36,7 @@ func GetObservations(s *Strategy, ctx context.Context, start, end time.Time) ([]
 	return s.getObservations(ctx, start, end)
 }
 
-func GetBenchmarkYield(ctx context.Context, s *Strategy, ts time.Time) decimal.Decimal {
+func GetBenchmarkYield(ctx context.Context, s *Strategy, ts time.Time) (decimal.Decimal, bool) {
 	return s.getBenchmarkYield(ctx, ts)
 }
 
@@ -69,8 +69,9 @@ func RunLoop(s *Strategy, ctx context.Context, msgs <-chan strategyPkg.Message, 
 }
 
 // MergeBenchmarkObservations seeds the strategy's in-memory benchmark
-// cache with the supplied observations, applying the same percentage
-// conversion the production code applies.
+// cache with the supplied observations (same normalization the
+// production merge applies: dates normalized, yields stored unchanged
+// as decimal fractions).
 func MergeBenchmarkObservations(s *Strategy, obs []fred.Observation) {
 	s.mergeBenchmarkObservations(obs)
 }

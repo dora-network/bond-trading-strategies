@@ -2850,14 +2850,14 @@ type breakoutConfigPayload struct {
 
 type momentumConfigPayload struct {
 	SignalSource    string   `json:"signal_source"`
-	FastWindow      int      `json:"fast_window"`
-	SlowWindow      int      `json:"slow_window"`
-	ATRWindow       int      `json:"atr_window"`
+	FastWindow      *int     `json:"fast_window,omitempty"`
+	SlowWindow      *int     `json:"slow_window,omitempty"`
+	ATRWindow       *int     `json:"atr_window,omitempty"`
 	StopLossATR     *float64 `json:"stop_loss_atr,omitempty"`
 	TakeProfitATR   *float64 `json:"take_profit_atr,omitempty"`
 	MinOrderSize    float64  `json:"min_order_size"`
 	MaxOrderSize    float64  `json:"max_order_size"`
-	MaxPositionSize float64  `json:"max_position_size"`
+	MaxPositionSize *float64 `json:"max_position_size,omitempty"`
 	Tenor           string   `json:"tenor,omitempty"`
 	OrderBookID     string   `json:"order_book_id,omitempty"`
 
@@ -3191,17 +3191,21 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 	if payload.SignalSource == "" {
 		payload.SignalSource = defaults.SignalSource
 	}
-	if payload.FastWindow == 0 {
-		payload.FastWindow = defaults.FastWindow
+	fastWindow := defaults.FastWindow
+	if payload.FastWindow != nil {
+		fastWindow = *payload.FastWindow
 	}
-	if payload.SlowWindow == 0 {
-		payload.SlowWindow = defaults.SlowWindow
+	slowWindow := defaults.SlowWindow
+	if payload.SlowWindow != nil {
+		slowWindow = *payload.SlowWindow
 	}
-	if payload.ATRWindow == 0 {
-		payload.ATRWindow = defaults.ATRWindow
+	atrWindow := defaults.ATRWindow
+	if payload.ATRWindow != nil {
+		atrWindow = *payload.ATRWindow
 	}
-	if payload.MaxPositionSize == 0 {
-		payload.MaxPositionSize = mustFloat64(defaults.MaxPositionSize)
+	maxPositionSize := mustFloat64(defaults.MaxPositionSize)
+	if payload.MaxPositionSize != nil {
+		maxPositionSize = *payload.MaxPositionSize
 	}
 	stopLossATR := mustFloat64(defaults.StopLossATR)
 	if payload.StopLossATR != nil {
@@ -3217,13 +3221,13 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 		payload.SignalSource != momentum.SignalSourceSpread {
 		return momentum.Config{}, nil, fmt.Errorf("config.signal_source must be one of price, ytm, spread")
 	}
-	if payload.FastWindow < 2 { //nolint:mnd
+	if fastWindow < 2 { //nolint:mnd
 		return momentum.Config{}, nil, fmt.Errorf("config.fast_window must be at least 2")
 	}
-	if payload.SlowWindow <= payload.FastWindow {
+	if slowWindow <= fastWindow {
 		return momentum.Config{}, nil, fmt.Errorf("config.slow_window must be greater than fast_window")
 	}
-	if payload.ATRWindow < 2 { //nolint:mnd
+	if atrWindow < 2 { //nolint:mnd
 		return momentum.Config{}, nil, fmt.Errorf("config.atr_window must be at least 2")
 	}
 	if stopLossATR < 0 {
@@ -3238,11 +3242,16 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 	if payload.MaxOrderSize < 0 {
 		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size must be non-negative")
 	}
-	if payload.MaxPositionSize <= 0 || payload.MaxPositionSize > 1 {
+	if maxPositionSize <= 0 || maxPositionSize > 1 {
 		return momentum.Config{}, nil, fmt.Errorf("config.max_position_size must be in (0,1]")
 	}
-	if payload.SignalSource == momentum.SignalSourceSpread && payload.Tenor == "" {
-		return momentum.Config{}, nil, fmt.Errorf("config.tenor is required when signal_source is spread")
+	if payload.SignalSource == momentum.SignalSourceSpread {
+		if payload.Tenor == "" {
+			return momentum.Config{}, nil, fmt.Errorf("config.tenor is required when signal_source is spread")
+		}
+		if _, err := fred.ParseBenchmarkTenor(payload.Tenor); err != nil {
+			return momentum.Config{}, nil, fmt.Errorf("config.tenor: %w", err)
+		}
 	}
 
 	stopLoss, err := decimal.NewFromFloat64(stopLossATR)
@@ -3261,7 +3270,7 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 	if err != nil {
 		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size: %w", err)
 	}
-	maxPosition, err := decimal.NewFromFloat64(payload.MaxPositionSize)
+	maxPosition, err := decimal.NewFromFloat64(maxPositionSize)
 	if err != nil {
 		return momentum.Config{}, nil, fmt.Errorf("config.max_position_size: %w", err)
 	}
@@ -3320,14 +3329,14 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 
 	out, err := json.Marshal(map[string]any{
 		"signal_source":     payload.SignalSource,
-		"fast_window":       payload.FastWindow,
-		"slow_window":       payload.SlowWindow,
-		"atr_window":        payload.ATRWindow,
+		"fast_window":       fastWindow,
+		"slow_window":       slowWindow,
+		"atr_window":        atrWindow,
 		"stop_loss_atr":     mustFloat64(stopLoss),
 		"take_profit_atr":   mustFloat64(takeProfit),
 		"min_order_size":    mustFloat64(minOrder),
 		"max_order_size":    mustFloat64(maxOrder),
-		"max_position_size": mustFloat64(maxPosition),
+		"max_position_size": maxPositionSize,
 		"tenor":             payload.Tenor,
 		"order_book_id":     payload.OrderBookID,
 		"initial_balance":   mustFloat64(amount),
@@ -3339,9 +3348,9 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 
 	return momentum.Config{
 		SignalSource:    payload.SignalSource,
-		FastWindow:      payload.FastWindow,
-		SlowWindow:      payload.SlowWindow,
-		ATRWindow:       payload.ATRWindow,
+		FastWindow:      fastWindow,
+		SlowWindow:      slowWindow,
+		ATRWindow:       atrWindow,
 		StopLossATR:     stopLoss,
 		TakeProfitATR:   takeProfit,
 		MinOrderSize:    minOrder,

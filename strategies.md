@@ -184,6 +184,7 @@ rather than backfilling from a corrupt row.
 | `take_profit_atr` | float | 0 | Take-profit distance in ATR units from entry. 0 disables. |
 | `min_order_size` | float | 0 | Skip opening when the computed quantity is below this. 0 disables. Decimal because Dora is a fractionalized market. |
 | `max_order_size` | float | 0 | Clamp the order quantity down to this. 0 disables. |
+| `max_position_size` | float | 1 | Maximum fraction of capital per trade. Must be in (0, 1]. |
 | `order_book_id` | uuid | – | **Required.** DORA order book UUID used to locate the traded asset. |
 | `tenor` | string | – | Benchmark Treasury tenor (e.g. `2Y`, `5Y`, `10Y`). Required when `signal_source` is `spread`. |
 | `initial_balance` | float | 1 | Starting capital for backtests. Backtests require > 0; live runs may pass 0 and the strategy uses the user's USD balance from DORA. |

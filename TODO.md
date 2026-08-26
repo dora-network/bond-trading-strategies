@@ -465,3 +465,26 @@ are the cross-cutting remainders:
   clean stash of the branch base, so not introduced by the momentum
   branch. Unrelated to this merge — needs standalone investigation
   (suspect the ws-test-server background-reader / upgrade-race class).
+
+## Copilot PR-review fixes (2026-08-26, applied to momentum)
+
+All 10 unique findings from Copilot's PR #29 review addressed:
+benchmark unit fix (×100 removed — cache stores fractions matching YTM),
+getBenchmarkYield ok=false + tick skip, initializeBalances V2 fallback
+to AssetPosition, InitialBalance always-synced (incl. zero, both paths),
+spread tenor validated at decode, pointer fast/slow/atr windows +
+max_position_size (explicit 0 rejected, not defaulted), trade-row
+oneOf→anyOf, fred SupportedBenchmarkTenors deep copy, strategies.md
+max_position_size row, shared process-lifetime price-history pool.
+
+Meanreversion twins of two findings (pre-existing on development, NOT
+fixed here):
+- **meanreversion ×100 benchmark scaling** —
+  strategy/meanreversion/historical_data.go:136,175 has the identical
+  percent-vs-fraction mismatch in its FRED merge. Fix the same way
+  (store observation.Yield unchanged) when meanreversion is next
+  touched; its spread/zscore fixtures pin the scaled values.
+- **meanreversion per-instance pgxpool leak** —
+  strategy/meanreversion/historical_data.go:95 creates a pool per
+  strategy instance, never closed. Momentum now uses a shared
+  process-lifetime pool; port the same pattern.

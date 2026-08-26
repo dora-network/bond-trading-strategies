@@ -305,7 +305,7 @@
                     "items": {
                       "type": "array",
                       "items": {
-                        "oneOf": [
+                        "anyOf": [
                           { "$ref": "#/components/schemas/TradeRecord" },
                           { "$ref": "#/components/schemas/MomentumTradeRecord" }
                         ]
@@ -341,7 +341,7 @@
                     "items": {
                       "type": "array",
                       "items": {
-                        "oneOf": [
+                        "anyOf": [
                           { "$ref": "#/components/schemas/ClosedTrade" },
                           { "$ref": "#/components/schemas/MomentumClosedTrade" }
                         ]
@@ -1269,7 +1269,7 @@
             "type": "object",
             "properties": {
               "config": {
-                "oneOf": [
+                "anyOf": [
                   { "$ref": "#/components/schemas/MeanReversionConfig" },
                   { "$ref": "#/components/schemas/BreakoutConfig" },
                   { "$ref": "#/components/schemas/MomentumConfig" },
