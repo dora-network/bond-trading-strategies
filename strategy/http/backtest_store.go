@@ -533,6 +533,20 @@ func tradeRecordToResponse(strategyType string, r *tradeRecordRow) (json.RawMess
 			EntryATR:         derefString(r.EntryATR),
 		}
 		return json.Marshal(rec)
+	case "momentum":
+		// FastMA/SlowMA have no backing DB columns so they are
+		// empty here. The shared slot (EntryATR) is the only
+		// momentum-specific field persisted.
+		rec := MomentumTradeRecord{
+			Time:         r.Time,
+			BondID:       bondID,
+			Signal:       r.Signal,
+			Price:        price,
+			Quantity:     quantity,
+			PositionSize: derefString(r.PositionSize),
+			EntryATR:     derefString(r.EntryATR),
+		}
+		return json.Marshal(rec)
 	default:
 		rec := MeanReversionTradeRecord{
 			Time:         r.Time,
@@ -592,6 +606,21 @@ func closedTradeToResponse(strategyType string, r *closedTradeRow) (json.RawMess
 			ExitReason:            derefString(r.ExitReason),
 			EntryCompressionRatio: derefString(r.EntryCompressionRatio),
 			ExitCompressionRatio:  derefString(r.ExitCompressionRatio),
+		}
+		return json.Marshal(ct)
+	case "momentum":
+		ct := MomentumClosedTrade{
+			BondID:       bondID,
+			OpenTime:     r.OpenTime,
+			CloseTime:    r.CloseTime,
+			Signal:       r.OpenSignal,
+			ExitSignal:   r.CloseSignal,
+			EntryPrice:   derefString(r.EntryPrice),
+			ExitPrice:    derefString(r.ExitPrice),
+			Quantity:     r.Quantity,
+			PositionSize: derefString(r.PositionSize),
+			PnL:          r.PnL,
+			ExitReason:   derefString(r.ExitReason),
 		}
 		return json.Marshal(ct)
 	default:

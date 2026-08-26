@@ -1,17 +1,17 @@
-package meanreversion
+package momentum
 
 import (
 	"fmt"
 	"log/slog"
 
 	"github.com/dora-network/bond-trading-strategies/strategy"
-
 	"github.com/dora-network/dora-client-go/doraclient"
 )
 
-// initializeBalancesFromPortfolio is the meanreversion adapter for the
-// shared strategy.InitialBalancesFromPortfolio. It pulls the values
-// out and applies them to the strategy's mu-protected state.
+// initializeBalancesFromPortfolio is the momentum adapter for the
+// shared strategy.InitialBalancesFromPortfolio helper. Returns true
+// when the helper converged and tracked state was applied; false means
+// the caller should fall back to the legacy AssetPosition path.
 func initializeBalancesFromPortfolio(
 	s *Strategy,
 	portfolio *doraclient.AccountPortfolioV2,
@@ -19,24 +19,22 @@ func initializeBalancesFromPortfolio(
 	quoteAssetID string,
 	fromGlobalPosition bool,
 	logger *slog.Logger,
-) {
+) bool {
 	bal, signal, ok, err := strategy.InitialBalancesFromPortfolio(portfolio, fromGlobalPosition, baseAssetID, quoteAssetID, logger)
 	if err != nil {
 		logger.Error("initialise balances from portfolio", "runID", s.runID, "err", err)
-		s.mu.Lock()
-		s.errs = append(s.errs, fmt.Errorf("initialise balances: %w", err))
-		s.mu.Unlock()
+		s.recordErr(fmt.Errorf("initialise balances: %w", err))
 	}
 	if !ok {
-		return
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.usdBal = bal.USD
 	s.bondQty = bal.Bond
-	if !bal.USD.IsZero() {
-		s.cfg.InitialBalance = bal.USD
-	}
+	// Always sync, including zero: an unfunded account must not keep
+	// sizing orders off the config default (synthetic capital).
+	s.cfg.InitialBalance = bal.USD
 	s.openSignal = signal
 	logger.Info(
 		"initialised balances from portfolio",
@@ -46,4 +44,5 @@ func initializeBalancesFromPortfolio(
 		"bondQty", s.bondQty,
 		"initialBalance", s.cfg.InitialBalance,
 	)
+	return true
 }

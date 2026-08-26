@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/authctx"
+	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
@@ -21,6 +22,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	"github.com/dora-network/bond-trading-strategies/strategy/exec"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/twap"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
@@ -727,7 +729,7 @@ func (h *Handler) handleTenors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	supported := meanreversion.SupportedBenchmarkTenors()
+	supported := fred.SupportedBenchmarkTenors()
 	items := make([]TenorSummary, 0, len(supported))
 	for _, tenor := range supported {
 		items = append(items, TenorSummary{
@@ -956,16 +958,11 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	// Inject the user's API key into the strategy so it can authenticate
 	// with DORA when resolving the asset ID for the order book.
 	info, _ := authctx.AuthInfoFromContext(r.Context())
-	if info != nil && info.APIKey != "" {
-		if withClient, ok := strat.(*meanreversion.Strategy); ok {
-			withClientOpts := meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))
-			withClientOpts(withClient)
-		}
-		if withClient, ok := strat.(*breakout.Strategy); ok {
-			withClientOpts := breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))
-			withClientOpts(withClient)
-		}
+	var apiKey string
+	if info != nil {
+		apiKey = info.APIKey
 	}
+	h.applyUserAPIKey(strat, apiKey)
 
 	resultCh, err := h.service.RunBacktest(r.Context(), id, strat, req.Start, req.End)
 	if err != nil {
@@ -1010,6 +1007,7 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, detail)
 }
 
+//nolint:funlen // 5 strategy result cases; consider a map-based dispatcher in a follow-up
 func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.BacktestResult, batcher *BatchingBacktestWriter) {
 	result, ok := <-resultCh
 	if !ok {
@@ -1060,6 +1058,18 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 	case breakout.BacktestResult:
 		detail.Status = "completed"
 		raw, err := newBreakoutBacktestResult(r)
+		if err != nil {
+			detail.Status = "failed"
+			detail.Error = err.Error()
+			evtType = notifications.EventBacktestFailed
+			evtErr = err.Error()
+			break
+		}
+		detail.Result = raw
+		evtType = notifications.EventBacktestCompleted
+	case momentum.BacktestResult:
+		detail.Status = "completed"
+		raw, err := newMomentumBacktestResult(r)
 		if err != nil {
 			detail.Status = "failed"
 			detail.Error = err.Error()
@@ -1536,7 +1546,6 @@ func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid
 	h.getBacktestMetadata(w, r, id)
 }
 
-//nolint:funlen // wiring count grew with the vwap notifier + completion watcher integration
 func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	var req CreateRunRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -1566,20 +1575,11 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 
 	// Inject the user's API key into the strategy so it can authenticate with DORA.
 	info, _ := authctx.AuthInfoFromContext(r.Context())
-	if info != nil && info.APIKey != "" {
-		switch withClient := strat.(type) {
-		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *breakout.Strategy:
-			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *twap.Strategy:
-			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *vwap.Strategy:
-			vwap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(info.APIKey))(withClient)
-		}
+	var apiKey string
+	if info != nil {
+		apiKey = info.APIKey
 	}
+	h.applyUserAPIKey(strat, apiKey)
 
 	// Attach the per-run decision recorder so every successful live
 	// market order is written to strategy_decisions. nil disables
@@ -1933,18 +1933,7 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		if err2 != nil {
 			return fmt.Errorf("decrypt api key for run %s: %w", detail.ID, err2)
 		}
-		switch withClient := strat.(type) {
-		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *breakout.Strategy:
-			breakout.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *twap.Strategy:
-			twap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *vwap.Strategy:
-			vwap.WithMarketAPIClient(strategycore.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		}
+		h.applyUserAPIKey(strat, string(apiKeyDecrypted))
 	}
 
 	// Attach the per-run decision recorder. nil disables recording.
@@ -1967,6 +1956,8 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 			case *copytrading.Strategy:
 				s.SetDecisionSeq(maxSeq)
 			case *breakout.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *momentum.Strategy:
 				s.SetDecisionSeq(maxSeq)
 			case *twap.Strategy:
 				s.SetDecisionSeq(maxSeq)
@@ -2444,10 +2435,38 @@ func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
 		copytrading.WithDecisionStore(h.decisionStore)(s)
 	case *breakout.Strategy:
 		breakout.WithDecisionStore(h.decisionStore)(s)
+	case *momentum.Strategy:
+		momentum.WithDecisionStore(h.decisionStore)(s)
 	case *twap.Strategy:
 		twap.WithDecisionStore(h.decisionStore)(s)
 	case *vwap.Strategy:
 		vwap.WithDecisionStore(h.decisionStore)(s)
+	}
+}
+
+// applyUserAPIKey injects the per-request DORA API key into the
+// strategy so it can authenticate against DORA with the caller's
+// credentials instead of the server-global key. No-op when key is
+// empty. Used by createBacktest, createRun, and resumePersistedRun
+// to fold the type switch into a single helper.
+func (h *Handler) applyUserAPIKey(strat strategycore.Strategy, apiKey string) {
+	if apiKey == "" {
+		return
+	}
+	client := strategycore.NewDoraClientWithKey(apiKey)
+	switch s := strat.(type) {
+	case *meanreversion.Strategy:
+		meanreversion.WithMarketAPIClient(client)(s)
+	case *copytrading.Strategy:
+		copytrading.WithMarketAPIClient(client)(s)
+	case *breakout.Strategy:
+		breakout.WithMarketAPIClient(client)(s)
+	case *momentum.Strategy:
+		momentum.WithMarketAPIClient(client)(s)
+	case *twap.Strategy:
+		twap.WithMarketAPIClient(client)(s)
+	case *vwap.Strategy:
+		vwap.WithMarketAPIClient(client)(s)
 	}
 }
 
@@ -2481,6 +2500,7 @@ func defaultStrategies(
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
 		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, tradeHistoryStore, log),
 		newVWAPDefinition(tradeHistoryStore, log),
+		newMomentumDefinition(pricesHandler, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2828,6 +2848,23 @@ type breakoutConfigPayload struct {
 	Leverage       *float64 `json:"leverage,omitempty"`
 }
 
+type momentumConfigPayload struct {
+	SignalSource    string   `json:"signal_source"`
+	FastWindow      *int     `json:"fast_window,omitempty"`
+	SlowWindow      *int     `json:"slow_window,omitempty"`
+	ATRWindow       *int     `json:"atr_window,omitempty"`
+	StopLossATR     *float64 `json:"stop_loss_atr,omitempty"`
+	TakeProfitATR   *float64 `json:"take_profit_atr,omitempty"`
+	MinOrderSize    float64  `json:"min_order_size"`
+	MaxOrderSize    float64  `json:"max_order_size"`
+	MaxPositionSize *float64 `json:"max_position_size,omitempty"`
+	Tenor           string   `json:"tenor,omitempty"`
+	OrderBookID     string   `json:"order_book_id,omitempty"`
+
+	InitialBalance *float64 `json:"initial_balance,omitempty"`
+	Leverage       *float64 `json:"leverage,omitempty"`
+}
+
 //nolint:funlen // strategy definition with 12 config fields
 func newBreakoutDefinition(
 	pricesHandler *prices.Handler,
@@ -3144,6 +3181,312 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 }
 
 //nolint:funlen // config decoding with validation
+func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, json.RawMessage, error) {
+	var payload momentumConfigPayload
+	if err := decodeRawConfig(raw, &payload); err != nil {
+		return momentum.Config{}, nil, err
+	}
+	defaults := momentum.DefaultConfig()
+
+	if payload.SignalSource == "" {
+		payload.SignalSource = defaults.SignalSource
+	}
+	fastWindow := defaults.FastWindow
+	if payload.FastWindow != nil {
+		fastWindow = *payload.FastWindow
+	}
+	slowWindow := defaults.SlowWindow
+	if payload.SlowWindow != nil {
+		slowWindow = *payload.SlowWindow
+	}
+	atrWindow := defaults.ATRWindow
+	if payload.ATRWindow != nil {
+		atrWindow = *payload.ATRWindow
+	}
+	maxPositionSize := mustFloat64(defaults.MaxPositionSize)
+	if payload.MaxPositionSize != nil {
+		maxPositionSize = *payload.MaxPositionSize
+	}
+	stopLossATR := mustFloat64(defaults.StopLossATR)
+	if payload.StopLossATR != nil {
+		stopLossATR = *payload.StopLossATR
+	}
+	takeProfitATR := mustFloat64(defaults.TakeProfitATR)
+	if payload.TakeProfitATR != nil {
+		takeProfitATR = *payload.TakeProfitATR
+	}
+
+	if payload.SignalSource != momentum.SignalSourcePrice &&
+		payload.SignalSource != momentum.SignalSourceYTM &&
+		payload.SignalSource != momentum.SignalSourceSpread {
+		return momentum.Config{}, nil, fmt.Errorf("config.signal_source must be one of price, ytm, spread")
+	}
+	if fastWindow < 2 { //nolint:mnd
+		return momentum.Config{}, nil, fmt.Errorf("config.fast_window must be at least 2")
+	}
+	if slowWindow <= fastWindow {
+		return momentum.Config{}, nil, fmt.Errorf("config.slow_window must be greater than fast_window")
+	}
+	if atrWindow < 2 { //nolint:mnd
+		return momentum.Config{}, nil, fmt.Errorf("config.atr_window must be at least 2")
+	}
+	if stopLossATR < 0 {
+		return momentum.Config{}, nil, fmt.Errorf("config.stop_loss_atr must be non-negative")
+	}
+	if takeProfitATR < 0 {
+		return momentum.Config{}, nil, fmt.Errorf("config.take_profit_atr must be non-negative")
+	}
+	if payload.MinOrderSize < 0 {
+		return momentum.Config{}, nil, fmt.Errorf("config.min_order_size must be non-negative")
+	}
+	if payload.MaxOrderSize < 0 {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size must be non-negative")
+	}
+	if maxPositionSize <= 0 || maxPositionSize > 1 {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_position_size must be in (0,1]")
+	}
+	if payload.SignalSource == momentum.SignalSourceSpread {
+		if payload.Tenor == "" {
+			return momentum.Config{}, nil, fmt.Errorf("config.tenor is required when signal_source is spread")
+		}
+		if _, err := fred.ParseBenchmarkTenor(payload.Tenor); err != nil {
+			return momentum.Config{}, nil, fmt.Errorf("config.tenor: %w", err)
+		}
+	}
+
+	stopLoss, err := decimal.NewFromFloat64(stopLossATR)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.stop_loss_atr: %w", err)
+	}
+	takeProfit, err := decimal.NewFromFloat64(takeProfitATR)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.take_profit_atr: %w", err)
+	}
+	minOrder, err := decimal.NewFromFloat64(payload.MinOrderSize)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.min_order_size: %w", err)
+	}
+	maxOrder, err := decimal.NewFromFloat64(payload.MaxOrderSize)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size: %w", err)
+	}
+	maxPosition, err := decimal.NewFromFloat64(maxPositionSize)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_position_size: %w", err)
+	}
+
+	amount := defaults.InitialBalance
+	if payload.InitialBalance != nil {
+		if *payload.InitialBalance < 0 {
+			return momentum.Config{}, nil, fmt.Errorf("config.initial_balance must be non-negative")
+		}
+		if *payload.InitialBalance == 0 {
+			// For backtests, initial_balance must be > 0 because it is the
+			// seed capital. For runs, 0 means "fetch my USD balance": the live
+			// path overrides cfg.InitialBalance from the user's DORA portfolio
+			// (strategy/momentum/strategy.go:504). Store the explicit 0 so the
+			// persisted config reflects the request; if the portfolio fetch
+			// never succeeds the strategy sizes off 0 (opens nothing) rather
+			// than off the default.
+			if !forRun {
+				return momentum.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0 for backtests")
+			}
+			amount = decimal.Zero
+		} else {
+			amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
+			if err != nil {
+				return momentum.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+			}
+		}
+	}
+	leverage := defaults.Leverage
+	if payload.Leverage != nil {
+		if *payload.Leverage <= 0 {
+			return momentum.Config{}, nil, fmt.Errorf("config.leverage must be greater than 0")
+		}
+		leverage, err = decimal.NewFromFloat64(*payload.Leverage)
+		if err != nil {
+			return momentum.Config{}, nil, fmt.Errorf("config.leverage: %w", err)
+		}
+	}
+
+	// MaxOrderSize >= MinOrderSize when both are positive. Mirror copytrading's
+	// cross-check (decodeCopyTradingConfig); design §5 promises it explicitly.
+	// Without this, the strategy silently never opens because cappedOrderQuantity
+	// (strategy/momentum/strategy.go:208-213) clamps qty to MaxOrderSize then
+	// skips when clamped qty < MinOrderSize.
+	if payload.MinOrderSize > 0 && payload.MaxOrderSize > 0 && payload.MaxOrderSize < payload.MinOrderSize {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size must be greater than or equal to min_order_size")
+	}
+
+	if payload.OrderBookID == "" {
+		return momentum.Config{}, nil, fmt.Errorf("config.order_book_id is required")
+	}
+	orderBookID, err := uuid.Parse(payload.OrderBookID)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.order_book_id: %w", err)
+	}
+
+	out, err := json.Marshal(map[string]any{
+		"signal_source":     payload.SignalSource,
+		"fast_window":       fastWindow,
+		"slow_window":       slowWindow,
+		"atr_window":        atrWindow,
+		"stop_loss_atr":     mustFloat64(stopLoss),
+		"take_profit_atr":   mustFloat64(takeProfit),
+		"min_order_size":    mustFloat64(minOrder),
+		"max_order_size":    mustFloat64(maxOrder),
+		"max_position_size": maxPositionSize,
+		"tenor":             payload.Tenor,
+		"order_book_id":     payload.OrderBookID,
+		"initial_balance":   mustFloat64(amount),
+		"leverage":          mustFloat64(leverage),
+	})
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("marshal momentum config: %w", err)
+	}
+
+	return momentum.Config{
+		SignalSource:    payload.SignalSource,
+		FastWindow:      fastWindow,
+		SlowWindow:      slowWindow,
+		ATRWindow:       atrWindow,
+		StopLossATR:     stopLoss,
+		TakeProfitATR:   takeProfit,
+		MinOrderSize:    minOrder,
+		MaxOrderSize:    maxOrder,
+		MaxPositionSize: maxPosition,
+		Tenor:           payload.Tenor,
+		OrderBookID:     orderBookID,
+		InitialBalance:  amount,
+		Leverage:        leverage,
+	}, out, nil
+}
+
+//nolint:funlen // strategy definition with 13 config fields
+func newMomentumDefinition(pricesHandler *prices.Handler, log *slog.Logger) StrategyDefinition {
+	defaults := momentum.DefaultConfig()
+	return StrategyDefinition{
+		Type:             momentum.StrategyType,
+		Status:           strategyStatusAvailable,
+		Description:      "Momentum / trend-following strategy. Fast/slow MA crossover with ATR-anchored stops and opposite-signal reversal.",
+		SupportsRun:      true,
+		SupportsBacktest: true,
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "signal_source",
+				Type:        "string",
+				Description: "Series the MA crossover runs on. One of price, ytm, spread.",
+				Required:    false,
+				Default:     defaults.SignalSource,
+			},
+			{
+				Name:        "fast_window",
+				Type:        "integer",
+				Description: "Fast MA tick window. Must be at least 2.",
+				Required:    false,
+				Default:     defaults.FastWindow,
+			},
+			{
+				Name:        "slow_window",
+				Type:        "integer",
+				Description: "Slow MA tick window. Must be greater than fast_window.",
+				Required:    false,
+				Default:     defaults.SlowWindow,
+			},
+			{
+				Name:        "atr_window",
+				Type:        "integer",
+				Description: "Mean absolute price diff window used for stops. Must be at least 2.",
+				Required:    false,
+				Default:     defaults.ATRWindow,
+			},
+			{
+				Name:        "stop_loss_atr",
+				Type:        "number",
+				Description: "Stop-loss distance in ATR units from entry. 0 disables.",
+				Required:    false,
+				Default:     mustFloat64(defaults.StopLossATR),
+			},
+			{
+				Name:        "take_profit_atr",
+				Type:        "number",
+				Description: "Take-profit distance in ATR units from entry. 0 disables.",
+				Required:    false,
+				Default:     mustFloat64(defaults.TakeProfitATR),
+			},
+			{
+				Name:        "min_order_size",
+				Type:        "number",
+				Description: "Minimum order size to open a position. 0 disables.",
+				Required:    false,
+				Default:     mustFloat64(defaults.MinOrderSize),
+			},
+			{
+				Name:        "max_order_size",
+				Type:        "number",
+				Description: "Maximum order size to open a position. 0 disables.",
+				Required:    false,
+				Default:     mustFloat64(defaults.MaxOrderSize),
+			},
+			{
+				Name:        "max_position_size",
+				Type:        "number",
+				Description: "Maximum fraction of capital per trade. Must be in (0,1].",
+				Required:    false,
+				Default:     mustFloat64(defaults.MaxPositionSize),
+			},
+			{
+				Name:        "tenor",
+				Type:        "string",
+				Description: "FRED benchmark tenor. Required when signal_source is spread.",
+				Required:    false,
+				Default:     "",
+			},
+			{
+				Name:        "order_book_id",
+				Type:        "string",
+				Description: "DORA order book UUID.",
+				Required:    true,
+				Default:     "",
+			},
+			{
+				Name:        "initial_balance",
+				Type:        "number",
+				Description: "Starting capital. Live runs override with the user's USD balance.",
+				Required:    false,
+				Default:     mustFloat64(defaults.InitialBalance),
+			},
+			{
+				Name:        "leverage",
+				Type:        "number",
+				Description: "Leverage multiplier on InitialBalance.",
+				Required:    false,
+				Default:     mustFloat64(defaults.Leverage),
+			},
+		},
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			forRun := capability == string(capabilityRun)
+			cfg, normalised, err := decodeMomentumConfig(raw, forRun)
+			if err != nil {
+				return nil, nil, err
+			}
+			opts := []func(*momentum.Strategy){
+				momentum.WithLogger(log),
+			}
+			if tradeWriter != nil {
+				opts = append(opts, momentum.WithBacktestWriter(tradeWriter))
+			}
+			return normalised, momentum.New(cfg, pricesHandler, opts...), nil
+		},
+	}
+}
+
+//nolint:funlen // config decoding with validation
 func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.Config, json.RawMessage, error) {
 	var payload meanReversionConfigPayload
 	if err := decodeRawConfig(raw, &payload); err != nil {
@@ -3448,6 +3791,25 @@ func newBreakoutBacktestResult(result breakout.BacktestResult) (json.RawMessage,
 	b, err := json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("marshal breakout backtest result: %w", err)
+	}
+	return b, nil
+}
+
+func newMomentumBacktestResult(result momentum.BacktestResult) (json.RawMessage, error) {
+	// Per-trade and per-closed-trade rows are persisted to
+	// strategy_backtest_trades and strategy_backtest_closed_trades by the
+	// backtest engine via stats.BacktestTradeWriter. The summary-result
+	// JSON only carries aggregate metrics.
+	out := MomentumBacktestResult{
+		TotalPnL:    result.TotalPnL.String(),
+		WinCount:    result.WinCount,
+		LossCount:   result.LossCount,
+		MaxDrawdown: result.MaxDrawdown.String(),
+		SharpeRatio: result.SharpeRatio.String(),
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal momentum backtest result: %w", err)
 	}
 	return b, nil
 }

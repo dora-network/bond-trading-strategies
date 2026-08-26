@@ -88,9 +88,6 @@ func configProperties() map[string]any {
 	fraction := func(desc string) map[string]any {
 		return map[string]any{"type": "number", "description": desc, "minimum": 0, "exclusiveMinimum": true, "maximum": 1}
 	}
-	nonNegInt := func(desc string) map[string]any {
-		return map[string]any{"type": "integer", "description": desc, "minimum": 0}
-	}
 	intMin := func(min int, desc string) map[string]any {
 		return map[string]any{"type": "integer", "description": desc, "minimum": min}
 	}
@@ -108,8 +105,18 @@ func configProperties() map[string]any {
 		"followed_trader":         map[string]any{"type": "string", "format": "uuid", "description": "UUID of the trader to copy."},
 		"percentage_of_available": fraction("Fraction of available capital to allocate per trade, in (0,1]."),
 		"leverage":                posNum("Leverage multiplier. Must be greater than 0."),
-		"min_order_size":          nonNegInt("Minimum copied order size."),
-		"max_order_size":          nonNegInt("Maximum copied order size."),
+		// min_order_size / max_order_size: nonNegNum (not nonNegInt) so
+		// momentum callers can submit decimal values; the shared
+		// momentum schema validator parses via decimal.NewFromFloat64
+		// on the server side. copytrading happens to use integer
+		// values, but the type stays number for both.
+		// Strategy-agnostic wording: copytrading uses these as skip/
+		// clamp thresholds for the copied trade; momentum uses them
+		// as skip-open-below-min / clamp-quantity-at-max for the
+		// MA-crossover entry size. Both interpretations share the
+		// same numeric meaning (zero disables the bound).
+		"min_order_size": nonNegNum("Minimum order size to open a position. 0 disables."),
+		"max_order_size": nonNegNum("Maximum order size to open a position. 0 disables."),
 		"disallowed_bonds": map[string]any{
 			"type":        "array",
 			"description": "Bond UUIDs to skip.",
@@ -138,6 +145,20 @@ func configProperties() map[string]any {
 		"obv_trend_threshold":   num("OBV threshold for the volume confirmation filter. Direction-mapped."),
 		"min_long_vol_floor":    num("Minimum LongVol required to trade. Suppresses entries on a flat baseline."),
 		"obv_window":            intMin(0, "Recent trades for windowed OBV. 0 = no verification. >0 = verify with last N trades."),
+		// momentum — shares several field names with breakout/copytrading/mean_reversion
+		// (stop_loss_atr, take_profit_atr, min_order_size, max_order_size, max_position_size,
+		// order_book_id, tenor, initial_balance, leverage). The schema values are
+		// shared approximations; the strategy-server validates the per-strategy
+		// type (e.g. momentum min/max_order_size are decimal, copytrading are int).
+		"signal_source": map[string]any{
+			"type":        "string",
+			"description": "Momentum: series the MA crossover runs on — price, ytm, or spread. spread requires tenor.",
+			"enum":        []string{"price", "ytm", "spread"},
+		},
+		"fast_window": intMin(2, "Momentum: fast-MA tick window. Must be at least 2."),               //nolint:mnd
+		"slow_window": intMin(3, "Momentum: slow-MA tick window. Must be greater than fast_window."), //nolint:mnd
+		// atr_window is already declared above for breakout with the same
+		// semantics (integer ≥ 2). Momentum reuses it.
 	}
 }
 
@@ -196,7 +217,8 @@ func registerStrategyTools(s *server.MCPServer, strategyBaseURL, apiKey string) 
 	)
 
 	s.AddTool(
-		mcp.NewTool("strategy_copy_traders_list",
+		mcp.NewTool(
+			"strategy_copy_traders_list",
 			mcp.WithDescription("List copy traders available to be followed by a copy-trading run."),
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

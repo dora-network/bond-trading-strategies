@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Strategy Service API",
-    "version": "1.8.0",
+    "version": "1.9.0",
     "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`."
   },
   "servers": [
@@ -304,7 +304,12 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/TradeRecord" }
+                      "items": {
+                        "anyOf": [
+                          { "$ref": "#/components/schemas/TradeRecord" },
+                          { "$ref": "#/components/schemas/MomentumTradeRecord" }
+                        ]
+                      }
                     }
                   }
                 }
@@ -335,7 +340,12 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/ClosedTrade" }
+                      "items": {
+                        "anyOf": [
+                          { "$ref": "#/components/schemas/ClosedTrade" },
+                          { "$ref": "#/components/schemas/MomentumClosedTrade" }
+                        ]
+                      }
                     }
                   }
                 }
@@ -751,13 +761,14 @@
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading", "breakout"]
+            "enum": ["mean_reversion", "copytrading", "breakout", "momentum"]
           },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
               { "$ref": "#/components/schemas/CopyTradingConfig" },
-              { "$ref": "#/components/schemas/BreakoutConfig" }
+              { "$ref": "#/components/schemas/BreakoutConfig" },
+              { "$ref": "#/components/schemas/MomentumConfig" }
             ]
           },
           "start": { "type": "string", "format": "date-time" },
@@ -770,13 +781,14 @@
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading", "breakout"]
+            "enum": ["mean_reversion", "copytrading", "breakout", "momentum"]
           },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
               { "$ref": "#/components/schemas/CopyTradingConfig" },
-              { "$ref": "#/components/schemas/BreakoutConfig" }
+              { "$ref": "#/components/schemas/BreakoutConfig" },
+              { "$ref": "#/components/schemas/MomentumConfig" }
             ]
           }
         },
@@ -908,6 +920,88 @@
             "exclusiveMinimum": 0,
             "default": 1.0,
             "description": "Starting capital for backtests. Omitted for live runs — obtained from DORA positions."
+          },
+          "leverage": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "Leverage multiplier for live orders."
+          }
+        }
+      },
+      "MomentumConfig": {
+        "type": "object",
+        "description": "Moving-average-crossover trend strategy with configurable signal source (price / ytm / spread) and entry-anchored ATR exits.",
+        "properties": {
+          "signal_source": {
+            "type": "string",
+            "enum": ["price", "ytm", "spread"],
+            "default": "price",
+            "description": "Series the MA crossover runs on. `spread` requires `tenor`."
+          },
+          "fast_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 240,
+            "description": "Fast-MA tick window."
+          },
+          "slow_window": {
+            "type": "integer",
+            "minimum": 3,
+            "default": 1440,
+            "description": "Slow-MA tick window. Must be greater than fast_window."
+          },
+          "atr_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 240,
+            "description": "Mean-absolute-price-diff window for exits."
+          },
+          "stop_loss_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 20.0,
+            "description": "Stop-loss distance in ATR units. 0 disables."
+          },
+          "take_profit_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Take-profit distance in ATR units. 0 disables."
+          },
+          "min_order_size": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Skip opening when the computed quantity is below this. 0 disables."
+          },
+          "max_order_size": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Clamp the order quantity down to this. 0 disables."
+          },
+          "max_position_size": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 1.0,
+            "description": "Maximum fraction of capital allocated per trade."
+          },
+          "order_book_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "DORA order book UUID."
+          },
+          "tenor": {
+            "type": "string",
+            "description": "Benchmark Treasury tenor (e.g. 2Y, 5Y, 10Y). Required when signal_source is spread."
+          },
+          "initial_balance": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1.0,
+            "description": "Starting capital. Must be greater than 0 for backtests; live runs may pass 0 to use the user's DORA USD balance."
           },
           "leverage": {
             "type": "number",
@@ -1107,6 +1201,40 @@
         },
         "required": ["time", "bond_id", "signal", "price"]
       },
+      "MomentumTradeRecord": {
+        "type": "object",
+        "description": "Momentum trade row emitted by GET /v1/backtests/{id}/trades for momentum backtests.",
+        "properties": {
+          "time": { "type": "string", "format": "date-time" },
+          "bond_id": { "type": "string" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "fast_ma": { "type": "string", "description": "Fast MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint." },
+          "slow_ma": { "type": "string", "description": "Slow MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint." },
+          "entry_atr": { "type": "string", "description": "ATR captured on the opening row; mirrored onto the matching exit row." }
+        },
+        "required": ["time", "bond_id", "signal", "price"]
+      },
+      "MomentumClosedTrade": {
+        "type": "object",
+        "description": "Momentum closed-trade row emitted by GET /v1/backtests/{id}/closed-trades for momentum backtests.",
+        "properties": {
+          "bond_id": { "type": "string" },
+          "open_time": { "type": "string", "format": "date-time" },
+          "close_time": { "type": "string", "format": "date-time" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "exit_signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "entry_price": { "type": "string" },
+          "exit_price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "pnl": { "type": "string", "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction." },
+          "exit_reason": { "type": "string", "description": "One of stop_loss, take_profit, reversal, strategy_exit." }
+        },
+        "required": ["bond_id", "open_time", "close_time", "signal", "pnl"]
+      },
       "RunSummary": {
         "type": "object",
         "properties": {
@@ -1141,8 +1269,10 @@
             "type": "object",
             "properties": {
               "config": {
-                "oneOf": [
+                "anyOf": [
                   { "$ref": "#/components/schemas/MeanReversionConfig" },
+                  { "$ref": "#/components/schemas/BreakoutConfig" },
+                  { "$ref": "#/components/schemas/MomentumConfig" },
                   { "$ref": "#/components/schemas/CopyTradingConfig" }
                 ]
               },
