@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
@@ -491,6 +493,69 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 			return false
 		}
 		return summary.Status == "completed"
+	}, time.Second, 10*time.Millisecond)
+}
+
+// TestHandlerMomentumBacktestCompletes pins awaitBacktestResult's
+// momentum.BacktestResult case: a momentum result delivered on the
+// run channel must mark the backtest completed and persist the
+// momentum summary shape (string-decimal aggregates).
+func TestHandlerMomentumBacktestCompletes(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	resultCh := make(chan types.BacktestResult, 1)
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(ctx context.Context, _ uuid.UUID, strat strategycore.Strategy, start, end time.Time) (<-chan types.BacktestResult, error) {
+			return resultCh, nil
+		},
+	}
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithNow(func() time.Time { return now }),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-test-1", nil
+			},
+		}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	body := map[string]any{
+		"strategy_type": "momentum",
+		"config": map[string]any{
+			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+			"initial_balance": 1000,
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	}
+
+	rec := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, 1, svc.RunBacktestCallCount())
+
+	var accepted strategyhttp.BacktestDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+	backtestID := accepted.ID
+
+	resultCh <- momentum.BacktestResult{
+		TotalPnL:    decimal.MustNew(25, 2),
+		WinCount:    2,
+		LossCount:   1,
+		MaxDrawdown: decimal.MustNew(5, 2),
+		SharpeRatio: decimal.MustNew(13, 1),
+	}
+
+	require.Eventually(t, func() bool {
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return false
+		}
+		return strings.Contains(rec.Body.String(), `"total_pnl":"0.25"`)
 	}, time.Second, 10*time.Millisecond)
 }
 
@@ -1868,6 +1933,44 @@ func TestHandlerMomentumValidationErrors(t *testing.T) {
 			wantCode:    http.StatusBadRequest,
 			wantContain: "config.signal_source must be one of price, ytm, spread",
 		},
+		{
+			name: "atr_window must be >= 2",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"atr_window":    1,
+					"order_book_id": uuid.Must(uuid.NewV7()).String(),
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.atr_window must be at least 2",
+		},
+		{
+			name: "max_position_size out of bounds rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"max_position_size": 1.5,
+					"order_book_id":     uuid.Must(uuid.NewV7()).String(),
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.max_position_size must be in (0,1]",
+		},
+		{
+			name: "malformed order_book_id rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"order_book_id": "not-a-uuid",
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.order_book_id",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1919,6 +2022,66 @@ func TestHandlerMomentumExplicitZeroRoundTrip(t *testing.T) {
 	assert.Zero(t, detail.Config.TakeProfitATR, "explicit take_profit_atr 0 must persist as 0 (0 disables)")
 	assert.Zero(t, detail.Config.InitialBalance,
 		"explicit initial_balance 0 for a run must persist as 0 (0 = fetch my USD balance), not the default 1")
+}
+
+// TestHandlerBreakoutExplicitZeroATR pins breakout's "0 disables" contract:
+// explicit stop_loss_atr/take_profit_atr of 0 must round-trip as 0 in the
+// normalized config, not be silently rewritten to the defaults. The decoder
+// previously treated 0 as omitted (non-pointer payload field).
+func TestHandlerBreakoutExplicitZeroATR(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	t.Run("explicit 0 persists as 0", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+			"strategy_type": "breakout",
+			"config": map[string]any{
+				"short_vol_window": 10,
+				"long_vol_window":  30,
+				"stop_loss_atr":    0,
+				"take_profit_atr":  0,
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code)
+
+		var detail struct {
+			Config struct {
+				StopLossATR   float64 `json:"stop_loss_atr"`
+				TakeProfitATR float64 `json:"take_profit_atr"`
+			} `json:"config"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+		assert.Zero(t, detail.Config.StopLossATR, "explicit stop_loss_atr 0 must persist as 0 (0 disables)")
+		assert.Zero(t, detail.Config.TakeProfitATR, "explicit take_profit_atr 0 must persist as 0 (0 disables)")
+	})
+
+	t.Run("omitted falls back to defaults", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+			"strategy_type": "breakout",
+			"config": map[string]any{
+				"short_vol_window": 10,
+				"long_vol_window":  30,
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code)
+
+		var detail struct {
+			Config struct {
+				StopLossATR   float64 `json:"stop_loss_atr"`
+				TakeProfitATR float64 `json:"take_profit_atr"`
+			} `json:"config"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+		assert.Equal(t, 20.0, detail.Config.StopLossATR, "omitted stop_loss_atr must get the default 20")
+		assert.Zero(t, detail.Config.TakeProfitATR, "omitted take_profit_atr must get the default 0")
+	})
 }
 
 func performJSONRequest(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {

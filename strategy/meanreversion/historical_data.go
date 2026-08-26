@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/fred"
@@ -16,6 +17,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// historicalPriceStore reads price history for backtests and live-window
+// prefill. Contract: LoadLastPrices must return rows oldest-first —
+// prefillWindow feeds them into the rolling window in slice order, so
+// newest-first data would fill the window backwards.
+//
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
 //counterfeiter:generate . historicalPriceStore
 type historicalPriceStore interface {
@@ -35,7 +41,7 @@ func (s *Strategy) getObservations(ctx context.Context, start, end time.Time) ([
 		return nil, err
 	}
 
-	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
 	if err != nil {
 		return nil, fmt.Errorf("lookup asset ID: %w", err)
 	}
@@ -88,13 +94,14 @@ func (s *Strategy) getHistoricalPriceStore(ctx context.Context) (historicalPrice
 		return store, nil
 	}
 
-	dbURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
-	if dbURL == "" {
-		return nil, errors.New("historical price store is not configured")
-	}
-	pool, err := pgxpool.New(ctx, dbURL)
+	// The self-wired store uses a process-lifetime shared pool: one
+	// pgxpool for every meanreversion strategy instance, not one per
+	// instance (each backtest/run would otherwise leak a pool —
+	// nothing in the strategy lifecycle closes it). Injected stores
+	// (SetHistoricalPriceStore) bypass this entirely.
+	pool, err := sharedPriceHistoryPool(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("create price history pool: %w", err)
+		return nil, err
 	}
 
 	store = prices.NewPGStore(pool)
@@ -105,6 +112,37 @@ func (s *Strategy) getHistoricalPriceStore(ctx context.Context) (historicalPrice
 	store = s.historyStore
 	s.mu.Unlock()
 	return store, nil
+}
+
+var (
+	//nolint:gochecknoglobals // Process-lifetime shared pool; see getHistoricalPriceStore.
+	sharedPoolOnce sync.Once
+	//nolint:gochecknoglobals // Process-lifetime shared pool; see getHistoricalPriceStore.
+	sharedPool *pgxpool.Pool
+	//nolint:gochecknoglobals // Process-lifetime shared pool; see getHistoricalPriceStore.
+	sharedPoolErr error
+)
+
+// sharedPriceHistoryPool lazily creates the single DATABASE_URL-backed
+// pool shared by all self-wired meanreversion strategy instances. The pool
+// lives for the process lifetime (the strategy lifecycle has no Close
+// hook), so sharing it is what keeps connection count bounded across
+// backtests and runs.
+func sharedPriceHistoryPool(ctx context.Context) (*pgxpool.Pool, error) {
+	sharedPoolOnce.Do(func() {
+		dbURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+		if dbURL == "" {
+			sharedPoolErr = errors.New("historical price store is not configured")
+			return
+		}
+		pool, err := pgxpool.New(ctx, dbURL)
+		if err != nil {
+			sharedPoolErr = fmt.Errorf("create price history pool: %w", err)
+			return
+		}
+		sharedPool = pool
+	})
+	return sharedPool, sharedPoolErr
 }
 
 func (s *Strategy) getBenchmarkYieldClient() (benchmarkYieldClient, error) {
@@ -133,10 +171,14 @@ func (s *Strategy) getBenchmarkYieldClient() (benchmarkYieldClient, error) {
 func (s *Strategy) setBenchmarkObservations(obs []fred.Observation) {
 	normalised := make([]fred.Observation, 0, len(obs))
 	for _, observation := range obs {
-		yieldPct, _ := observation.Yield.Mul(decimal.MustNew(100, 0)) //nolint:mnd
+		// fred.Observation.Yield is a decimal fraction (0.0425), the
+		// same unit as YieldObservation.YTM — stored unchanged so
+		// Spread() = YTM − benchmark stays unit-coherent. (An earlier
+		// version scaled by 100 here, making the benchmark dominate the
+		// spread by two orders of magnitude.)
 		normalised = append(normalised, fred.Observation{
 			Date:  fred.NormalizeDate(observation.Date),
-			Yield: yieldPct,
+			Yield: observation.Yield,
 		})
 	}
 
@@ -172,10 +214,11 @@ func (s *Strategy) cachedBenchmarkYield(ts time.Time) (value decimal.Decimal, da
 func (s *Strategy) mergeBenchmarkObservations(obs []fred.Observation) {
 	normalised := make([]fred.Observation, 0, len(obs))
 	for _, observation := range obs {
-		yieldPct, _ := observation.Yield.Mul(decimal.MustNew(100, 0)) //nolint:mnd
+		// Same unit contract as setBenchmarkObservations: store the
+		// fraction unchanged (see the comment there).
 		normalised = append(normalised, fred.Observation{
 			Date:  fred.NormalizeDate(observation.Date),
-			Yield: yieldPct,
+			Yield: observation.Yield,
 		})
 	}
 

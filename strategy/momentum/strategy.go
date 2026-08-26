@@ -147,6 +147,16 @@ func (s *Strategy) SetDecisionSeq(seq int64) {
 	s.mu.Unlock()
 }
 
+// DecisionSeqForTest returns the in-memory decision sequence counter.
+// resumePersistedRun's SetDecisionSeq switch must seed this from
+// MaxSeq so the first post-restart decision doesn't collide on
+// strategy_decisions.
+func (s *Strategy) DecisionSeqForTest() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.decisionSeq
+}
+
 // logger returns a non-nil logger.
 func (s *Strategy) logger() *slog.Logger {
 	if s.log != nil {
@@ -219,8 +229,8 @@ func (s *Strategy) cappedOrderQuantity(positionSize, currentPosition, price deci
 }
 
 // lookupAssetID resolves an order-book UUID to its underlying asset ID.
-func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
-	return strategy.LookupAssetID(context.Background(), s.marketAPIClient, orderBookID)
+func (s *Strategy) lookupAssetID(ctx context.Context, orderBookID uuid.UUID) (string, error) {
+	return strategy.LookupAssetID(ctx, s.marketAPIClient, orderBookID)
 }
 
 // Backtest is the strategy.Strategy entry point for a backtest run.
@@ -761,7 +771,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 	}()
 	defer s.unsubscribePrices()
 
-	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
 	if err != nil {
 		return fmt.Errorf("error looking up asset ID: %w", err)
 	}

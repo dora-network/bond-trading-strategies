@@ -307,7 +307,8 @@
                       "items": {
                         "anyOf": [
                           { "$ref": "#/components/schemas/TradeRecord" },
-                          { "$ref": "#/components/schemas/MomentumTradeRecord" }
+                          { "$ref": "#/components/schemas/MomentumTradeRecord" },
+                          { "$ref": "#/components/schemas/BreakoutTradeRecord" }
                         ]
                       }
                     }
@@ -343,7 +344,8 @@
                       "items": {
                         "anyOf": [
                           { "$ref": "#/components/schemas/ClosedTrade" },
-                          { "$ref": "#/components/schemas/MomentumClosedTrade" }
+                          { "$ref": "#/components/schemas/MomentumClosedTrade" },
+                          { "$ref": "#/components/schemas/BreakoutClosedTrade" }
                         ]
                       }
                     }
@@ -1232,6 +1234,41 @@
           "position_size": { "type": "string" },
           "pnl": { "type": "string", "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction." },
           "exit_reason": { "type": "string", "description": "One of stop_loss, take_profit, reversal, strategy_exit." }
+        },
+        "required": ["bond_id", "open_time", "close_time", "signal", "pnl"]
+      },
+      "BreakoutTradeRecord": {
+        "type": "object",
+        "description": "Breakout trade row emitted by GET /v1/backtests/{id}/trades for breakout backtests.",
+        "properties": {
+          "time": { "type": "string", "format": "date-time" },
+          "bond_id": { "type": "string" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "compression_ratio": { "type": "string", "description": "Short-window / long-window volatility ratio at the tick that armed the breakout (armed ratio on entry rows)." },
+          "entry_atr": { "type": "string", "description": "ATR captured on the opening row; mirrored onto the matching exit row." }
+        },
+        "required": ["time", "bond_id", "signal", "price"]
+      },
+      "BreakoutClosedTrade": {
+        "type": "object",
+        "description": "Breakout closed-trade row emitted by GET /v1/backtests/{id}/closed-trades for breakout backtests.",
+        "properties": {
+          "bond_id": { "type": "string" },
+          "open_time": { "type": "string", "format": "date-time" },
+          "close_time": { "type": "string", "format": "date-time" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "exit_signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "entry_price": { "type": "string" },
+          "exit_price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "pnl": { "type": "string", "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction." },
+          "exit_reason": { "type": "string", "description": "One of stop_loss, take_profit, reversal, strategy_exit." },
+          "entry_compression_ratio": { "type": "string", "description": "Compression ratio at the entry tick (short/long window volatility)." },
+          "exit_compression_ratio": { "type": "string", "description": "Compression ratio at the exit tick." }
         },
         "required": ["bond_id", "open_time", "close_time", "signal", "pnl"]
       },

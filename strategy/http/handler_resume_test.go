@@ -13,6 +13,7 @@ import (
 	"time"
 
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/twap"
 	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
@@ -243,6 +244,77 @@ func TestResumePersistedRun_WiresAllThreeFindings(t *testing.T) {
 				"%s: ChunksProcessed must be loaded from persisted state, not zero", strategyType)
 		})
 	}
+}
+
+// TestResumePersistedRun_MomentumWiresAPIKeyAndDecisionSeq pins the
+// the per-user market client (momentum.New always wires a server
+// DORA_API_KEY client, so a missing arm silently authenticates as
+// the wrong user on the resumed run rather than nil-panicking)
+// momentum arms of resumePersistedRun: applyUserAPIKey must wire the
+// per-user market client (momentum's construction closure wires none,
+// so a missing arm leaves a nil client that panics on the first
+// asset lookup) and the SetDecisionSeq switch must seed the counter
+// from MaxSeq so post-restart decisions don't collide on
+// strategy_decisions. Momentum has no StateStore arm by design
+// (no checkpointed execution state).
+func TestResumePersistedRun_MomentumWiresAPIKeyAndDecisionSeq(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.New()
+	const maxSeq int64 = 17
+	var captured strategycore.Strategy
+	cfg, err := json.Marshal(map[string]any{
+		"signal_source": momentum.SignalSourcePrice,
+		"order_book_id": uuid.MustParse("11111111-1111-1111-1111-111111111111").String(),
+	})
+	require.NoError(t, err)
+
+	encKey := make([]byte, 32)
+	_, err = rand.Read(encKey)
+	require.NoError(t, err)
+
+	svc := &strategyfakes.FakeService{}
+	svc.BaseContextReturns(context.Background())
+	svc.RunStrategyCalls(func(_ context.Context, s strategycore.Strategy) (uuid.UUID, error) {
+		captured = s
+		return runID, nil
+	})
+	svc.IsRunActiveCalls(func(_ uuid.UUID) bool { return true })
+
+	h := &Handler{
+		service:               svc,
+		encryptionKey:         encKey,
+		decisionStore:         &memDecisionStore{maxSeq: maxSeq},
+		now:                   time.Now,
+		runs:                  make(map[uuid.UUID]*RunDetail),
+		runningStrategies:     make(map[uuid.UUID]strategycore.Strategy),
+		stopLossObservers:     make(map[uuid.UUID]context.CancelFunc),
+		runCompletionWatchers: make(map[uuid.UUID]context.CancelFunc),
+		strategies:            defaultStrategies(nil, nil, nil, nil, nil, silentLogger()),
+		log:                   silentLogger(),
+	}
+
+	detail := &RunDetail{
+		RunSummary: RunSummary{
+			ID:           runID,
+			DORAUserID:   "user-1",
+			StrategyType: momentum.StrategyType,
+			Status:       "running",
+		},
+		Config:          cfg,
+		EncryptedAPIKey: encryptForTest(t, encKey, []byte("test-api-key")),
+	}
+
+	require.NoError(t, h.resumePersistedRun(context.Background(), detail))
+	require.NotNil(t, captured, "strategy must have been captured from RunStrategyCalls")
+
+	s, ok := captured.(*momentum.Strategy)
+	require.True(t, ok, "unexpected resumed strategy type %T", captured)
+	// The applyUserAPIKey arm cannot be observed from here: momentum.New
+	// defaults marketAPIClient to the server DORA_API_KEY client, so a
+	// non-nil check is vacuous. The seq seed is the observable arm.
+	require.Equal(t, maxSeq, s.DecisionSeqForTest(),
+		"decision seq must be seeded past MaxSeq by resumePersistedRun's SetDecisionSeq switch")
 }
 
 // TestAttachStateStore_WiresBothStrategies guards the resolution

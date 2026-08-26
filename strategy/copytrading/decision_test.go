@@ -118,7 +118,7 @@ func TestRecordDecision_LiveRunRecordsOnOrder(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+		_ = RunWithTrades(ctx, s, msgCh, tradeCh)
 	}()
 
 	// Fire two trades so we can also verify seq is monotonic.
@@ -186,7 +186,7 @@ func TestRecordDecision_FailedOrderNotRecorded(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+		_ = RunWithTrades(ctx, s, msgCh, tradeCh)
 	}()
 
 	tradeCh <- streams.TradeEvent{
@@ -278,7 +278,7 @@ func TestRecordDecision_CloseForcesLeverageOne(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+		_ = RunWithTrades(ctx, s, msgCh, tradeCh)
 	}()
 
 	tradeCh <- streams.TradeEvent{

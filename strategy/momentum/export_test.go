@@ -32,7 +32,7 @@ func SetBenchmarkYieldClient(s *Strategy, client benchmarkYieldClient) {
 	s.benchmarkClient = client
 }
 
-func GetObservations(s *Strategy, ctx context.Context, start, end time.Time) ([]types.YieldObservation, error) {
+func GetObservations(ctx context.Context, s *Strategy, start, end time.Time) ([]types.YieldObservation, error) {
 	return s.getObservations(ctx, start, end)
 }
 
@@ -54,7 +54,7 @@ func OpenSignal(s *Strategy) types.Signal {
 // channels. Used by tests that want to exercise the live tick path
 // without the pricesHandler dependency. Returns a teardown that stops
 // the goroutine.
-func RunLoop(s *Strategy, ctx context.Context, msgs <-chan strategyPkg.Message, pricesCh <-chan map[uuid.UUID]prices.AssetPrice) func() {
+func RunLoop(ctx context.Context, s *Strategy, msgs <-chan strategyPkg.Message, pricesCh <-chan map[uuid.UUID]prices.AssetPrice) func() {
 	if s.cancel == nil {
 		s.cancel = func() {}
 	}
@@ -76,8 +76,17 @@ func MergeBenchmarkObservations(s *Strategy, obs []fred.Observation) {
 	s.mergeBenchmarkObservations(obs)
 }
 
-func PrefillWindow(s *Strategy, ctx context.Context, assetID string) error {
+func PrefillWindow(ctx context.Context, s *Strategy, assetID string) error {
 	return s.prefillWindow(ctx, assetID)
+}
+
+// WindowsReady reports whether the fast, slow, and ATR rolling windows
+// are all populated — used by prefill tests to assert window population
+// (not just store call args).
+func WindowsReady(s *Strategy) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fastWin.Ready() && s.slowWin.Ready() && s.atrWin.Ready()
 }
 
 func LatestCachedBenchmarkDate(s *Strategy) (time.Time, bool) {

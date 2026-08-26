@@ -301,7 +301,7 @@ func TestRunLoop_PauseSuppressesTradeHandling(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+		_ = RunWithTrades(ctx, s, msgCh, tradeCh)
 	}()
 
 	trade := streams.TradeEvent{

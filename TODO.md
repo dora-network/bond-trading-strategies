@@ -2,8 +2,9 @@
 
 ## High Priority
 
-- **Notification websocket endpoint**
-  - The strategy service should expose a WebSocket endpoint that pushes real-time notifications to connected clients. Events include: backtest completed, comparison completed, order submission errors, stop-loss notifications, and run state changes.
+- ~~**Notification websocket endpoint**~~ ✅ (f451727, PR #3)
+  - Shipped. "Comparison completed" events remain moot until backtest
+    comparison (see Planned Features) lands.
 
 - ~~**Rate limiter**~~ ✅
   - Add rate limiting to the strategy server's REST API so it cannot be spammed. Should be configurable (e.g., per-IP, per-user, per-endpoint) and return `429 Too Many Requests` when exceeded.
@@ -181,14 +182,14 @@ Net: 5 commits, ~280 lines changed, 2 new test files
 assertion expansions in momentum and http test files.
 
 ## Momentum review follow-ups (deferred from 16-reviewer code review, 2026-08-25)
-
-**Status update (2026-08-26):** 11 of the 16 items below were resolved
-by commit `c5f267b` ("address 11 of 16 P3 follow-ups") and one more
-(backtest exit-reason pinning) by the round-4 fix session; each resolved
-item is marked inline. Still open: lookupAssetID ctx, MustParseUUID
-naming, closed-trades entry_atr column, plan-file trimming, OpenAPI
-per-strategy response schemas, double Info log, spread-refetch config
-option.
+**Status update (2026-08-26, reconciled post-#29 merge):** 11 of the
+16 items below were resolved by commit `c5f267b` ("address 11 of 16 P3
+follow-ups") and one more (backtest exit-reason pinning) by the round-4
+Still open: MustParseUUID naming, closed-trades entry_atr
+column, plan-file trimming, breakout OpenAPI trade-row schemas
+(momentum's own schemas landed in the docs pass).
+and spread-refetch items are also resolved (Info line omitted in
+portfolio.go; 5-min fetch throttle in c5f267b).
 
 The 16-reviewer code review of `tan/momentum-strategy` vs `development`
 flagged these as P3 nits. The P1 (1 item) and P2 (9 items) findings
@@ -202,13 +203,10 @@ should be picked up in a separate session.
   values (pure RLock + binary search over the same cache); the second
   call is redundant per-tick work. Refactor leftover from the
   7cd78c2 stale-cache fallback. Drop one of the two lookups.
-- **`lookupAssetID` ignores caller ctx** —
-  `strategy/momentum/strategy.go:221-223` calls
-  `strategy.LookupAssetID(context.Background(), ...)` while run()
-  has a live ctx at its only call site. If Dora hangs during startup
-  resolution, the run goroutine blocks indefinitely and Stop/ctx is
-  ignored. Matches meanreversion/breakout pattern (info only — fix
-  across all three).
+- [x] **`lookupAssetID` ignores caller ctx** — RESOLVED (2026-08-26
+      session): all three strategies (momentum, meanreversion, breakout)
+      now take ctx in lookupAssetID and pass the caller's run/backtest
+      ctx instead of context.Background().
 - **[RESOLVED — c5f267b, 5-min fetch throttle] `getBenchmarkYield` refetches per tick on intraday FRED outages** —
   `strategy/momentum/strategy.go:861-904`. Intraday FRED's same-day
   observation is often absent, so spread-mode live ticks can refetch
@@ -312,20 +310,17 @@ should be picked up in a separate session.
 
 ### Cross-cutting
 
-- **Shared `min/max_order_size` descriptions still say "copied order
-  size"** — see "Decoders / config" section.
-- **`InitialBalancesFromPortfolio` logs the same Info event twice on
-  success** — `strategy/portfolio.go:156-159` logs Info "initialised
-  balances from portfolio" and both adapters (`momentum/balances.go`,
-  `meanreversion/balances.go`) immediately log the same event with
-  runID. Delete the shared helper's Info line; keep the Warn lines.
+- **[RESOLVED — c5f267b] Shared `min/max_order_size` descriptions still
+  say "copied order size"** — see "Decoders / config" section.
+- **[RESOLVED — #29 merge, verified in portfolio.go] `InitialBalancesFromPortfolio`
+  double Info log** — the shared helper omits its Info line (Warn lines
+  kept; `strategy/portfolio.go` documents this); adapters log once with
+  runID.
 
-## Momentum round-4 review — P2s resolved in working tree (2026-08-26, pre-commit)
+## Momentum round-4 review — P2s resolved (merged via #29, 2026-08-26)
 
 Round-4 16-reviewer review confirmed the round-3 P2s and found two new
-P2s. All five gating items are fixed in this working tree (uncommitted;
-hashes to be added at commit time):
-
+P2s. All five gating items are fixed and merged via #29 (`6597e3c`):
 - **stop_loss_atr / take_profit_atr explicit-0 rewritten to defaults**
   (round-3 P2, unfixed by 0698791/c5f267b) — `momentumConfigPayload`
   fields are now `*float64` (nil→default, explicit 0→0), so the
@@ -379,18 +374,25 @@ Non-blocking items from the round-4 16-reviewer review, grouped by area:
   rule** — RESOLVED (docs pass 2026-08-26).
 
 ### Tests
-- **Momentum resume path untested** — resumePersistedRun's SetDecisionSeq
-  + applyUserAPIKey arms, awaitBacktestResult's momentum.BacktestResult
-  case, atr_window>=2, max_position_size bounds, order_book_id
-  parse-error rows.
-- **Take-profit exits never exercised through the Backtester** (unit
-  level only); spec §11 promises full priority coverage.
-- **run_loop_test DATABASE_URL flake vector** — strategy built without
-  SetHistoricalPriceStore falls through to env DATABASE_URL; inject
-  FakeHistoricalPriceStore like historical_data_test.go does.
-- **historical_data_test gaps** — spread-mode drop branch (price before
-  first benchmark observation), prefillWindow spread/nil-YTM paths,
-  TestPrefillWindow asserts call args only (not window population).
+- [x] **Momentum resume path untested** — RESOLVED (2026-08-26 session):
+      TestResumePersistedRun_MomentumWiresAPIKeyAndDecisionSeq (seq seed
+      via DecisionSeqForTest; applyUserAPIKey arm noted as unobservable —
+      momentum.New defaults a server-key client), plus
+      TestHandlerMomentumBacktestCompletes for awaitBacktestResult's
+      momentum case, and atr_window>=2 / max_position_size bounds /
+      order_book_id parse-error rows in TestHandlerMomentumValidationErrors.
+- [x] **Take-profit exits never exercised through the Backtester** —
+      RESOLVED (2026-08-26 session): TestBacktest_TakeProfitExits drives
+      a long entry into a spike and asserts ExitReasonTakeProfit + positive
+      PnL on the first close.
+- [x] **run_loop_test DATABASE_URL flake vector** — RESOLVED (2026-08-26
+      session): run_loop_test injects FakeHistoricalPriceStore; passes
+      with a bogus DATABASE_URL set.
+- [x] **historical_data_test gaps** — RESOLVED (2026-08-26 session):
+      pre-benchmark drop row pinned in the spread getObservations test;
+      TestPrefillWindow_SpreadMode_PopulatesWindowsAndFetchesBenchmarks
+      and TestPrefillWindow_NilYTM_ReturnsContractError added; window
+      population asserted via new WindowsReady export helper.
 - [x] **meanreversion `s.errs` write-only** — RESOLVED (code hygiene
   pass 2026-08-26): logger.Error added in initializeBalancesFromPortfolio.
 
@@ -402,9 +404,10 @@ Non-blocking items from the round-4 16-reviewer review, grouped by area:
   pass 2026-08-26): local BenchmarkTenor table, parser, normalizer and
   normalizeDate deleted; call sites (and the handler /tenors endpoint)
   now use the fred package directly.
-- **historical_data ordering contracts undocumented** — binary search
-  needs ascending observations; prefill needs oldest-first history.
-  One-line doc on each interface.
+- [x] **historical_data ordering contracts undocumented** — RESOLVED
+      (2026-08-26 session): both momentum and meanreversion
+      historicalPriceStore interfaces document the oldest-first
+      LoadLastPrices contract.
 - [x] **exitRecord copies EntryATR onto exit rows** — RESOLVED: comment
   corrected to document the deliberate mirroring (matches the OpenAPI
   MomentumTradeRecord description).
@@ -438,25 +441,23 @@ momentum packages or were only noted inside resolved items. The
 momentum-scoped test debt is tracked in the round-4 section above; these
 are the cross-cutting remainders:
 
-- **Breakout `stop_loss_atr` explicit-0 rewritten to default**
-  (`strategy/http/handler.go` breakout decoder, pre-existing on
-  development) — same quirk the momentum round-4 P2 fixed: non-pointer
-  payload field makes explicit 0 indistinguishable from omitted, so a
-  client sending 0 (per breakout's own "0 disables" docs, if any)
-  silently gets the default stop distance. Fix the same way
-  (`*float64` payload field) when breakout is next touched.
+- [x] **Breakout `stop_loss_atr` explicit-0 rewritten to default** —
+      RESOLVED (2026-08-26 session): breakoutConfigPayload ATR fields
+      are now `*float64`; explicit 0 round-trips as 0, omitted gets the
+      default (materialised into the normalized config before marshal).
+      Pinned by TestHandlerBreakoutExplicitZeroATR (explicit-0 and
+      omitted-default subtests).
 - **Exact-entry resume anchors via StateStore** — momentum's
   `seedResumeAnchor` re-derives entryPrice/entryATR from the startup
   price and current ATR window (approximate, documented). If exact
   entry prices ever matter for restart-time stop placement, persist the
   anchor via the per-run StateStore on open (twap/vwap pattern;
   `attachStateStore` currently wires only TWAP/VWAP).
-- **Breakout trade-row OpenAPI drift** — breakout's compression_ratio /
-  entry_atr fields are undocumented on the shared TradeRecord /
-  ClosedTrade schemas, the same drift momentum just fixed with
-  oneOf'd MomentumTradeRecord / MomentumClosedTrade. Add
-  BreakoutTradeRecord / BreakoutClosedTrade schemas + oneOf the same
-  way.
+- [x] **Breakout trade-row OpenAPI drift** — RESOLVED (2026-08-26
+      session): BreakoutTradeRecord / BreakoutClosedTrade schemas added
+      and joined to the /trades and /closed-trades anyOf lists
+      (compression_ratio, entry_atr, entry/exit_compression_ratio
+      documented).
 - **`notifications` WebSocket test flake (pre-existing on base)** —
   `TestHandler_AcceptsConfiguredOriginPattern` /
   `TestHandler_DeliversLiveEvents` intermittently fail with
@@ -477,14 +478,13 @@ max_position_size (explicit 0 rejected, not defaulted), trade-row
 oneOf→anyOf, fred SupportedBenchmarkTenors deep copy, strategies.md
 max_position_size row, shared process-lifetime price-history pool.
 
-Meanreversion twins of two findings (pre-existing on development, NOT
-fixed here):
-- **meanreversion ×100 benchmark scaling** —
-  strategy/meanreversion/historical_data.go:136,175 has the identical
-  percent-vs-fraction mismatch in its FRED merge. Fix the same way
-  (store observation.Yield unchanged) when meanreversion is next
-  touched; its spread/zscore fixtures pin the scaled values.
-- **meanreversion per-instance pgxpool leak** —
-  strategy/meanreversion/historical_data.go:95 creates a pool per
-  strategy instance, never closed. Momentum now uses a shared
-  process-lifetime pool; port the same pattern.
+Meanreversion twins of two findings (pre-existing on development, both
+resolved in the 2026-08-26 session):
+- [x] **meanreversion ×100 benchmark scaling** — RESOLVED (2026-08-26
+      session): setBenchmarkObservations / mergeBenchmarkObservations
+      store observation.Yield unchanged (fractions, unit-coherent with
+      DORA YTM); historical_data_test assertions updated to fractions
+      (mutation-checked: test fails against the ×100 code).
+- [x] **meanreversion per-instance pgxpool leak** — RESOLVED (2026-08-26
+      session): shared process-lifetime pool (sharedPriceHistoryPool,
+      sync.Once) ported from momentum.

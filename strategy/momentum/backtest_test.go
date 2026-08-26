@@ -138,6 +138,44 @@ func TestBacktest_StopLossExits(t *testing.T) {
 		"crash from 120 to 80 must fire the stop-loss exit")
 }
 
+func TestBacktest_TakeProfitExits(t *testing.T) {
+	cfg := testCfg(2, 3, decimal.Zero, decimal.MustNew(2, 0))
+	s := momentum.New(cfg, nil)
+	bt := momentum.NewBacktester(s, nil)
+	// Rising prices into a long entry (price 102 at tick 2 — fastMA
+	// 101.5 > slowMA 101), entryATR = mean of |diff| across the
+	// first three ticks (0, 1, 1) = 0.667. Take-profit threshold =
+	// 102 + 2×0.667 = 103.33, so the very next tick (price 104)
+	// fires take_profit — well before the 110 spike. StopLossATR=0
+	// disables the stop; the series never falls, so no reversal;
+	// only take_profit or strategy_exit can be the first close.
+	// A broken take-profit branch therefore surfaces as
+	// strategy_exit (force-close at end), not reversal — making
+	// the first-close reason assertion mutation-sensitive.
+	obs := make([]types.YieldObservation, 0, 7)
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 5 {
+		obs = append(obs, types.YieldObservation{
+			Time:   base.Add(time.Duration(i) * time.Minute),
+			BondID: "b", Price: decimal.MustNew(int64(100+i), 0),
+		})
+	}
+	obs = append(obs, types.YieldObservation{Time: base.Add(5 * time.Minute), BondID: "b", Price: decimal.MustNew(110, 0)})
+	obs = append(obs, types.YieldObservation{Time: base.Add(6 * time.Minute), BondID: "b", Price: decimal.MustNew(111, 0)})
+
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+	closedTradesAny := res.GetClosedTrades()
+	closedTrades, ok := closedTradesAny.([]momentum.ClosedTrade)
+	require.True(t, ok, "closedTrades type mismatch: %T", closedTradesAny)
+
+	require.NotEmpty(t, closedTrades)
+	require.Equal(t, momentum.ExitReasonTakeProfit, closedTrades[0].ExitReason,
+		"spike from ~102 to 110 must fire the take-profit exit (threshold ≈ 104)")
+	require.True(t, closedTrades[0].PnL.IsPos(),
+		"take-profit close at the spike price must be profitable for the long, got PnL %s", closedTrades[0].PnL)
+}
+
 // TestBacktest_ForceClosePersistsExitAndRecordsExitSignal exercises
 // appended only to closedTrades, leaving tradeRecords with a dangling
 // hits Buy on tick 3 and never reverses. No stop-loss / take-profit. End

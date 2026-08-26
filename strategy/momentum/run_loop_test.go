@@ -12,6 +12,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategypkg "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum/momentumfakes"
 	strategyfakes "github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 )
@@ -63,12 +64,17 @@ func TestRunLoop_ProcessesTicksWithoutDeadlock(t *testing.T) {
 	}
 
 	s := momentum.New(cfg, nil, momentum.WithMarketAPIClient(fake))
+	// Inject a fake historical store so prefillWindow never falls
+	// through to the env DATABASE_URL pool — without this the test
+	// silently depends on a live Postgres (or its connection latency)
+	// whenever DATABASE_URL is set on the host.
+	momentum.SetHistoricalPriceStore(s, &momentumfakes.FakeHistoricalPriceStore{})
 
 	pricesCh := make(chan map[uuid.UUID]prices.AssetPrice, 4)
 	msgs := make(chan strategypkg.Message, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	teardown := momentum.RunLoop(s, ctx, msgs, pricesCh)
+	teardown := momentum.RunLoop(ctx, s, msgs, pricesCh)
 	defer func() {
 		cancel()
 		teardown()

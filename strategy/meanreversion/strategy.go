@@ -285,8 +285,8 @@ func (s *Strategy) unsubscribePrices() {
 	}
 }
 
-func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
-	return strategy.LookupAssetID(context.Background(), s.marketAPIClient, orderBookID)
+func (s *Strategy) lookupAssetID(ctx context.Context, orderBookID uuid.UUID) (string, error) {
+	return strategy.LookupAssetID(ctx, s.marketAPIClient, orderBookID)
 }
 
 func (s *Strategy) currentPosition(ctx context.Context, assetID string) (decimal.Decimal, error) {
@@ -680,7 +680,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 	}()
 	defer s.unsubscribePrices()
 
-	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
 	if err != nil {
 		return fmt.Errorf("error looking up asset ID: %w", err)
 	}
@@ -900,8 +900,9 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 	// Merge new observations into the in-memory cache.
 	s.mergeBenchmarkObservations(obs)
 
-	// Return the yield from the in-memory cache (FRED yields are converted to
-	// percentage format during merge, consistent with DORA YTM).
+	// Return the yield from the in-memory cache. fred.Observation.Yield
+	// is a decimal fraction, the same unit as DORA YTM — stored
+	// unchanged (no ×100) so the spread stays unit-coherent.
 	yield, _, ok = s.cachedBenchmarkYield(ts)
 	if !ok {
 		return decimal.Zero

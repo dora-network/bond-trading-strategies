@@ -17,6 +17,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// historicalPriceStore reads price history for backtests and live-window
+// prefill. Contract: LoadLastPrices must return rows oldest-first —
+// prefillWindow feeds them into the rolling windows in slice order, so
+// newest-first data would fill the windows backwards.
+//
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
 //counterfeiter:generate . historicalPriceStore
 type historicalPriceStore interface {
@@ -39,7 +44,7 @@ func SupportedBenchmarkTenors() []fred.BenchmarkTenor {
 }
 
 func (s *Strategy) getObservations(ctx context.Context, start, end time.Time) ([]types.YieldObservation, error) {
-	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
 	if err != nil {
 		return nil, fmt.Errorf("lookup asset ID: %w", err)
 	}

@@ -497,7 +497,7 @@ func TestInitializeBalances_SetsOpenSignalFromDORAPosition(t *testing.T) {
 			}
 			meanreversion.SetLookupClient(s, client)
 
-			meanreversion.InitializeBalances(s, context.Background(), "bond-id")
+			meanreversion.InitializeBalances(context.Background(), s, "bond-id")
 
 			assert.Equal(t, tc.wantSignal, meanreversion.OpenSignal(s))
 		})
@@ -572,7 +572,7 @@ func TestRunLoop_NoNewEntryWhenPositionOpen(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
+		_ = meanreversion.RunWithPrices(ctx, s, msgCh, priceCh)
 	}()
 
 	// Give the run loop time to process all updates.
@@ -650,7 +650,7 @@ func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
+		_ = meanreversion.RunWithPrices(ctx, s, msgCh, priceCh)
 	}()
 
 	// Wait for the close order to be placed.
@@ -730,7 +730,7 @@ func TestRunLoop_NoNewEntryWhenQuantityZero(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
+		_ = meanreversion.RunWithPrices(ctx, s, msgCh, priceCh)
 	}()
 
 	// Give the run loop time to process updates.
@@ -819,7 +819,7 @@ func TestRunLoop_SelfHealsWhenPositionDoesNotExistOnExchange(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = meanreversion.RunWithPrices(s, ctx, msgCh, priceCh)
+		_ = meanreversion.RunWithPrices(ctx, s, msgCh, priceCh)
 	}()
 
 	// Give the run loop time to process the exit tick.

@@ -586,7 +586,7 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.Ba
 	if s.historicalStore == nil {
 		return BacktestResult{}, errors.New("breakout: historical price store is not configured")
 	}
-	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
 	if err != nil {
 		return BacktestResult{}, fmt.Errorf("lookup asset ID: %w", err)
 	}
@@ -644,7 +644,7 @@ func (s *Strategy) runLoop(
 	prices <-chan map[uuid.UUID]prices.AssetPrice,
 	trades <-chan streams.TradeEvent,
 ) error {
-	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
 	if err != nil {
 		return fmt.Errorf("lookup asset ID: %w", err)
 	}
@@ -816,8 +816,8 @@ func (s *Strategy) unsubscribeTrades() {
 
 // lookupAssetID resolves the configured order-book ID to a DORA asset ID
 // via the shared strategy.LookupAssetID helper.
-func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
-	return strategy.LookupAssetID(context.Background(), s.marketAPIClient, orderBookID)
+func (s *Strategy) lookupAssetID(ctx context.Context, orderBookID uuid.UUID) (string, error) {
+	return strategy.LookupAssetID(ctx, s.marketAPIClient, orderBookID)
 }
 
 // executeDecision places a market order in the decision's signal direction.

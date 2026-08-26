@@ -2830,15 +2830,15 @@ type meanReversionConfigPayload struct {
 }
 
 type breakoutConfigPayload struct {
-	ShortVolWindow       int     `json:"short_vol_window"`
-	LongVolWindow        int     `json:"long_vol_window"`
-	CompressionThreshold float64 `json:"compression_threshold"`
-	ATRWindow            int     `json:"atr_window"`
-	BreakoutATRMultiple  float64 `json:"breakout_atr_multiple"`
-	ConfirmationBars     int     `json:"confirmation_bars"`
-	StopLossATR          float64 `json:"stop_loss_atr"`
-	TakeProfitATR        float64 `json:"take_profit_atr"`
-	MinLongVolFloor      float64 `json:"min_long_vol_floor"`
+	ShortVolWindow       int      `json:"short_vol_window"`
+	LongVolWindow        int      `json:"long_vol_window"`
+	CompressionThreshold float64  `json:"compression_threshold"`
+	ATRWindow            int      `json:"atr_window"`
+	BreakoutATRMultiple  float64  `json:"breakout_atr_multiple"`
+	ConfirmationBars     int      `json:"confirmation_bars"`
+	StopLossATR          *float64 `json:"stop_loss_atr,omitempty"`
+	TakeProfitATR        *float64 `json:"take_profit_atr,omitempty"`
+	MinLongVolFloor      float64  `json:"min_long_vol_floor"`
 
 	OBVTrendThreshold float64 `json:"obv_trend_threshold"`
 	OBVWindow         int     `json:"obv_window"`
@@ -3062,11 +3062,15 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	if payload.BreakoutATRMultiple == 0 {
 		payload.BreakoutATRMultiple = mustFloat64(defaults.BreakoutATRMultiple)
 	}
-	if payload.StopLossATR == 0 {
-		payload.StopLossATR = mustFloat64(defaults.StopLossATR)
+	// Explicit 0 must survive decoding ("0 disables"); only omitted
+	// fields get defaults. Pointer payload fields distinguish the two.
+	stopLossATR := mustFloat64(defaults.StopLossATR)
+	if payload.StopLossATR != nil {
+		stopLossATR = *payload.StopLossATR
 	}
-	if payload.TakeProfitATR == 0 {
-		payload.TakeProfitATR = mustFloat64(defaults.TakeProfitATR)
+	takeProfitATR := mustFloat64(defaults.TakeProfitATR)
+	if payload.TakeProfitATR != nil {
+		takeProfitATR = *payload.TakeProfitATR
 	}
 	if payload.MinLongVolFloor == 0 {
 		payload.MinLongVolFloor = mustFloat64(defaults.MinLongVolFloor)
@@ -3086,10 +3090,10 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	if payload.BreakoutATRMultiple < 0 {
 		return breakout.Config{}, nil, fmt.Errorf("config.breakout_atr_multiple must be non-negative")
 	}
-	if payload.StopLossATR < 0 {
+	if stopLossATR < 0 {
 		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr must be non-negative")
 	}
-	if payload.TakeProfitATR < 0 {
+	if takeProfitATR < 0 {
 		return breakout.Config{}, nil, fmt.Errorf("config.take_profit_atr must be non-negative")
 	}
 	if payload.MinLongVolFloor < 0 {
@@ -3104,11 +3108,11 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	if err != nil {
 		return breakout.Config{}, nil, fmt.Errorf("config.breakout_atr_multiple: %w", err)
 	}
-	stopLoss, err := decimal.NewFromFloat64(payload.StopLossATR)
+	stopLoss, err := decimal.NewFromFloat64(stopLossATR)
 	if err != nil {
 		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr: %w", err)
 	}
-	takeProfit, err := decimal.NewFromFloat64(payload.TakeProfitATR)
+	takeProfit, err := decimal.NewFromFloat64(takeProfitATR)
 	if err != nil {
 		return breakout.Config{}, nil, fmt.Errorf("config.take_profit_atr: %w", err)
 	}
@@ -3157,6 +3161,10 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 		}
 	}
 
+	// Materialise the resolved ATR values so the normalized config always
+	// carries them (nil pointers would be dropped by omitempty).
+	payload.StopLossATR = &stopLossATR
+	payload.TakeProfitATR = &takeProfitATR
 	normalised, err := json.Marshal(payload)
 	if err != nil {
 		return breakout.Config{}, nil, fmt.Errorf("marshal normalised config: %w", err)

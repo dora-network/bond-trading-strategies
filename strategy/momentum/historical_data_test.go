@@ -46,6 +46,10 @@ func TestGetObservations_SpreadMode_AttachesBenchmarkYield(t *testing.T) {
 	ytmB := decimal.MustNew(54, 3)   // 0.054
 	history := &momentumfakes.FakeHistoricalPriceStore{}
 	history.LoadHistoricalPricesReturns([]prices.AssetPrice{
+		// Jan 1 precedes the first benchmark observation (Jan 2), so
+		// this row must be DROPPED — cachedBenchmarkYield returns
+		// ok=false for any ts before the cache's earliest date.
+		{AssetID: "asset-123", YTM: &ytmA, Time: time.Date(2024, 1, 1, 15, 0, 0, 0, time.UTC)},
 		{AssetID: "asset-123", YTM: &ytmA, Time: time.Date(2024, 1, 2, 15, 0, 0, 0, time.UTC)},
 		{AssetID: "asset-123", YTM: &ytmMid, Time: time.Date(2024, 1, 3, 15, 0, 0, 0, time.UTC)},
 		{AssetID: "asset-123", YTM: &ytmB, Time: time.Date(2024, 1, 4, 15, 0, 0, 0, time.UTC)},
@@ -58,16 +62,16 @@ func TestGetObservations_SpreadMode_AttachesBenchmarkYield(t *testing.T) {
 	}, nil)
 
 	s := newSpreadStrategy(t, lookup, history, benchmark)
-	obs, err := momentum.GetObservations(s, context.Background(),
+	obs, err := momentum.GetObservations(context.Background(), s,
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
 
 	require.NoError(t, err)
-	// All three rows have non-nil YTM (the store contract) and get
-	// the LATEST cached benchmark yield <= their timestamp. Jan 2
-	// gets 0.045 (its own date), Jan 3 gets 0.045 (LATEST <= 3 is
-	// Jan 2), Jan 4 gets 0.047 (its own date).
-	require.Len(t, obs, 3)
+	// The Jan 1 row (pre-benchmark) is dropped; Jan 2-4 survive with
+	// non-nil YTM and the LATEST cached benchmark yield <= their
+	// timestamp. Jan 2 gets 0.045 (its own date), Jan 3 gets 0.045
+	// (LATEST <= 3 is Jan 2), Jan 4 gets 0.047 (its own date).
+	require.Len(t, obs, 3, "the pre-benchmark Jan 1 row must be dropped")
 	assert.True(t, obs[0].BenchmarkYield.Equal(decimal.MustNew(45, 3)),
 		"obs[0].BenchmarkYield = %s, want 0.045", obs[0].BenchmarkYield.String())
 	assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(45, 3)),
@@ -99,7 +103,7 @@ func TestGetObservations_NilYTM_ReturnsContractError(t *testing.T) {
 	}, nil)
 	momentum.SetHistoricalPriceStore(s, history)
 
-	_, err := momentum.GetObservations(s, context.Background(),
+	_, err := momentum.GetObservations(context.Background(), s,
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
 
@@ -118,7 +122,7 @@ func TestGetObservations_SpreadMode_PropagatesErrors(t *testing.T) {
 		benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
 		s := newSpreadStrategy(t, lookup, history, benchmark)
 
-		_, err := momentum.GetObservations(s, context.Background(),
+		_, err := momentum.GetObservations(context.Background(), s,
 			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
 		require.ErrorContains(t, err, "history failed")
@@ -136,7 +140,7 @@ func TestGetObservations_SpreadMode_PropagatesErrors(t *testing.T) {
 		benchmark.FetchHistoricalYieldsReturns(nil, errors.New("fred failed"))
 		s := newSpreadStrategy(t, lookup, history, benchmark)
 
-		_, err := momentum.GetObservations(s, context.Background(),
+		_, err := momentum.GetObservations(context.Background(), s,
 			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
 		require.ErrorContains(t, err, "fred failed")
@@ -149,7 +153,7 @@ func TestGetObservations_SpreadMode_PropagatesErrors(t *testing.T) {
 		benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
 		s := newSpreadStrategy(t, lookup, history, benchmark)
 
-		_, err := momentum.GetObservations(s, context.Background(),
+		_, err := momentum.GetObservations(context.Background(), s,
 			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
 		require.ErrorContains(t, err, "asset lookup failed")
@@ -256,11 +260,96 @@ func TestPrefillWindow_FillsWindowsFromHistory(t *testing.T) {
 	history.LoadLastPricesReturns(obsPrices, nil)
 	momentum.SetHistoricalPriceStore(s, history)
 
-	err := momentum.PrefillWindow(s, context.Background(), "asset-123")
+	err := momentum.PrefillWindow(context.Background(), s, "asset-123")
 	require.NoError(t, err)
 	assert.Equal(t, 1, history.LoadLastPricesCallCount())
 	_, _, limit := history.LoadLastPricesArgsForCall(0)
 	assert.Equal(t, 10, limit, "prefillWindow must request SlowWindow*2 prices")
+	// Population assertion (round-4 gap): the 10 prices must have
+	// flowed through Update — all three windows ready. Empty or
+	// short-fed windows would read not-ready.
+	assert.True(t, momentum.WindowsReady(s),
+		"prefilled prices must populate the fast/slow/ATR windows")
+}
+
+// TestPrefillWindow_SpreadMode_PopulatesWindowsAndFetchesBenchmarks
+// covers the spread-mode prefill path: benchmark yields are fetched for
+// the history window, rows before the first benchmark observation are
+// skipped (not fed into Update), and the surviving rows populate the
+// windows.
+func TestPrefillWindow_SpreadMode_PopulatesWindowsAndFetchesBenchmarks(t *testing.T) {
+	cfg := momentum.DefaultConfig()
+	cfg.SignalSource = momentum.SignalSourceSpread
+	cfg.Tenor = "10Y"
+	cfg.FastWindow = 3
+	cfg.SlowWindow = 5
+	cfg.ATRWindow = 3
+	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	s := momentum.New(cfg, nil)
+
+	lookup := &strategyfakes.FakeMarketAPIClient{}
+	lookup.BaseAssetIDReturns("asset-123", nil)
+	momentum.SetLookupClient(s, lookup)
+
+	// Jan 1-2 precede the first benchmark observation (Jan 3) and
+	// must be skipped; Jan 3-10 (8 rows ≥ SlowWindow) populate the
+	// windows.
+	pricesRows := make([]prices.AssetPrice, 0, 10)
+	for i := range 10 {
+		ytm := decimal.MustNew(int64(50+i), 3) // rising spread vs flat benchmark
+		pricesRows = append(pricesRows, prices.AssetPrice{
+			AssetID: "asset-123",
+			YTM:     &ytm,
+			Time:    time.Date(2024, 1, i+1, 0, 0, 0, 0, time.UTC),
+			Price:   decimal.MustNew(int64(100+i), 0),
+		})
+	}
+	history := &momentumfakes.FakeHistoricalPriceStore{}
+	history.LoadLastPricesReturns(pricesRows, nil)
+	momentum.SetHistoricalPriceStore(s, history)
+
+	benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
+	benchmark.FetchHistoricalYieldsReturns([]fred.Observation{
+		{Date: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(45, 3)},
+	}, nil)
+	momentum.SetBenchmarkYieldClient(s, benchmark)
+
+	require.NoError(t, momentum.PrefillWindow(context.Background(), s, "asset-123"))
+
+	// Benchmark fetch spans the full history window, first-to-last.
+	require.Equal(t, 1, benchmark.FetchHistoricalYieldsCallCount())
+	_, tenor, start, end := benchmark.FetchHistoricalYieldsArgsForCall(0)
+	assert.Equal(t, fred.Tenor10Year, tenor)
+	assert.True(t, start.Equal(pricesRows[0].Time), "fetch start must be history[0].Time")
+	assert.True(t, end.Equal(pricesRows[9].Time), "fetch end must be history[last].Time")
+	// The 8 post-benchmark rows (Jan 3-10) still fill all windows.
+	assert.True(t, momentum.WindowsReady(s),
+		"spread-mode prefill must populate windows from post-benchmark rows only")
+}
+
+// TestPrefillWindow_NilYTM_ReturnsContractError pins the prefill-side
+// nil-YTM contract: a store row without YTM aborts the prefill with the
+// store-contract error instead of silently poisoning the windows.
+func TestPrefillWindow_NilYTM_ReturnsContractError(t *testing.T) {
+	cfg := momentum.DefaultConfig()
+	cfg.SignalSource = momentum.SignalSourcePrice
+	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	s := momentum.New(cfg, nil)
+
+	lookup := &strategyfakes.FakeMarketAPIClient{}
+	lookup.BaseAssetIDReturns("asset-123", nil)
+	momentum.SetLookupClient(s, lookup)
+
+	history := &momentumfakes.FakeHistoricalPriceStore{}
+	history.LoadLastPricesReturns([]prices.AssetPrice{
+		{AssetID: "asset-123", YTM: nil, Time: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Price: decimal.MustNew(101, 0)},
+	}, nil)
+	momentum.SetHistoricalPriceStore(s, history)
+
+	err := momentum.PrefillWindow(context.Background(), s, "asset-123")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "store contract violation")
+	assert.False(t, momentum.WindowsReady(s), "failed prefill must leave windows unpopulated")
 }
 
 // TestLatestCachedBenchmarkDate_TracksMostRecent verifies that
