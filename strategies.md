@@ -167,9 +167,10 @@ crossover flipped against the open position). ATR is the same mean-absolute
 price-diff measure that breakout uses; it's anchored at entry so the
 thresholds don't drift as volatility changes.
 
-In `price` mode the strategy ticks on every price update. In `ytm`/`spread`
-modes, ticks with no YTM are dropped entirely (no window update, no
-signal), mirroring mean-reversion's behaviour.
+Every tick carries a YTM (the price pipeline guarantees it). A tick with a
+missing YTM is treated as a data-contract violation in all modes: the run
+records the violation and drops the tick, and historical loading fails loudly
+rather than backfilling from a corrupt row.
 
 ### Fields
 
@@ -183,8 +184,7 @@ signal), mirroring mean-reversion's behaviour.
 | `take_profit_atr` | float | 0 | Take-profit distance in ATR units from entry. 0 disables. |
 | `min_order_size` | float | 0 | Skip opening when the computed quantity is below this. 0 disables. Decimal because Dora is a fractionalized market. |
 | `max_order_size` | float | 0 | Clamp the order quantity down to this. 0 disables. |
-| `max_position_size` | float | 1 | Capital fraction cap per trade. Must be in (0, 1]. |
-| `order_book_id` | uuid | – | DORA order book UUID used to locate the traded asset. |
+| `order_book_id` | uuid | – | **Required.** DORA order book UUID used to locate the traded asset. |
 | `tenor` | string | – | Benchmark Treasury tenor (e.g. `2Y`, `5Y`, `10Y`). Required when `signal_source` is `spread`. |
 | `initial_balance` | float | 1 | Starting capital for backtests. Backtests require > 0; live runs may pass 0 and the strategy uses the user's USD balance from DORA. |
 | `leverage` | float | 1 | Leverage multiplier for live orders. Must be greater than 0. |
@@ -205,13 +205,18 @@ signal), mirroring mean-reversion's behaviour.
 - **`take_profit_atr = 0`** disables take-profit and lets the position run
   until the MA crossover reverses. Set >0 to lock in gains on fast trends.
 - **`spread` mode** makes a daily FRED API call per missing benchmark date.
-  The result is cached in-memory for the lifetime of the run.
+  The result is cached in-memory for the lifetime of the run; on a FRED
+  outage the last cached yield is used (fetches throttled to one attempt
+  per 5 minutes).
 
 ### Known v1 limitations
 
 - Flat position sizing — every entry uses `max_position_size` of effective
   capital. No scaling by MA separation or trend strength.
 - Bar/candle resampling is not supported. The strategy runs on raw ticks.
+- A position that exists when the run starts (server restart, or an inherited
+  exchange position) gets its stop/take-profit anchor from the startup price
+  and current ATR, not the true entry price.
 - No whipsaw neutral-band filter; tight MA pairs generate more false
   crossovers.
 - Shared `signal_source` decision is per-run; switching requires a new

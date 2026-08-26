@@ -65,7 +65,9 @@ strategy/momentum/
                      //   observation loading, prefill
   backtest.go        // Backtester
   export_test.go     // white-box helpers
-  *_test.go          // strategy / decision / backtest / historical_data / market_api
+  *_test.go          // strategy_test (Update/ShouldExit), run_loop_test,
+                     //   backtest_test, historical_data_test,
+                     //   benchmark_fallback_test, resume_anchor_test
   momentumfakes/     // counterfeiter-generated fakes
 ```
 
@@ -116,9 +118,12 @@ Per tick:
    | `spread`| `o.YTM − benchmark(tenor)`     | yes (cached)| yes        |
 
    `spread` mode resolves the benchmark via the cached/daily FRED yield, exactly as
-   `mean_reversion` does. In `ytm`/`spread` modes a tick with a nil YTM is dropped
-   entirely (no window updates, no signal), matching `mean_reversion`; `price` mode
-   never requires YTM and processes every tick.
+   `mean_reversion` does. A tick with a nil YTM is a store-contract violation
+   (the price pipeline guarantees non-null YTM) and is surfaced as such in every
+   mode: the live loop records the violation and drops the tick; the historical
+   loader/prefill returns a hard error rather than backfilling from a corrupt row.
+   (Changed from the original "drop silently in ytm/spread only" design by review
+   commit 218e905.)
 
 2. `fastWin.Add(v)`; `slowWin.Add(v)`; `atrWin.Add(|price − prevPrice|)` (same ATR
    definition breakout uses — mean absolute price diff).
@@ -174,14 +179,19 @@ loop and the backtester. Inputs: `openSignal`, current `Decision` (`Price`, `ATR
 
 ### 9.1 Live run loop (mirrors `mean_reversion.run` / `breakout.run`)
 `Run(ctx, msgCh, runID)`:
-- `LookupAssetID(OrderBookID)` → `initializeBalances` (fetch bond position + USD;
-  track `bondQty`, `usdBal`, `openSignal`).
-- `prefillWindow` from `price_history` (best-effort, non-fatal).
+- `LookupAssetID(OrderBookID)` → `prefillWindow` from `price_history`
+  (best-effort, non-fatal) → `initializeBalances` (fetch bond position + USD;
+  track `bondQty`, `usdBal`, `openSignal`) → `seedResumeAnchor` (if a position
+  already exists — restart or inherited — anchor `entryPrice`/`entryATR` from
+  the last clean price and ATR window mean so stop-loss/take-profit fire;
+  approximate anchor, not the true entry).
 - Subscribe to `prices.Handler`; `time.NewTicker` loop selecting `ctx.Done` /
   messages (`Pause`/`Resume`/`Stop`) / price ticks.
 - Per tick for the configured asset: build `types.YieldObservation` (`spread` mode
-  calls `getBenchmarkYield` → FRED, cached); `Update` → `Decision`; record via
-  `DecisionRecorder` (monotonic seq); act:
+  calls `getBenchmarkYield` → FRED, cached, with stale-cache fallback on outage);
+  `Update` → `Decision`; record executed decisions (entries/exits) via
+  `DecisionRecorder` (monotonic seq) — per-tick decisions are not persisted,
+  matching `mean_reversion`; act:
   - flat + non-Hold → `executeDecision` (open);
   - open → `ShouldExit` → `closePosition`;
   - open + opposite signal → `closePosition` (`reversal`).
@@ -208,7 +218,9 @@ pattern. `cappedOrderQuantity` applies min/max sizing:
 ### 9.3 Backtester (`backtest.go`, mirrors meanreversion)
 Replays `[]types.YieldObservation` chronologically; one open position at a time; no
 tx costs / spread / financing. `effectiveCapital = InitialBalance × Leverage`;
-entry/exit update `remainingBalance`; per-trade PnL; summary
+every entry is sized from that fixed capital (no compounding balance tracking —
+the write-only `remainingBalance` accounting was removed in review commit
+c5f267b); per-trade PnL; summary
 (`TotalPnL`, `WinCount`, `LossCount`, `MaxDrawdown`, `SharpeRatio`) via
 `stats.Summarise`; optional `BacktestTradeWriter`. `BacktestResult` implements
 `types.BacktestResult`.
@@ -233,13 +245,16 @@ entry/exit update `remainingBalance`; per-trade PnL; summary
 
 - `strategy_test.go` — `Update` per source: `price` → Buy on rising, `ytm`/`spread`
   → Sell on rising (direction inversion); `warming_up` pre-readiness; ATR
-  computation; flat position sizing.
-- `decision_test.go` — accessor contract + reason codes.
+  computation; flat position sizing; short-side `ShouldExit` thresholds.
+- accessor contract + reason codes live in `strategy_test.go` (the planned
+  separate `decision_test.go` / `market_api_test.go` never materialised).
 - `backtest_test.go` — exit priority `stop_loss > take_profit > reversal`;
   `strategy_exit` at end; PnL/win-loss/Sharpe via `stats.Summarise`; min/max sizing
-  skip behaviour.
-- `historical_data_test.go` + `market_api_test.go` — observation loading (all three
-  sources) + execution/balance helpers.
+  skip behaviour; per-trade PnL formula and aggregate consistency.
+- `historical_data_test.go` — observation loading (all three sources);
+  `run_loop_test.go` — live tick path (deadlock regression);
+  `resume_anchor_test.go` — restart anchor seeding;
+  `benchmark_fallback_test.go` — FRED outage stale-cache fallback.
 - `export_test.go` white-box helpers; counterfeiter fakes for both store interfaces.
 
 ## 12. Verification

@@ -106,13 +106,13 @@ that don't block merge; carried as Minor below._
   `test(momentum): cover short-position ShouldExit branches`. All four
   short branches (StopLoss / TakeProfit / Reversal / Hold) now have
   threshold-direction assertions at `strategy/momentum/strategy_test.go:181-232`.
-  _Caveat: short stop-loss only has a no-fire boundary assertion; positive-
-  fire case still missing — see Minor below._
-- **Backtest tests are mutation-immune** — partially addressed by a80e647
-  force-close pinning. `_TotalPnL` / exact trade count / exit reason
-  assertions still missing in `TestBacktest_OpensAndExits` and
-  `TestBacktest_StopLossExits` (assert only `NotEmpty(closedTrades)`).
-  See Minor below.
+  _Caveat resolved: the positive-fire case landed as
+  `TestShouldExit_StopLoss_ShortFires` (strategy_test.go:200) in 0698791._
+- **Backtest tests are mutation-immune** — fixed by d8c4afc: per-trade PnL
+  formula (in `computePnL`'s op order), `TotalPnL` = Σ closed-trade PnL,
+  win/loss counts, and a deterministic `ExitReasonStopLoss` assertion now
+  pin `TestBacktest_OpensAndExits` / `TestBacktest_StopLossExits` /
+  `TestBacktest_ForceClosePersistsExitAndRecordsExitSignal`.
 - **`nil-YTM tick dropped` test cannot detect ingestion** — fixed by
   218e905 `fix(momentum): surface nil-YTM contract violations instead of
   masking them`. The live run loop now surfaces nil-YTM as a contract
@@ -362,19 +362,19 @@ hashes to be added at commit time):
 Non-blocking items from the round-4 16-reviewer review, grouped by area:
 
 ### HTTP / API docs
-- **OpenAPI momentum trade rows violate shared ClosedTrade/TradeRecord
-  schemas** — MomentumClosedTrade omits required entry_spread/
-  exit_spread; fast_ma/slow_ma/entry_atr undocumented on TradeRecord;
-  fast_ma/slow_ma are structurally always-empty (no backing DB
-  columns). Add per-strategy oneOf trade schemas or drop the dead
-  fields. Breakout pre-existing precedent.
-- **RunDetail.config oneOf missing MomentumConfig** (and BreakoutConfig,
-  pre-existing) — a strict client validating a momentum run detail
-  fails the oneOf.
+- [x] **OpenAPI momentum trade rows violate shared ClosedTrade/TradeRecord
+  schemas** — RESOLVED (docs pass 2026-08-26): /trades and /closed-trades
+  items are now oneOf with new MomentumTradeRecord / MomentumClosedTrade
+  schemas; fast_ma/slow_ma documented as not-persisted. Dropping the dead
+  fields from MomentumTradeRecord remains optional code cleanup. Breakout's
+  equivalent drift is pre-existing and still undocumented.
+- [x] **RunDetail.config oneOf missing MomentumConfig** (and BreakoutConfig)
+  — RESOLVED (docs pass 2026-08-26): both refs added.
 - **initial_balance=0 for runs persisted as 1** — handler stores the
-  default in normalized config; masked by live balance override.
-- **OpenAPI initial_balance description omits the backtest must-be->0
-  rule** (strategies.md documents it correctly).
+  default in normalized config; masked by live balance override. (Still
+  open — code fix.)
+- [x] **OpenAPI initial_balance description omits the backtest must-be->0
+  rule** — RESOLVED (docs pass 2026-08-26).
 
 ### Tests
 - **Momentum resume path untested** — resumePersistedRun's SetDecisionSeq
@@ -409,15 +409,20 @@ Non-blocking items from the round-4 16-reviewer review, grouped by area:
 - **run_loop_test comment misstates slowWin fill tick** (fills on the
   5th; the 6th is slack).
 
-### Spec doc drift (doc-only)
-- Spec §6.1 + strategies.md still say nil-YTM ticks are "dropped";
-  since 218e905 they are surfaced contract violations in all modes.
-- Spec §9.3 promises per-trade remainingBalance updates; backtester
-  deliberately does not track balance evolution.
-- Spec §9.1 implies per-tick DecisionRecorder writes; only order
-  events are recorded (sibling parity).
-- Spec §4/§11 name decision_test.go / market_api_test.go which don't
-  exist (coverage lives in strategy_test.go / run_loop_test.go).
-- TODO.md Major section still carries a "short stop-loss positive-fire
-  case missing" caveat; TestShouldExit_StopLoss_ShortFires exists
-  (landed 0698791).
+### Spec doc drift (doc-only) — RESOLVED (docs pass, 2026-08-26)
+- [x] Spec §6.1 + strategies.md nil-YTM "dropped" wording → now describe the
+      surfaced contract violation (218e905 behavior).
+- [x] Spec §9.3 remainingBalance claim → documents fixed-capital sizing and
+      the c5f267b removal.
+- [x] Spec §9.1 per-tick DecisionRecorder wording → "record executed
+      decisions"; startup ordering corrected (prefill → init → seedResumeAnchor).
+- [x] Spec §4/§11 test file names → real files.
+- [x] TODO.md Major "short stop-loss positive-fire" caveat → marked resolved
+      (TestShouldExit_StopLoss_ShortFires, 0698791); the adjacent
+      "backtest tests mutation-immune" item marked resolved by d8c4afc.
+- [x] OpenAPI: RunDetail.config oneOf now includes BreakoutConfig +
+      MomentumConfig; /trades and /closed-trades items are oneOf with new
+      MomentumTradeRecord / MomentumClosedTrade schemas (fast_ma/slow_ma
+      documented as not persisted); MomentumConfig.initial_balance
+      description states the backtest >0 rule. Breakout's own trade-row
+      drift remains pre-existing/undocumented.

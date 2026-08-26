@@ -304,7 +304,12 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/TradeRecord" }
+                      "items": {
+                        "oneOf": [
+                          { "$ref": "#/components/schemas/TradeRecord" },
+                          { "$ref": "#/components/schemas/MomentumTradeRecord" }
+                        ]
+                      }
                     }
                   }
                 }
@@ -335,7 +340,12 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/ClosedTrade" }
+                      "items": {
+                        "oneOf": [
+                          { "$ref": "#/components/schemas/ClosedTrade" },
+                          { "$ref": "#/components/schemas/MomentumClosedTrade" }
+                        ]
+                      }
                     }
                   }
                 }
@@ -991,7 +1001,7 @@
             "type": "number",
             "minimum": 0,
             "default": 1.0,
-            "description": "Starting capital. Omitted for live runs — obtained from DORA positions."
+            "description": "Starting capital. Must be greater than 0 for backtests; live runs may pass 0 to use the user's DORA USD balance."
           },
           "leverage": {
             "type": "number",
@@ -1191,6 +1201,40 @@
         },
         "required": ["time", "bond_id", "signal", "price"]
       },
+      "MomentumTradeRecord": {
+        "type": "object",
+        "description": "Momentum trade row emitted by GET /v1/backtests/{id}/trades for momentum backtests.",
+        "properties": {
+          "time": { "type": "string", "format": "date-time" },
+          "bond_id": { "type": "string" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "fast_ma": { "type": "string", "description": "Fast MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint." },
+          "slow_ma": { "type": "string", "description": "Slow MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint." },
+          "entry_atr": { "type": "string", "description": "ATR captured on the opening row; mirrored onto the matching exit row." }
+        },
+        "required": ["time", "bond_id", "signal", "price"]
+      },
+      "MomentumClosedTrade": {
+        "type": "object",
+        "description": "Momentum closed-trade row emitted by GET /v1/backtests/{id}/closed-trades for momentum backtests.",
+        "properties": {
+          "bond_id": { "type": "string" },
+          "open_time": { "type": "string", "format": "date-time" },
+          "close_time": { "type": "string", "format": "date-time" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "exit_signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "entry_price": { "type": "string" },
+          "exit_price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "pnl": { "type": "string", "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction." },
+          "exit_reason": { "type": "string", "description": "One of stop_loss, take_profit, reversal, strategy_exit." }
+        },
+        "required": ["bond_id", "open_time", "close_time", "signal", "pnl"]
+      },
       "RunSummary": {
         "type": "object",
         "properties": {
@@ -1227,6 +1271,8 @@
               "config": {
                 "oneOf": [
                   { "$ref": "#/components/schemas/MeanReversionConfig" },
+                  { "$ref": "#/components/schemas/BreakoutConfig" },
+                  { "$ref": "#/components/schemas/MomentumConfig" },
                   { "$ref": "#/components/schemas/CopyTradingConfig" }
                 ]
               },
