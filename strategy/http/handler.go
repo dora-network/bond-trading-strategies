@@ -2848,17 +2848,17 @@ type breakoutConfigPayload struct {
 }
 
 type momentumConfigPayload struct {
-	SignalSource    string  `json:"signal_source"`
-	FastWindow      int     `json:"fast_window"`
-	SlowWindow      int     `json:"slow_window"`
-	ATRWindow       int     `json:"atr_window"`
-	StopLossATR     float64 `json:"stop_loss_atr"`
-	TakeProfitATR   float64 `json:"take_profit_atr"`
-	MinOrderSize    float64 `json:"min_order_size"`
-	MaxOrderSize    float64 `json:"max_order_size"`
-	MaxPositionSize float64 `json:"max_position_size"`
-	Tenor           string  `json:"tenor,omitempty"`
-	OrderBookID     string  `json:"order_book_id,omitempty"`
+	SignalSource    string   `json:"signal_source"`
+	FastWindow      int      `json:"fast_window"`
+	SlowWindow      int      `json:"slow_window"`
+	ATRWindow       int      `json:"atr_window"`
+	StopLossATR     *float64 `json:"stop_loss_atr,omitempty"`
+	TakeProfitATR   *float64 `json:"take_profit_atr,omitempty"`
+	MinOrderSize    float64  `json:"min_order_size"`
+	MaxOrderSize    float64  `json:"max_order_size"`
+	MaxPositionSize float64  `json:"max_position_size"`
+	Tenor           string   `json:"tenor,omitempty"`
+	OrderBookID     string   `json:"order_book_id,omitempty"`
 
 	InitialBalance *float64 `json:"initial_balance,omitempty"`
 	Leverage       *float64 `json:"leverage,omitempty"`
@@ -3202,11 +3202,13 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 	if payload.MaxPositionSize == 0 {
 		payload.MaxPositionSize = mustFloat64(defaults.MaxPositionSize)
 	}
-	if payload.StopLossATR == 0 {
-		payload.StopLossATR = mustFloat64(defaults.StopLossATR)
+	stopLossATR := mustFloat64(defaults.StopLossATR)
+	if payload.StopLossATR != nil {
+		stopLossATR = *payload.StopLossATR
 	}
-	if payload.TakeProfitATR == 0 {
-		payload.TakeProfitATR = mustFloat64(defaults.TakeProfitATR)
+	takeProfitATR := mustFloat64(defaults.TakeProfitATR)
+	if payload.TakeProfitATR != nil {
+		takeProfitATR = *payload.TakeProfitATR
 	}
 
 	if payload.SignalSource != momentum.SignalSourcePrice &&
@@ -3223,10 +3225,10 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 	if payload.ATRWindow < 2 { //nolint:mnd
 		return momentum.Config{}, nil, fmt.Errorf("config.atr_window must be at least 2")
 	}
-	if payload.StopLossATR < 0 {
+	if stopLossATR < 0 {
 		return momentum.Config{}, nil, fmt.Errorf("config.stop_loss_atr must be non-negative")
 	}
-	if payload.TakeProfitATR < 0 {
+	if takeProfitATR < 0 {
 		return momentum.Config{}, nil, fmt.Errorf("config.take_profit_atr must be non-negative")
 	}
 	if payload.MinOrderSize < 0 {
@@ -3242,11 +3244,11 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 		return momentum.Config{}, nil, fmt.Errorf("config.tenor is required when signal_source is spread")
 	}
 
-	stopLoss, err := decimal.NewFromFloat64(payload.StopLossATR)
+	stopLoss, err := decimal.NewFromFloat64(stopLossATR)
 	if err != nil {
 		return momentum.Config{}, nil, fmt.Errorf("config.stop_loss_atr: %w", err)
 	}
-	takeProfit, err := decimal.NewFromFloat64(payload.TakeProfitATR)
+	takeProfit, err := decimal.NewFromFloat64(takeProfitATR)
 	if err != nil {
 		return momentum.Config{}, nil, fmt.Errorf("config.take_profit_atr: %w", err)
 	}
@@ -3303,12 +3305,12 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size must be greater than or equal to min_order_size")
 	}
 
-	var orderBookID uuid.UUID
-	if payload.OrderBookID != "" {
-		orderBookID, err = uuid.Parse(payload.OrderBookID)
-		if err != nil {
-			return momentum.Config{}, nil, fmt.Errorf("config.order_book_id: %w", err)
-		}
+	if payload.OrderBookID == "" {
+		return momentum.Config{}, nil, fmt.Errorf("config.order_book_id is required")
+	}
+	orderBookID, err := uuid.Parse(payload.OrderBookID)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.order_book_id: %w", err)
 	}
 
 	out, err := json.Marshal(map[string]any{

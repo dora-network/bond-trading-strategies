@@ -32,24 +32,38 @@ func TestParseBenchmarkTenor(t *testing.T) {
 	})
 
 	t.Run("aliases", func(t *testing.T) {
-		for _, input := range []string{"10YR", "2YEAR", "1MO", "3MON", "6MONTH", "5YR", "30YR"} {
-			_, err := ParseBenchmarkTenor(input)
-			assert.NoError(t, err, "alias %q should parse", input)
+		// Value-pinned (round-4 review): asserting only err==nil let a
+		// mis-edited alias table — e.g. "5YR" added to the 2Y row —
+		// silently fetch the wrong FRED series with green tests.
+		for input, want := range map[string]Tenor{
+			"10YR":   Tenor10Year,
+			"2YEAR":  Tenor2Year,
+			"1MO":    Tenor1Month,
+			"3MON":   Tenor3Month,
+			"6MONTH": Tenor6Month,
+			"5YR":    Tenor5Year,
+			"30YR":   Tenor30Year,
+		} {
+			got, err := ParseBenchmarkTenor(input)
+			require.NoError(t, err, "alias %q should parse", input)
+			assert.Equal(t, want, got, "alias %q mapped to %v, want %v", input, got, want)
 		}
 	})
 
 	t.Run("normalized inputs", func(t *testing.T) {
 		// Normalization: ToUpper + strip whitespace/hyphens/underscores
-		// + drop trailing S.
-		for _, input := range []string{" 2 year ", "1-months", "10YR", "10_yr", " 10 YEARS "} {
+		// + drop trailing S. Value-pinned for the same reason as the
+		// aliases table above.
+		for input, want := range map[string]Tenor{
+			" 2 year ":   Tenor2Year,
+			"1-months":   Tenor1Month,
+			"10YR":       Tenor10Year,
+			"10_yr":      Tenor10Year,
+			" 10 YEARS ": Tenor10Year,
+		} {
 			got, err := ParseBenchmarkTenor(input)
-			// "10 YEARS" normalizes to "10YEAR" -> 10YR alias -> Tenor10Year.
-			// " 2 year " normalizes to "2YEAR" -> 2YR alias -> Tenor2Year.
-			// "1-months" normalizes to "1MONTH" -> 1MONTH alias -> Tenor1Month.
-			// "10_yr" -> "10YR" -> Tenor10Year.
-			// "10YR" -> direct.
-			assert.NoError(t, err, "normalized input %q should parse", input)
-			_ = got
+			require.NoError(t, err, "normalized input %q should parse", input)
+			assert.Equal(t, want, got, "normalized input %q mapped to %v, want %v", input, got, want)
 		}
 	})
 
@@ -105,14 +119,22 @@ func TestNormalizeDate(t *testing.T) {
 	in := time.Date(2024, 8, 24, 15, 30, 45, 123, time.UTC)
 	got := NormalizeDate(in)
 	assert.Equal(t, time.Date(2024, 8, 24, 0, 0, 0, 0, time.UTC), got)
-
 	// In another timezone: still UTC midnight of the calendar date in UTC.
-	// 2024-08-25 01:00 UTC = 2024-08-24 21:00 EDT
+	// 2024-08-25 09:00 JST = 2024-08-25 00:00 UTC.
 	tokyo, err := time.LoadLocation("Asia/Tokyo")
 	require.NoError(t, err)
-	in = time.Date(2024, 8, 25, 9, 0, 0, 0, tokyo) // 2024-08-25 00:00 UTC
+	in = time.Date(2024, 8, 25, 9, 0, 0, 0, tokyo)
 	got = NormalizeDate(in)
 	assert.Equal(t, time.Date(2024, 8, 25, 0, 0, 0, 0, time.UTC), got)
+	// In another timezone: still UTC midnight of the calendar date in
+	// UTC. Distinguishing case (round-4 review): 2024-08-25 08:30 JST
+	// is 2024-08-24 23:30 UTC, so UTC-date normalization must yield
+	// 08-24 — a local-date (ts.Date()) regression would yield 08-25.
+	// The earlier tokyo case (09:00 JST = 00:00 UTC) has the same
+	// calendar date in both zones and cannot tell them apart.
+	in = time.Date(2024, 8, 25, 8, 30, 0, 0, tokyo) // 2024-08-24 23:30 UTC
+	got = NormalizeDate(in)
+	assert.Equal(t, time.Date(2024, 8, 24, 0, 0, 0, 0, time.UTC), got)
 
 	// Edge: midnight input still gives midnight (no off-by-one).
 	in = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)

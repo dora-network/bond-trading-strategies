@@ -1753,10 +1753,23 @@ func TestHandlerMomentumValidationErrors(t *testing.T) {
 			name: "run allows zero initial_balance (fetched from DORA)",
 			body: map[string]any{
 				"strategy_type": "momentum",
-				"config":        map[string]any{"initial_balance": 0},
+				"config": map[string]any{
+					"initial_balance": 0,
+					"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+				},
 			},
 			path:     "/v1/runs",
 			wantCode: http.StatusCreated,
+		},
+		{
+			name: "missing order_book_id rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"signal_source": "price"},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.order_book_id is required",
 		},
 		{
 			name: "negative initial_balance rejected for runs",
@@ -1838,6 +1851,42 @@ func TestHandlerMomentumValidationErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHandlerMomentumExplicitZeroATR pins the "0 disables" contract the
+// config-field docs promise: an explicit stop_loss_atr/take_profit_atr
+// of 0 must round-trip as 0 in the normalized config, not be silently
+// rewritten to the default. Round-4 review P2: the decoder previously
+// rewrote explicit 0 to the default 20, making the documented disable
+// unreachable over HTTP.
+func TestHandlerMomentumExplicitZeroATR(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+		"strategy_type": "momentum",
+		"config": map[string]any{
+			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+			"stop_loss_atr":   0,
+			"take_profit_atr": 0,
+		},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var detail struct {
+		Config struct {
+			StopLossATR   float64 `json:"stop_loss_atr"`
+			TakeProfitATR float64 `json:"take_profit_atr"`
+		} `json:"config"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+	assert.Zero(t, detail.Config.StopLossATR, "explicit stop_loss_atr 0 must persist as 0 (0 disables)")
+	assert.Zero(t, detail.Config.TakeProfitATR, "explicit take_profit_atr 0 must persist as 0 (0 disables)")
 }
 
 func performJSONRequest(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {

@@ -176,10 +176,19 @@ and are no longer outstanding:
 - fred/benchmark.go untested (Slice I-d) - resolved by a5c2f96.
 - MustParseUUID duplicated (Slice I-e) - resolved by 8588afc.
 
-Net: 5 commits, ~280 lines changed, 4 new test files (fred/benchmark_test.go,
-strategy/portfolio_test.go) plus test assertion expansions in
+Net: 5 commits, ~280 lines changed, 2 new test files
+(fred/benchmark_test.go, strategy/portfolio_test.go) plus test
+assertion expansions in momentum and http test files.
 
 ## Momentum review follow-ups (deferred from 16-reviewer code review, 2026-08-25)
+
+**Status update (2026-08-26):** 11 of the 16 items below were resolved
+by commit `c5f267b` ("address 11 of 16 P3 follow-ups") and one more
+(backtest exit-reason pinning) by the round-4 fix session; each resolved
+item is marked inline. Still open: lookupAssetID ctx, MustParseUUID
+naming, closed-trades entry_atr column, plan-file trimming, OpenAPI
+per-strategy response schemas, double Info log, spread-refetch config
+option.
 
 The 16-reviewer code review of `tan/momentum-strategy` vs `development`
 flagged these as P3 nits. The P1 (1 item) and P2 (9 items) findings
@@ -188,7 +197,7 @@ should be picked up in a separate session.
 
 ### Strategy
 
-- **Duplicate `cachedBenchmarkYield` lookup in `getBenchmarkYield`**
+- **[RESOLVED — c5f267b] Duplicate `cachedBenchmarkYield` lookup in `getBenchmarkYield`**
   `strategy/momentum/strategy.go:861-868`. Both calls return identical
   values (pure RLock + binary search over the same cache); the second
   call is redundant per-tick work. Refactor leftover from the
@@ -200,19 +209,19 @@ should be picked up in a separate session.
   resolution, the run goroutine blocks indefinitely and Stop/ctx is
   ignored. Matches meanreversion/breakout pattern (info only — fix
   across all three).
-- **`getBenchmarkYield` refetches per tick on intraday FRED outages** —
+- **[RESOLVED — c5f267b, 5-min fetch throttle] `getBenchmarkYield` refetches per tick on intraday FRED outages** —
   `strategy/momentum/strategy.go:861-904`. Intraday FRED's same-day
   observation is often absent, so spread-mode live ticks can refetch
   per tick with no throttle, and each failure calls `recordErr`
   (`strategy.go:522`) which appends unboundedly to `s.errs`. Add a
   per-tick throttle or short-circuit.
-- **Force-close exit row persists zero `FastMA`/`SlowMA`** —
+- **[RESOLVED — c5f267b] Force-close exit row persists zero `FastMA`/`SlowMA`** —
   `strategy/momentum/backtest.go:122-127` builds a fresh Decision
   with only time/bondID/price/signal, so `exitRecord` copies
   `d.FastMA=d.SlowMA=0` into the persisted TradeRecord. Copy
   `lastDecision.FastMA/SlowMA` (and ATR if desired) into d so
   persisted rows are uniform with in-loop exit rows.
-- **`remainingBalance` is write-only dead state** —
+- **[RESOLVED — c5f267b, tracking deleted] `remainingBalance` is write-only dead state** —
   `strategy/momentum/backtest.go:46-54` computes effectiveCapital and
   threads `remainingBalance` through applyEntryCashFlow /
   applyExitCashFlow / closeAtPrice, but it is never read. Either wire
@@ -227,12 +236,12 @@ should be picked up in a separate session.
   with run_id+seq even when asset lookup failed). Renaming to
   `ParseUUIDLoose` would fix the lie but touches exec.go and 6 call
   sites. Defer until a third caller.
-- **`FindAccountAndBalance` / `FindBalancesInAccounts` exported with
+- **[RESOLVED — c5f267b, unexported] `FindAccountAndBalance` / `FindBalancesInAccounts` exported with
   no external callers** — `strategy/portfolio.go:44, :75`. Both only
   used inside `strategy/portfolio.go` and its `_test.go`; the cross-
   package consumers go through `InitialBalancesFromPortfolio`.
   Unexport to shrink the shared API surface.
-- **MCP `min_order_size` / `max_order_size` descriptions still say
+- **[RESOLVED — c5f267b] MCP `min_order_size` / `max_order_size` descriptions still say
   "copied order size"** — `mcp/tools_strategy.go:113-114` rewrote the
   types to `nonNegNum` but kept copytrading-specific descriptions
   while the field is now shared with momentum (different semantics:
@@ -243,27 +252,27 @@ should be picked up in a separate session.
 
 ### Tests
 
-- **Nine unused exports in `export_test.go`** —
+- **[RESOLVED — c5f267b] Nine unused exports in `export_test.go`** —
   `strategy/momentum/export_test.go:27-36`: `LookupAssetID`,
   `CurrentPosition`, `BondQty`, `UsdBal`, `InitializeBalances`,
   `BalancesInitialized`, `EntryPrice`, `EntryATR`, `UpdateObs`.
   None are referenced by any test in the package (~45 lines of dead
   test API). Delete.
-- **Vacuous `NotNil` on value-type return** —
+- **[RESOLVED — c5f267b] Vacuous `NotNil` on value-type return** —
   `strategy/momentum/benchmark_fallback_test.go:61` does
   `require.NotNil(t, got)` on a value-type `decimal.Decimal` return,
   which can never be nil. The `assert.True(got.Equal(4.25))` on the
   next line is the real check. Drop the NotNil.
-- **Untested money-path branches in `strategy/portfolio.go`**:
+- **[RESOLVED — c5f267b, 4 pin tests] Untested money-path branches in `strategy/portfolio.go`**:
   (a) leverage>1x isolated→global fallback at `:57-65`; (b) short-
   position reconstruction `bal.Bond = borrowed.Neg()` at `:114-118`;
   (c) quote-asset parse-error branch at `:89-93`; (d)
   `signalFromBondQty` at `:165-174`. Add a pin test for each.
-- **Duplicated 7-line config boilerplate across backtest tests** —
+- **[RESOLVED — c5f267b, `testCfg` helper] Duplicated 7-line config boilerplate across backtest tests** —
   `strategy/momentum/backtest_test.go:34-43, 51-57, 91-99` repeat the
   same DefaultConfig + window/stop/tp block; extract a `testCfg`
   helper. Ponytail nit only.
-- **Backtest tests don't assert exit-reason pinning at the
+- **[RESOLVED — round-4 fixes, deterministic stop-loss assertion in backtest_test.go] Backtest tests don't assert exit-reason pinning at the
   integration level** — partial. `TestBacktest_OpensAndExits` now
   asserts a reversal exit must fire and trade records are paired;
   `TestBacktest_StopLossExits` asserts no-reversal on a stop-loss
@@ -283,7 +292,7 @@ should be picked up in a separate session.
   schema migration adds `entry_atr` to closed_trades, restore the
   field. Cross-cutting; tracked here so the next migration owner sees
   the gap.
-- **`strategies.md` Momentum section — `initial_balance` row inverts
+- **[RESOLVED — c5f267b] `strategies.md` Momentum section — `initial_balance` row inverts
   the runs-vs-backtests constraint** — `strategies.md` says "Live
   runs override with the user's USD balance" but does not say
   "backtests require > 0". Add the constraint to the table.
@@ -310,3 +319,105 @@ should be picked up in a separate session.
   balances from portfolio" and both adapters (`momentum/balances.go`,
   `meanreversion/balances.go`) immediately log the same event with
   runID. Delete the shared helper's Info line; keep the Warn lines.
+
+## Momentum round-4 review — P2s resolved in working tree (2026-08-26, pre-commit)
+
+Round-4 16-reviewer review confirmed the round-3 P2s and found two new
+P2s. All five gating items are fixed in this working tree (uncommitted;
+hashes to be added at commit time):
+
+- **stop_loss_atr / take_profit_atr explicit-0 rewritten to defaults**
+  (round-3 P2, unfixed by 0698791/c5f267b) — `momentumConfigPayload`
+  fields are now `*float64` (nil→default, explicit 0→0), so the
+  documented "0 disables" contract is reachable over HTTP and persists
+  in normalized config. Regression: `TestHandlerMomentumExplicitZeroATR`
+  (handler_test.go). NOTE: breakout shares the same 0-rewrite quirk
+  pre-existing on development (handler.go:~3064) — fix it the same way
+  when breakout is next touched.
+- **order_book_id advertised Required:true but never validated** —
+  decodeMomentumConfig now rejects empty order_book_id (400) instead of
+  returning 201 and silently "completing" a run that never traded.
+  Regression rows in `TestHandlerMomentumValidationErrors`.
+- **Restart with an open position silently disabled stop-loss /
+  take-profit** — `seedResumeAnchor` (strategy/momentum/strategy.go)
+  runs after initializeBalances and anchors entryPrice/entryATR from the
+  last clean price + ATR window mean when the run starts with an
+  inherited position. Approximate anchor (not the true entry); upgrade
+  path is StateStore-persisted anchors (twap/vwap pattern) if exact
+  entry prices ever matter. Regression: `TestSeedResumeAnchor_*`
+  (resume_anchor_test.go).
+- **No PnL assertion anywhere in the momentum package** —
+  `TestBacktest_ForceClose...` now asserts PnL = Exit×Qty−Entry×Qty per
+  trade (same op order as computePnL; decimal arithmetic is not
+  distributive), TotalPnL = Σ closed-trade PnL, and win/loss counts;
+  `TestBacktest_OpensAndExits` asserts the Σ invariant across
+  round-trips.
+- **FRED alias→tenor mapping unpinned** — aliases and normalized-inputs
+  subtests now assert the resolved Tenor value (a mis-edited alias
+  table previously passed green), and TestNormalizeDate gained a
+  UTC-vs-local-date distinguishing case.
+
+## Momentum round-4 follow-ups (deferred P3s, 2026-08-26)
+
+Non-blocking items from the round-4 16-reviewer review, grouped by area:
+
+### HTTP / API docs
+- **OpenAPI momentum trade rows violate shared ClosedTrade/TradeRecord
+  schemas** — MomentumClosedTrade omits required entry_spread/
+  exit_spread; fast_ma/slow_ma/entry_atr undocumented on TradeRecord;
+  fast_ma/slow_ma are structurally always-empty (no backing DB
+  columns). Add per-strategy oneOf trade schemas or drop the dead
+  fields. Breakout pre-existing precedent.
+- **RunDetail.config oneOf missing MomentumConfig** (and BreakoutConfig,
+  pre-existing) — a strict client validating a momentum run detail
+  fails the oneOf.
+- **initial_balance=0 for runs persisted as 1** — handler stores the
+  default in normalized config; masked by live balance override.
+- **OpenAPI initial_balance description omits the backtest must-be->0
+  rule** (strategies.md documents it correctly).
+
+### Tests
+- **Momentum resume path untested** — resumePersistedRun's SetDecisionSeq
+  + applyUserAPIKey arms, awaitBacktestResult's momentum.BacktestResult
+  case, atr_window>=2, max_position_size bounds, order_book_id
+  parse-error rows.
+- **Take-profit exits never exercised through the Backtester** (unit
+  level only); spec §11 promises full priority coverage.
+- **run_loop_test DATABASE_URL flake vector** — strategy built without
+  SetHistoricalPriceStore falls through to env DATABASE_URL; inject
+  FakeHistoricalPriceStore like historical_data_test.go does.
+- **historical_data_test gaps** — spread-mode drop branch (price before
+  first benchmark observation), prefillWindow spread/nil-YTM paths,
+  TestPrefillWindow asserts call args only (not window population).
+- **meanreversion `s.errs` write-only** — b4851c0's surfaced errors are
+  invisible for meanreversion; add s.log.Error alongside the append.
+
+### Code hygiene
+- **exec.MustParseUUID dead alias** — zero callers, comment falsely
+  claims legacy consumers; contradicts the "pick one canonical
+  location" resolution. Delete, call strategy.MustParseUUID internally.
+- **meanreversion duplicate tenor logic** — historical_data.go keeps
+  local parseBenchmarkTenor/normalizeDate/table after strategy.go
+  migrated to fred helpers; two sources of truth can drift.
+- **historical_data ordering contracts undocumented** — binary search
+  needs ascending observations; prefill needs oldest-first history.
+  One-line doc on each interface.
+- **exitRecord copies EntryATR onto exit rows** contra types.go:135
+  comment ("only set on the opening record") — fix comment or copy.
+- **benchmark_fallback_test hand-rolled fake** where a counterfeiter
+  fake exists (convention nit).
+- **run_loop_test comment misstates slowWin fill tick** (fills on the
+  5th; the 6th is slack).
+
+### Spec doc drift (doc-only)
+- Spec §6.1 + strategies.md still say nil-YTM ticks are "dropped";
+  since 218e905 they are surfaced contract violations in all modes.
+- Spec §9.3 promises per-trade remainingBalance updates; backtester
+  deliberately does not track balance evolution.
+- Spec §9.1 implies per-tick DecisionRecorder writes; only order
+  events are recorded (sibling parity).
+- Spec §4/§11 name decision_test.go / market_api_test.go which don't
+  exist (coverage lives in strategy_test.go / run_loop_test.go).
+- TODO.md Major section still carries a "short stop-loss positive-fire
+  case missing" caveat; TestShouldExit_StopLoss_ShortFires exists
+  (landed 0698791).

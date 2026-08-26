@@ -520,6 +520,34 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 	s.mu.Unlock()
 }
 
+// seedResumeAnchor restores an exit anchor for a position that already
+// exists when the run starts (server restart with an open position, or
+// a run inheriting an exchange position). Without it entryPrice and
+// entryATR stay zero and ShouldExit's stop-loss/take-profit branches —
+// both gated on entryATR.IsPos() — never fire, leaving the position
+// protected only by opposite-signal reversal. The anchor is approximate:
+// the last clean price and the current ATR window mean, not the true
+// entry values, which trades exact stop placement for having a stop.
+// ponytail: approximate re-derivation; upgrade to StateStore-persisted
+// anchors (twap/vwap pattern) if exact entry prices ever matter.
+func (s *Strategy) seedResumeAnchor() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.openSignal == types.SignalHold || s.entryATR.IsPos() {
+		return
+	}
+	if s.lastPrice.IsZero() || !s.atrWin.Ready() {
+		s.logger().Warn("inherited position has no usable price/ATR history; stop-loss and take-profit stay disabled until the next entry",
+			"runID", s.runID, "openSignal", s.openSignal)
+		return
+	}
+	s.entryPrice = s.lastPrice
+	s.entryATR = s.atrWin.Mean()
+	s.logger().Info("seeded approximate entry anchor for inherited position",
+		"runID", s.runID, "openSignal", s.openSignal,
+		"entryPrice", s.entryPrice, "entryATR", s.entryATR)
+}
+
 func (s *Strategy) recordErr(err error) {
 	s.mu.Lock()
 	s.errs = append(s.errs, err)
@@ -748,6 +776,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 
 	s.logger().Info("initialising balances", "runID", s.runID, "assetID", assetID)
 	s.initializeBalances(ctx, assetID)
+	s.seedResumeAnchor()
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()

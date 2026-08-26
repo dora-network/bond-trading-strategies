@@ -84,6 +84,19 @@ func TestBacktest_OpensAndExits(t *testing.T) {
 	// Trade records must come in matched entry/exit pairs.
 	require.Equal(t, 0, len(tradeRecords)%2,
 		"trade records must come in matched entry/exit pairs, got %d", len(tradeRecords))
+	// Aggregate PnL consistency across multiple round-trips (round-4
+	// review): TotalPnL must equal Σ closed-trade PnL — catches the
+	// summariser dropping or double-counting a trade. (Win/Loss counts
+	// are not asserted here: this fixture legitimately produces a
+	// zero-PnL trade, which the classifier counts as neither.)
+	sum := decimal.Zero
+	for _, ct := range closedTrades {
+		var err error
+		sum, err = sum.Add(ct.PnL)
+		require.NoError(t, err)
+	}
+	require.True(t, res.GetTotalPnL().Cmp(sum) == 0,
+		"TotalPnL must equal Σ closed-trade PnL: want %s, got %s", sum, res.GetTotalPnL())
 }
 
 func TestBacktest_StopLossExits(t *testing.T) {
@@ -113,15 +126,16 @@ func TestBacktest_StopLossExits(t *testing.T) {
 	// Pinning: the sharp drop (120 -> 80 -> 70) must trigger a
 	// close. Priority stop > reversal: if both branches fire on the
 	// same tick, the exit reason must be stop_loss, not reversal.
-	// The fixture aims for that, but if ATR is still warming up at
-	// the entry tick the stop branch may be skipped; the strong
-	// version of this assertion belongs at the unit-test level
-	// (strategy_test.go:104-117 covers the priority).
 	require.NotEmpty(t, closedTrades)
 	for _, ct := range closedTrades {
 		require.NotEqual(t, momentum.ExitReasonReversal, ct.ExitReason,
 			"priority stop > reversal must not tag a stop-loss exit as reversal")
 	}
+	// The fixture is deterministic (entry ~102, EntryATR 2/3 → stop
+	// ≈ 100.67, crash tick 80), so the first close must actually be the
+	// stop, not merely "not a reversal" (round-4 review).
+	require.Equal(t, momentum.ExitReasonStopLoss, closedTrades[0].ExitReason,
+		"crash from 120 to 80 must fire the stop-loss exit")
 }
 
 // TestBacktest_ForceClosePersistsExitAndRecordsExitSignal exercises
@@ -166,6 +180,34 @@ func TestBacktest_ForceClosePersistsExitAndRecordsExitSignal(t *testing.T) {
 	require.Equal(t, types.SignalBuy, ct.Signal, "open direction is Buy")
 	require.Equal(t, momentum.ExitReasonStrategyExit, ct.ExitReason,
 		"force-close must tag the close with ExitReasonStrategyExit")
+
+	// PnL integrity (round-4 review: no test in the package asserted a
+	// single PnL value, so a sign flip in computePnL was a silent
+	// mutation). For a Buy, PnL = Exit×Qty − Entry×Qty, recomputed from
+	// the trade's own recorded fields in the same op order as
+	// computePnL (decimal arithmetic is not distributive: computing
+	// (Exit−Entry)×Qty rounds differently).
+	cost, err := ct.EntryPrice.Mul(ct.Quantity)
+	require.NoError(t, err)
+	proceeds, err := ct.ExitPrice.Mul(ct.Quantity)
+	require.NoError(t, err)
+	wantPnL, err := proceeds.Sub(cost)
+	require.NoError(t, err)
+	require.True(t, ct.PnL.Cmp(wantPnL) == 0,
+		"PnL must be Exit×Qty−Entry×Qty for a long: want %s, got %s", wantPnL, ct.PnL)
+	require.True(t, ct.PnL.IsPos(), "rising fixture must close a long at a profit, got %s", ct.PnL)
+
+	// Aggregate consistency: TotalPnL is Σ closed-trade PnL and the
+	// win/loss classifier counts this single profitable trade as a win.
+	sum := decimal.Zero
+	for _, c := range closedTrades {
+		sum, err = sum.Add(c.PnL)
+		require.NoError(t, err)
+	}
+	require.True(t, res.GetTotalPnL().Cmp(sum) == 0,
+		"TotalPnL must equal Σ closed-trade PnL: want %s, got %s", sum, res.GetTotalPnL())
+	require.Equal(t, 1, res.GetWinCount(), "single profitable trade must be one win")
+	require.Equal(t, 0, res.GetLossCount())
 
 	// Sanity: the trade_records pair brackets the closed trade.
 	require.Equal(t, tradeRecords[0].Time, ct.OpenTime)
