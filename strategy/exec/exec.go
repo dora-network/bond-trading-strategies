@@ -363,6 +363,75 @@ func (e *Executor) ReconcilePendingOrders(
 	e.SaveState(ctx, state)
 }
 
+// ImportOrphanedOrders queries DORA for every order whose
+// client_order_id starts with the given prefix (typically
+// "<strategy>.<run_id>."), diffs against the persisted state, and
+// appends any order DORA has that state doesn't. Closes the
+// PlaceOrder/SaveState crash window: an order that succeeded at
+// DORA but never reached the persisted state (process died
+// between the two) is imported on restart so the next reconcile
+// pass picks it up by order_id and updates it normally.
+//
+// Each imported order bumps TotalSubmitted by RequestedQuantity
+// (DORA's "original quantity") so the rebalance math stays
+// accurate. TotalFilled is left to ReconcilePendingOrders to
+// update from the DORA ground truth.
+//
+// A failure to list orders is non-fatal: log and continue, letting
+// reconcile proceed on the orders the persisted state already
+// knows about.
+func (e *Executor) ImportOrphanedOrders(ctx context.Context, state RunStateView, prefix string) {
+	if e.Market == nil || prefix == "" {
+		return
+	}
+	orders, err := e.Market.ListOrdersByClientOrderIDPrefix(ctx, prefix)
+	if err != nil {
+		e.Log.Error("list orders for orphan import",
+			"strategy", e.Name, "runID", e.RunID, "prefix", prefix, "err", err)
+		return
+	}
+	if len(orders) == 0 {
+		return
+	}
+	imported := 0
+	for _, o := range orders {
+		clientID := ""
+		if o.ClientOrderId != nil {
+			clientID = *o.ClientOrderId
+		}
+		if clientID == "" {
+			continue
+		}
+		if _, ok := state.FindOrderByClientID(clientID); ok {
+			continue
+		}
+		reqQty, perr := decimal.Parse(o.OriginalQuantity)
+		if perr != nil {
+			e.Log.Warn("orphan import: parse original_quantity",
+				"strategy", e.Name, "client_order_id", clientID,
+				"original_quantity", o.OriginalQuantity, "err", perr)
+			continue
+		}
+		state.AppendOrder(OrderEntry{
+			OrderID:           o.OrderId,
+			ClientOrderID:     clientID,
+			RequestedQuantity: reqQty,
+			FilledQuantity:    decimal.Zero,
+			Status:            string(o.Status),
+		})
+		state.AddTotalSubmitted(reqQty)
+		imported++
+		e.Log.Info("imported orphaned order",
+			"strategy", e.Name, "runID", e.RunID,
+			"client_order_id", clientID,
+			"order_id", o.OrderId, "requested", reqQty.String(),
+			"status", string(o.Status))
+	}
+	if imported > 0 {
+		e.SaveState(ctx, state)
+	}
+}
+
 // SaveState serialises state and persists it. Non-fatal on failure.
 // No-op when Store is nil.
 func (e *Executor) SaveState(ctx context.Context, state RunStateView) {

@@ -34,6 +34,15 @@ type MarketAPIClient interface {
 	) (orderID string, err error)
 	AssetCollateralWeight(ctx context.Context, assetID string) (decimal.Decimal, error)
 	GetOrderFilledStatus(ctx context.Context, orderID string) (status string, filledQuantity decimal.Decimal, err error)
+	// ListOrdersByClientOrderIDPrefix returns every DORA order whose
+	// client_order_id starts with the given prefix. Used by execution
+	// strategies on restart to import orders that were submitted to
+	// DORA but never made it into persisted state (the
+	// PlaceOrder/SaveState crash window). The DORA listOrders endpoint
+	// treats client_order_id as a prefix; pass "<strategy>.<run_id>."
+	// to get exactly the orders placed by one run. Returns an empty
+	// slice (no error) when no orders match.
+	ListOrdersByClientOrderIDPrefix(ctx context.Context, prefix string) ([]doraclient.Order, error)
 }
 
 // LookupAssetID resolves a DORA order book UUID to its base asset ID string

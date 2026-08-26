@@ -281,9 +281,10 @@ func (s *Strategy) dispatchLoop(
 			} else {
 				s.mu.RLock()
 				ts := s.runState.TotalSubmitted
+				filled := s.runState.TotalFilled
 				cp := chunksProcessed
 				s.mu.RUnlock()
-				chunkSize, cErr := s.computeChunkSize(numChunks, ts, cp)
+				chunkSize, cErr := s.computeChunkSize(numChunks, ts, filled, cp)
 				if cErr != nil {
 					s.log.Error("twap: compute chunk size", "err", cErr, "runID", s.runID)
 					chunkSize = baseChunkSize
@@ -304,13 +305,25 @@ func (s *Strategy) dispatchLoop(
 }
 
 // computeChunkSize returns the rebalanced chunk size for the next
-// chunk: (totalAmount - totalSubmitted) / (numChunks - chunksProcessed).
-func (s *Strategy) computeChunkSize(numChunks int, totalSubmitted decimal.Decimal, chunksProcessed int) (decimal.Decimal, error) {
+// chunk: (totalAmount - totalFilled) / (numChunks - chunksProcessed).
+// Base on TotalFilled (settled cumulative fill) rather than
+// TotalSubmitted (cumulative requested) so a partially-filled chunk
+// is NOT re-issued: TotalSubmitted includes the partial portion that
+// already settled and would over-submit. Chunks where every share was
+// cancelled or failed (fill = 0) still get rebalanced into the
+// remaining ones via the same formula.
+//
+//nolint:unparam // totalSubmitted is part of the contract — see vwap for the same rationale.
+func (s *Strategy) computeChunkSize(
+	numChunks int,
+	totalSubmitted, totalFilled decimal.Decimal,
+	chunksProcessed int,
+) (decimal.Decimal, error) {
 	remaining := numChunks - chunksProcessed
 	if remaining <= 0 {
 		return decimal.Zero, nil
 	}
-	delta, err := s.cfg.TotalAmount.Sub(totalSubmitted)
+	delta, err := s.cfg.TotalAmount.Sub(totalFilled)
 	if err != nil {
 		return decimal.Zero, err
 	}

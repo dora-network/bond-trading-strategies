@@ -103,6 +103,20 @@ type FakeMarketAPIClient struct {
 		result1 *doraclient.AccountPortfolioV2
 		result2 error
 	}
+	ListOrdersByClientOrderIDPrefixStub        func(context.Context, string) ([]doraclient.Order, error)
+	listOrdersByClientOrderIDPrefixMutex       sync.RWMutex
+	listOrdersByClientOrderIDPrefixArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+	}
+	listOrdersByClientOrderIDPrefixReturns struct {
+		result1 []doraclient.Order
+		result2 error
+	}
+	listOrdersByClientOrderIDPrefixReturnsOnCall map[int]struct {
+		result1 []doraclient.Order
+		result2 error
+	}
 	QuoteAssetIDStub        func(context.Context, string) (string, error)
 	quoteAssetIDMutex       sync.RWMutex
 	quoteAssetIDArgsForCall []struct {
@@ -517,6 +531,71 @@ func (fake *FakeMarketAPIClient) GetPortfolioV2ReturnsOnCall(i int, result1 *dor
 	}
 	fake.getPortfolioV2ReturnsOnCall[i] = struct {
 		result1 *doraclient.AccountPortfolioV2
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeMarketAPIClient) ListOrdersByClientOrderIDPrefix(arg1 context.Context, arg2 string) ([]doraclient.Order, error) {
+	fake.listOrdersByClientOrderIDPrefixMutex.Lock()
+	ret, specificReturn := fake.listOrdersByClientOrderIDPrefixReturnsOnCall[len(fake.listOrdersByClientOrderIDPrefixArgsForCall)]
+	fake.listOrdersByClientOrderIDPrefixArgsForCall = append(fake.listOrdersByClientOrderIDPrefixArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.ListOrdersByClientOrderIDPrefixStub
+	fakeReturns := fake.listOrdersByClientOrderIDPrefixReturns
+	fake.recordInvocation("ListOrdersByClientOrderIDPrefix", []interface{}{arg1, arg2})
+	fake.listOrdersByClientOrderIDPrefixMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeMarketAPIClient) ListOrdersByClientOrderIDPrefixCallCount() int {
+	fake.listOrdersByClientOrderIDPrefixMutex.RLock()
+	defer fake.listOrdersByClientOrderIDPrefixMutex.RUnlock()
+	return len(fake.listOrdersByClientOrderIDPrefixArgsForCall)
+}
+
+func (fake *FakeMarketAPIClient) ListOrdersByClientOrderIDPrefixCalls(stub func(context.Context, string) ([]doraclient.Order, error)) {
+	fake.listOrdersByClientOrderIDPrefixMutex.Lock()
+	defer fake.listOrdersByClientOrderIDPrefixMutex.Unlock()
+	fake.ListOrdersByClientOrderIDPrefixStub = stub
+}
+
+func (fake *FakeMarketAPIClient) ListOrdersByClientOrderIDPrefixArgsForCall(i int) (context.Context, string) {
+	fake.listOrdersByClientOrderIDPrefixMutex.RLock()
+	defer fake.listOrdersByClientOrderIDPrefixMutex.RUnlock()
+	argsForCall := fake.listOrdersByClientOrderIDPrefixArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeMarketAPIClient) ListOrdersByClientOrderIDPrefixReturns(result1 []doraclient.Order, result2 error) {
+	fake.listOrdersByClientOrderIDPrefixMutex.Lock()
+	defer fake.listOrdersByClientOrderIDPrefixMutex.Unlock()
+	fake.ListOrdersByClientOrderIDPrefixStub = nil
+	fake.listOrdersByClientOrderIDPrefixReturns = struct {
+		result1 []doraclient.Order
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeMarketAPIClient) ListOrdersByClientOrderIDPrefixReturnsOnCall(i int, result1 []doraclient.Order, result2 error) {
+	fake.listOrdersByClientOrderIDPrefixMutex.Lock()
+	defer fake.listOrdersByClientOrderIDPrefixMutex.Unlock()
+	fake.ListOrdersByClientOrderIDPrefixStub = nil
+	if fake.listOrdersByClientOrderIDPrefixReturnsOnCall == nil {
+		fake.listOrdersByClientOrderIDPrefixReturnsOnCall = make(map[int]struct {
+			result1 []doraclient.Order
+			result2 error
+		})
+	}
+	fake.listOrdersByClientOrderIDPrefixReturnsOnCall[i] = struct {
+		result1 []doraclient.Order
 		result2 error
 	}{result1, result2}
 }

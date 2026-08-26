@@ -70,7 +70,7 @@ func strPtrWeighted() *Strategy {
 func TestComputeBucketSize_FreshRunEven(t *testing.T) {
 	t.Parallel()
 	s := strPtrEven()
-	got, err := s.computeBucketSize(5, 0, decimal.Zero, 0)
+	got, err := s.computeBucketSize(5, 0, decimal.Zero, decimal.Zero, 0)
 	require.NoError(t, err)
 	require.Equal(t, "200", got.String())
 }
@@ -82,7 +82,7 @@ func TestComputeBucketSize_RebalanceUsesScheduleProportion(t *testing.T) {
 	// The failed/cancelled quantity is absorbed into the remaining
 	// buckets proportionally to their schedule weights.
 	s := strPtrEven()
-	got, err := s.computeBucketSize(5, 2, decimal.MustNew(200, 0), 2)
+	got, err := s.computeBucketSize(5, 2, decimal.MustNew(200, 0), decimal.MustNew(200, 0), 2)
 	require.NoError(t, err)
 	expected, err := decimal.MustNew(1600, 0).Quo(decimal.MustNew(6, 0))
 	require.NoError(t, err)
@@ -96,15 +96,15 @@ func TestComputeBucketSize_WeightedSchedule(t *testing.T) {
 	// Bucket 1: 300 * 1000 / 1000 = 300
 	// Bucket 2: 600 * 1000 / 1000 = 600
 	s := strPtrWeighted()
-	got0, err := s.computeBucketSize(3, 0, decimal.Zero, 0)
+	got0, err := s.computeBucketSize(3, 0, decimal.Zero, decimal.Zero, 0)
 	require.NoError(t, err)
 	require.Equal(t, "100", got0.String())
 
-	got1, err := s.computeBucketSize(3, 1, decimal.Zero, 0)
+	got1, err := s.computeBucketSize(3, 1, decimal.Zero, decimal.Zero, 0)
 	require.NoError(t, err)
 	require.Equal(t, "300", got1.String())
 
-	got2, err := s.computeBucketSize(3, 2, decimal.Zero, 0)
+	got2, err := s.computeBucketSize(3, 2, decimal.Zero, decimal.Zero, 0)
 	require.NoError(t, err)
 	require.Equal(t, "600", got2.String())
 }
@@ -120,11 +120,11 @@ func TestComputeBucketSize_WeightedRebalanceAbsorbsFailed(t *testing.T) {
 	// failed bucket 0 quantity is absorbed into later buckets
 	// proportionally.
 	s := strPtrWeighted()
-	got1, err := s.computeBucketSize(3, 1, decimal.MustNew(100, 0), 1)
+	got1, err := s.computeBucketSize(3, 1, decimal.MustNew(100, 0), decimal.MustNew(100, 0), 1)
 	require.NoError(t, err)
 	require.Equal(t, "300", got1.String())
 
-	got2, err := s.computeBucketSize(3, 2, decimal.MustNew(100, 0), 1)
+	got2, err := s.computeBucketSize(3, 2, decimal.MustNew(100, 0), decimal.MustNew(100, 0), 1)
 	require.NoError(t, err)
 	require.Equal(t, "600", got2.String())
 }
@@ -132,7 +132,7 @@ func TestComputeBucketSize_WeightedRebalanceAbsorbsFailed(t *testing.T) {
 func TestComputeBucketSize_NoRemaining(t *testing.T) {
 	t.Parallel()
 	s := strPtrEven()
-	got, err := s.computeBucketSize(5, 4, decimal.MustNew(1000, 0), 5)
+	got, err := s.computeBucketSize(5, 4, decimal.MustNew(1000, 0), decimal.MustNew(1000, 0), 5)
 	require.NoError(t, err)
 	require.True(t, got.IsZero())
 }
@@ -142,7 +142,7 @@ func TestComputeBucketSize_AllSubmitted(t *testing.T) {
 	// schedule [200x5], bucket 2 size with all 1000 submitted
 	// = 200 * 0 / 600 = 0.
 	s := strPtrEven()
-	got, err := s.computeBucketSize(5, 2, decimal.MustNew(1000, 0), 5)
+	got, err := s.computeBucketSize(5, 2, decimal.MustNew(1000, 0), decimal.MustNew(1000, 0), 5)
 	require.NoError(t, err)
 	require.True(t, got.IsZero())
 }
@@ -151,7 +151,7 @@ func TestComputeBucketSize_BucketOutOfRange(t *testing.T) {
 	t.Parallel()
 	s := strPtrEven()
 	// bucketIdx beyond schedule length
-	got, err := s.computeBucketSize(5, 5, decimal.Zero, 0)
+	got, err := s.computeBucketSize(5, 5, decimal.Zero, decimal.Zero, 0)
 	require.NoError(t, err)
 	require.True(t, got.IsZero())
 }

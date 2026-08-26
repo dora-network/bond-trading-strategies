@@ -32,32 +32,59 @@ func validConfig() Config {
 func TestComputeChunkSize_FreshRun(t *testing.T) {
 	t.Parallel()
 	s := &Strategy{cfg: validConfig()}
-	got, err := s.computeChunkSize(10, decimal.Zero, 0)
+	got, err := s.computeChunkSize(10, decimal.Zero, decimal.Zero, 0)
 	require.NoError(t, err)
 	require.Equal(t, "100", got.String())
 }
 
-func TestComputeChunkSize_RebalanceOnPartialFill(t *testing.T) {
+func TestComputeChunkSize_FilledSoFar(t *testing.T) {
 	t.Parallel()
 	s := &Strategy{cfg: validConfig()}
-	got, err := s.computeChunkSize(10, decimal.MustNew(500, 0), 5)
+	// 1000 total, 500 filled, 5 of 10 chunks processed. Remaining
+	// 500 / 5 remaining chunks = 100 each.
+	got, err := s.computeChunkSize(10, decimal.MustNew(500, 0), decimal.MustNew(500, 0), 5)
 	require.NoError(t, err)
 	require.Equal(t, "100", got.String())
 }
 
-func TestComputeChunkSize_AfterCancellation(t *testing.T) {
+func TestComputeChunkSize_FilledExceedsTotal(t *testing.T) {
 	t.Parallel()
 	s := &Strategy{cfg: validConfig()}
-	got, err := s.computeChunkSize(7, decimal.MustNew(1200, 0), 3)
+	// Defensive: filled > total implies double-count. Clamp to 0.
+	got, err := s.computeChunkSize(7, decimal.MustNew(1200, 0), decimal.MustNew(1200, 0), 3)
 	require.NoError(t, err)
-	// 1000 total - 1200 submitted (clamped to 0) = 0 remaining. 0/4 = 0.
 	require.True(t, got.IsZero())
+}
+
+// TestComputeChunkSize_PartialFillDoesNotReissue is the regression for
+// the under-execution bug: when a chunk requested 200 but only
+// filled 120 (TotalSubmitted 200, TotalFilled 120), the rebalance
+// must base on TotalFilled so the already-filled 120 is not
+// re-issued. Under the old TotalSubmitted base the next chunk
+// would be sized to (1000-200)/7=114.29 and over-submit by 120.
+func TestComputeChunkSize_PartialFillDoesNotReissue(t *testing.T) {
+	t.Parallel()
+	s := &Strategy{cfg: validConfig()}
+	// TotalAmount 1000, 3 of 10 chunks processed. A previous chunk
+	// was requested 200 but only filled 120 (partial). TotalSubmitted
+	// = 200, TotalFilled = 120. Next chunk must be sized off
+	// TotalFilled (1000 - 120) so the already-filled 120 is not
+	// re-issued. Under the old TotalSubmitted base the next chunk
+	// would be sized to (1000 - 200) / 7 = 114.29 and over-submit by 120.
+	got, err := s.computeChunkSize(10, decimal.MustNew(200, 0), decimal.MustNew(120, 0), 3)
+	require.NoError(t, err)
+	require.Equal(t, "125.7142857142857143", got.String(),
+		"partial-fill rebalance must base on TotalFilled (120), not TotalSubmitted (200)")
+	// Sanity: if the formula accidentally used TotalSubmitted, the
+	// result would be 114.29 — not what we want.
+	require.NotEqual(t, "114.2857142857142857", got.String(),
+		"if this matches, the rebased-to-TotalFilled fix has regressed")
 }
 
 func TestComputeChunkSize_AllSubmitted(t *testing.T) {
 	t.Parallel()
 	s := &Strategy{cfg: validConfig()}
-	got, err := s.computeChunkSize(10, decimal.MustNew(1000, 0), 10)
+	got, err := s.computeChunkSize(10, decimal.MustNew(1000, 0), decimal.MustNew(1000, 0), 10)
 	require.NoError(t, err)
 	require.True(t, got.IsZero())
 }
@@ -65,7 +92,7 @@ func TestComputeChunkSize_AllSubmitted(t *testing.T) {
 func TestComputeChunkSize_NoRemaining(t *testing.T) {
 	t.Parallel()
 	s := &Strategy{cfg: validConfig()}
-	got, err := s.computeChunkSize(10, decimal.MustNew(500, 0), 11)
+	got, err := s.computeChunkSize(10, decimal.MustNew(500, 0), decimal.MustNew(500, 0), 11)
 	require.NoError(t, err)
 	require.True(t, got.IsZero())
 }

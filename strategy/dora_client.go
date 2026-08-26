@@ -303,6 +303,41 @@ func (c *DoraClient) GetOrderFilledStatus(ctx context.Context, orderID string) (
 	return status, filledQuantity, nil
 }
 
+// ListOrdersByClientOrderIDPrefix fetches every DORA order whose
+// client_order_id starts with the given prefix. Used by execution
+// strategies on restart to import orders that were submitted to
+// DORA but never made it into the persisted run state (the
+// PlaceOrder/SaveState crash window — DORA has the order, our
+// state doesn't). DORA's listOrders treats client_order_id as a
+// prefix; for our format (<strategy>.<run_id>.<uuidv7>) the
+// strategy+run prefix yields exactly the orders placed by this run.
+//
+// Returns an empty slice (no error) when no orders match. Network
+// errors propagate so the caller can decide whether to abort the
+// restart or fall back to relying on the in-state orders alone.
+func (c *DoraClient) ListOrdersByClientOrderIDPrefix(ctx context.Context, prefix string) ([]doraclient.Order, error) {
+	if c == nil || c.client == nil {
+		return nil, errors.New("DORA client is not configured")
+	}
+	if c.apiKey == "" {
+		return nil, errors.New("API_KEY is not configured")
+	}
+	if prefix == "" {
+		return nil, errors.New("client_order_id prefix is required")
+	}
+	resp, rawResp, err := c.client.DefaultAPI.ListOrders(c.authCtx(ctx)).ClientOrderId(prefix).Execute()
+	if rawResp != nil && rawResp.Body != nil {
+		defer rawResp.Body.Close()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list orders by client_order_id prefix %q: %w", prefix, err)
+	}
+	if resp == nil || resp.Data == nil {
+		return []doraclient.Order{}, nil
+	}
+	return resp.Data, nil
+}
+
 // authCtx stamps the per-user API key on the context for DORA requests
 // that use the "apiKeyAuthHeader" auth scheme.
 func (c *DoraClient) authCtx(ctx context.Context) context.Context {

@@ -110,6 +110,15 @@ func BuildClientOrderID(strategyName string, runID uuid.UUID) string {
 	return fmt.Sprintf("%s.%s.%s", strategyName, runID, uuid.Must(uuid.NewV7()))
 }
 
+// BuildClientOrderIDPrefix returns the prefix shared by every
+// client_order_id the live run will generate, e.g.
+// "twap.<run_id>." — the trailing dot ensures only this run's
+// orders match. Used by execution strategies to list DORA orders
+// on restart (the PlaceOrder/SaveState crash-window recovery).
+func BuildClientOrderIDPrefix(strategyName string, runID uuid.UUID) string {
+	return fmt.Sprintf("%s.%s.", strategyName, runID)
+}
+
 // DecisionRecorder is the minimal interface the live strategy loop uses
 // to persist a Decision row.  It is satisfied by *http.PGDecisionStore
 // in production and by a fake in tests.  The interface lives in this

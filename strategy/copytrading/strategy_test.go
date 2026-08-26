@@ -405,6 +405,10 @@ func (f *fakeMarketAPI) GetOrderFilledStatus(_ context.Context, _ string) (strin
 	return "OPEN", decimal.Zero, nil
 }
 
+func (f *fakeMarketAPI) ListOrdersByClientOrderIDPrefix(_ context.Context, _ string) ([]doraclient.Order, error) {
+	return nil, nil
+}
+
 func (f *fakeMarketAPI) createMarketOrderCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

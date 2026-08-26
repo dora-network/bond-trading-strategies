@@ -120,11 +120,17 @@ func (s *Strategy) loadState(ctx context.Context) {
 	s.mu.Unlock()
 }
 
-// reconcilePendingOrders delegates to the shared Executor.
+// reconcilePendingOrders first imports any orders DORA has for this
+// run that the persisted state doesn't (the PlaceOrder/SaveState
+// crash window), then walks the in-state orders to update each
+// one's terminal status.
 func (s *Strategy) reconcilePendingOrders(ctx context.Context) {
 	s.mu.RLock()
 	stateCopy := s.state
 	s.mu.RUnlock()
+	// Trailing dot ensures only this run's orders match.
+	prefix := strategy.BuildClientOrderIDPrefix(StrategyType, s.runID)
+	s.exec.ImportOrphanedOrders(ctx, &stateCopy, prefix)
 	s.exec.ReconcilePendingOrders(ctx, &stateCopy, func(ctx context.Context, orderID string) (string, decimal.Decimal, error) {
 		return s.exec.Market.GetOrderFilledStatus(ctx, orderID)
 	})
@@ -180,7 +186,7 @@ func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error
 	chunksProcessed := s.state.ChunksProcessed
 	s.mu.RUnlock()
 
-	if _, err := s.computeBucketSize(numBuckets, chunksProcessed, totalSubmitted, chunksProcessed); err != nil {
+	if _, err := s.computeBucketSize(numBuckets, chunksProcessed, totalSubmitted, totalSubmitted, chunksProcessed); err != nil {
 		return fmt.Errorf("vwap: validate bucket size formula: %w", err)
 	}
 
@@ -274,11 +280,17 @@ func (s *Strategy) dispatchLoop(
 //
 //	size = schedule.Buckets[bucketIdx] * remainingQty / remainingSched
 //
-// This naturally absorbs in-flight and failed quantities into the
-// remaining buckets while preserving the historical volume profile.
+// Base remainingQty on TotalFilled (settled cumulative fill) rather
+// than TotalSubmitted (cumulative requested) so a partially-filled
+// bucket is NOT re-issued: TotalSubmitted includes the partial portion
+// that already settled and would over-submit. Failed/cancelled buckets
+// (fill = 0) still absorb into the remaining buckets proportionally
+// to their schedule weights.
+//
+//nolint:unparam // totalSubmitted is the partial-fill input; formula uses totalFilled.
 func (s *Strategy) computeBucketSize(
 	numBuckets, bucketIdx int,
-	totalSubmitted decimal.Decimal,
+	totalSubmitted, totalFilled decimal.Decimal,
 	chunksProcessed int,
 ) (decimal.Decimal, error) {
 	if bucketIdx >= numBuckets || bucketIdx < chunksProcessed {
@@ -295,7 +307,7 @@ func (s *Strategy) computeBucketSize(
 	if remainingSched.IsZero() {
 		return decimal.Zero, nil
 	}
-	remainingQty, err := s.cfg.TotalAmount.Sub(totalSubmitted)
+	remainingQty, err := s.cfg.TotalAmount.Sub(totalFilled)
 	if err != nil {
 		return decimal.Zero, err
 	}
@@ -320,14 +332,15 @@ func (s *Strategy) handleBucketTick(
 ) bool {
 	s.mu.RLock()
 	paused := s.paused
-	ts := s.state.TotalSubmitted
+	submitted := s.state.TotalSubmitted
+	filled := s.state.TotalFilled
 	cp := s.state.ChunksProcessed
 	s.mu.RUnlock()
 
 	if paused {
 		s.log.Info("vwap: skipping bucket (paused)", "runID", s.runID, "bucket", bucketIdx)
 	} else {
-		bucketSize, err := s.computeBucketSize(numBuckets, bucketIdx, ts, cp)
+		bucketSize, err := s.computeBucketSize(numBuckets, bucketIdx, submitted, filled, cp)
 		if err != nil {
 			s.log.Error("vwap: recalculate bucket size", "err", err)
 		}
