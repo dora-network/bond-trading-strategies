@@ -430,3 +430,38 @@ Non-blocking items from the round-4 16-reviewer review, grouped by area:
       documented as not persisted); MomentumConfig.initial_balance
       description states the backtest >0 rule. Breakout's own trade-row
       drift remains pre-existing/undocumented.
+
+## Post-merge follow-ups (cross-cutting, 2026-08-26)
+
+Items surfaced by the momentum round-4 review that live outside the
+momentum packages or were only noted inside resolved items. The
+momentum-scoped test debt is tracked in the round-4 section above; these
+are the cross-cutting remainders:
+
+- **Breakout `stop_loss_atr` explicit-0 rewritten to default**
+  (`strategy/http/handler.go` breakout decoder, pre-existing on
+  development) — same quirk the momentum round-4 P2 fixed: non-pointer
+  payload field makes explicit 0 indistinguishable from omitted, so a
+  client sending 0 (per breakout's own "0 disables" docs, if any)
+  silently gets the default stop distance. Fix the same way
+  (`*float64` payload field) when breakout is next touched.
+- **Exact-entry resume anchors via StateStore** — momentum's
+  `seedResumeAnchor` re-derives entryPrice/entryATR from the startup
+  price and current ATR window (approximate, documented). If exact
+  entry prices ever matter for restart-time stop placement, persist the
+  anchor via the per-run StateStore on open (twap/vwap pattern;
+  `attachStateStore` currently wires only TWAP/VWAP).
+- **Breakout trade-row OpenAPI drift** — breakout's compression_ratio /
+  entry_atr fields are undocumented on the shared TradeRecord /
+  ClosedTrade schemas, the same drift momentum just fixed with
+  oneOf'd MomentumTradeRecord / MomentumClosedTrade. Add
+  BreakoutTradeRecord / BreakoutClosedTrade schemas + oneOf the same
+  way.
+- **`notifications` WebSocket test flake (pre-existing on base)** —
+  `TestHandler_AcceptsConfiguredOriginPattern` /
+  `TestHandler_DeliversLiveEvents` intermittently fail with
+  `conn.Read: failed to get reader: use of closed network connection`
+  under full-suite parallel load; reproduced with `-parallel 1` on a
+  clean stash of the branch base, so not introduced by the momentum
+  branch. Unrelated to this merge — needs standalone investigation
+  (suspect the ws-test-server background-reader / upgrade-race class).
