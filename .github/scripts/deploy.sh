@@ -20,7 +20,7 @@ staging)
   DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-staging.dora.co,https://staging.dora.co,https://navion-paper.dora.co,https://blkbox-paper.dora.co"
   ;;
 prod)
-  DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-prod.dora.co,https://aws-bondtrader-prod.dora.co,https://dora.co"
+  DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-prod.dora.co,https://aws-bondtrader-prod.dora.co,https://dora.co,https://app.bondtrader.io"
   WS_URL="wss://api.dora.co"
   DORA_BASE_URL="https://api.dora.co"
   ;;
