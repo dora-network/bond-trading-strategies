@@ -21,8 +21,8 @@ staging)
   ;;
 prod)
   DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-prod.dora.co,https://aws-bondtrader-prod.dora.co,https://dora.co"
-  WS_URL="${WS_URL:-wss://api.dora.co}"
-  DORA_BASE_URL="${DORA_BASE_URL:-https://api.dora.co}"
+  WS_URL="wss://api.dora.co"
+  DORA_BASE_URL="https://api.dora.co"
   ;;
 *)
   # Custom/integrator domains should pass CORS_ALLOWED_ORIGINS explicitly.
