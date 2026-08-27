@@ -442,11 +442,11 @@ func listItems[T listable, S any](
 	}
 	mu.RLock()
 	filtered := filterAndSort(src, doraUserID)
-	mu.RUnlock()
 	items := make([]S, len(filtered))
 	for i, item := range filtered {
 		items[i] = extract(item)
 	}
+	mu.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -874,10 +875,7 @@ func TestHandlerListBacktests(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{
 			getUserID: func(context.Context) (string, error) {
 				return "user-test-1", nil
@@ -935,10 +933,7 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -1032,10 +1027,7 @@ func TestHandlerListRuns(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -1080,10 +1072,7 @@ func TestHandlerRejectsDuplicateOrderBookRun(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -1132,10 +1121,7 @@ func TestHandlerAllowsDifferentOrderBookRun(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -1187,10 +1173,7 @@ func TestHandlerAllowsRunAfterPreviousStopped(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -2094,6 +2077,19 @@ func performJSONRequest(t *testing.T, handler http.Handler, path string, body an
 	req.Header.Set("Authorization", "ApiKey test-key")
 	handler.ServeHTTP(rec, req)
 	return rec
+}
+
+// tickClock returns a closure suitable for strategyhttp.WithNow that
+// yields a monotonically-advancing time on every call, safe for
+// concurrent invocation by background goroutines (e.g. the completion
+// and stop-loss watchers). Each call returns start + n*step, where n is
+// the call count.
+func tickClock(start time.Time) func() time.Time {
+	var ns atomic.Int64
+	ns.Store(start.UnixNano())
+	return func() time.Time {
+		return time.Unix(0, ns.Add(int64(time.Second))).UTC()
+	}
 }
 
 type memoryRunStore struct {
