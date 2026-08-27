@@ -14,13 +14,19 @@ import (
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/authctx"
+	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
+	"github.com/dora-network/bond-trading-strategies/strategy/exec"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
+	"github.com/dora-network/bond-trading-strategies/strategy/twap"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -52,6 +58,12 @@ const (
 	defaultStopLossObserverInterval = time.Second
 )
 
+// orderUpdatesBuffer is the channel buffer size for the per-run
+// order-update event channel shared by TWAP and VWAP. 16 events
+// cover a reasonable burst of fills from a single run before the
+// run loop reads.
+const orderUpdatesBuffer = 16
+
 type Handler struct {
 	service            strategycore.Service
 	now                func() time.Time
@@ -67,22 +79,27 @@ type Handler struct {
 	// the decision that triggered it. nil disables recording; backtests
 	// never opt in and therefore never write to strategy_decisions.
 	decisionStore strategycore.DecisionRecorder
-	// decisionReader serves the read-only /v1/trading-decisions/{run_id}
+	// stateStore is used by execution strategies (TWAP) to checkpoint
+	// progress for crash recovery. nil disables persistence; the
+	// strategy runs but won't recover state across restarts.
+	stateStore strategycore.StateStore
 	// endpoint. The route is registered unconditionally in NewHandler;
 	// when decisionReader is nil the handler short-circuits to 503 so
 	// the endpoint can be deployed without wiring a reader until the
 	// operator opts in. Distinct from decisionStore (the write-side
 	// DecisionRecorder) so the read path carries no write concerns.
-	decisionReader DecisionReader
-	tradeStream    *streams.TradeStream
-	notifier       notifications.Notifier
-	orderUpdates   orderUpdatesManager // nil disables the order-update feature
-	encryptionKey  []byte              // 32-byte AES-256 key for encrypting API keys at rest
-	mux            *http.ServeMux
-	authedMux      http.Handler
-	mu             sync.RWMutex
-	backtests      map[uuid.UUID]*BacktestDetail
-	runs           map[uuid.UUID]*RunDetail
+	decisionReader       DecisionReader
+	tradeStream          *streams.TradeStream
+	historicalPriceStore breakout.HistoricalPriceStore
+	tradeHistoryStore    breakout.TradeHistoryStore
+	notifier             notifications.Notifier
+	orderUpdates         orderUpdatesManager // nil disables the order-update feature
+	encryptionKey        []byte              // 32-byte AES-256 key for encrypting API keys at rest
+	mux                  *http.ServeMux
+	authedMux            http.Handler
+	mu                   sync.RWMutex
+	backtests            map[uuid.UUID]*BacktestDetail
+	runs                 map[uuid.UUID]*RunDetail
 	// runningStrategies maps a live run id to the strategy instance that
 	// was started for it, so the stop-loss observer can query the
 	// strategy's recorded trigger. Populated in createRun and
@@ -91,7 +108,8 @@ type Handler struct {
 	runningStrategies map[uuid.UUID]strategycore.Strategy
 	// stopLossObservers cancels the per-run observer goroutine. Protected
 	// by mu.
-	stopLossObservers map[uuid.UUID]context.CancelFunc
+	stopLossObservers     map[uuid.UUID]context.CancelFunc
+	runCompletionWatchers map[uuid.UUID]context.CancelFunc
 	// stopLossObserverInterval is the polling cadence for the stop-loss
 	// observer. Defaults to 1s; overridable for tests via
 	// WithStopLossObserverInterval.
@@ -171,10 +189,11 @@ type DORAUserSummary struct {
 
 // CopyTraderSummary is a single entry in the list-copy-traders response.
 // The id is the DORA user UUID and matches the `followed_trader` field
-// accepted by CopyTradingConfig. Names and other identifying information are
-// intentionally omitted for user anonymity.
+// accepted by CopyTradingConfig. user_name is the DORA-registered handle
+// surfaced for display in copy-trading run configuration UIs.
 type CopyTraderSummary struct {
-	ID string `json:"id"`
+	ID       string `json:"id"`
+	UserName string `json:"user_name"`
 }
 
 type AssetInfo struct {
@@ -345,6 +364,22 @@ func (d *BacktestDetail) GetCreatedAt() time.Time { return d.CreatedAt }
 func (d *RunDetail) GetDORAUserID() string   { return d.DORAUserID }
 func (d *RunDetail) GetCreatedAt() time.Time { return d.CreatedAt }
 
+// snapshot returns a value-copy of d that is safe to JSON-marshal
+// without contending with concurrent mutations by the completion watcher.
+// ponytail: shallow copy + a fresh *time.Time for StoppedAt; Config bytes
+// are immutable post-create so we share the slice.
+func (d *RunDetail) snapshot() RunDetail {
+	cp := *d
+	if d.StoppedAt != nil {
+		t := *d.StoppedAt
+		cp.StoppedAt = &t
+	}
+	if d.Config != nil {
+		cp.Config = append(json.RawMessage(nil), d.Config...)
+	}
+	return cp
+}
+
 // orderBookIDCfg is a minimal struct for extracting order_book_id from strategy config JSON.
 type orderBookIDCfg struct {
 	OrderBookID string `json:"order_book_id"`
@@ -407,11 +442,11 @@ func listItems[T listable, S any](
 	}
 	mu.RLock()
 	filtered := filterAndSort(src, doraUserID)
-	mu.RUnlock()
 	items := make([]S, len(filtered))
 	for i, item := range filtered {
 		items[i] = extract(item)
 	}
+	mu.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -475,6 +510,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		runs:                     make(map[uuid.UUID]*RunDetail),
 		runningStrategies:        make(map[uuid.UUID]strategycore.Strategy),
 		stopLossObservers:        make(map[uuid.UUID]context.CancelFunc),
+		runCompletionWatchers:    make(map[uuid.UUID]context.CancelFunc),
 		stopLossObserverInterval: defaultStopLossObserverInterval,
 		orderbookCache:           make(map[string]DORAOrderBookSummary),
 		assetCache:               make(map[string]AssetInfo),
@@ -486,7 +522,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		h.log = slog.Default()
 	}
 	if h.strategies == nil {
-		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.log)
+		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.historicalPriceStore, h.tradeHistoryStore, h.log)
 	}
 
 	h.mux = http.NewServeMux()
@@ -565,6 +601,15 @@ func WithDecisionReader(reader DecisionReader) func(*Handler) {
 	}
 }
 
+// WithStateStore sets the per-run state checkpoint store used by
+// execution strategies (TWAP) to persist progress for crash recovery.
+// The same *PGRunStore satisfies both RunStore and strategy.StateStore.
+func WithStateStore(store strategycore.StateStore) func(*Handler) {
+	return func(h *Handler) {
+		h.stateStore = store
+	}
+}
+
 // WithTradesHistoryStore sets the store used by the copy-trading
 // backtest to read the followed trader's trade history from the
 // trades_history Postgres table.
@@ -578,6 +623,26 @@ func WithTradesHistoryStore(store *copytrading.PGTradesHistoryStore) func(*Handl
 func WithTradeStream(ts *streams.TradeStream) func(*Handler) {
 	return func(h *Handler) {
 		h.tradeStream = ts
+	}
+}
+
+// WithHistoricalPriceStore wires a breakout backtest data source so
+// Strategy.Backtest can read candles_history. May be nil; the
+// breakout strategy returns an error from Backtest when no store is
+// configured.
+func WithHistoricalPriceStore(s breakout.HistoricalPriceStore) func(*Handler) {
+	return func(h *Handler) {
+		h.historicalPriceStore = s
+	}
+}
+
+// WithTradeHistoryStore wires a breakout backtest trade source so the
+// OBV (On-Balance Volume) filter can be evaluated in backtests when
+// OBVWindow > 0. Reads from trades_history. May be nil; the backtester
+// simply skips OBV accumulation when no store is configured.
+func WithTradeHistoryStore(s breakout.TradeHistoryStore) func(*Handler) {
+	return func(h *Handler) {
+		h.tradeHistoryStore = s
 	}
 }
 
@@ -680,7 +745,7 @@ func (h *Handler) handleTenors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	supported := meanreversion.SupportedBenchmarkTenors()
+	supported := fred.SupportedBenchmarkTenors()
 	items := make([]TenorSummary, 0, len(supported))
 	for _, tenor := range supported {
 		items = append(items, TenorSummary{
@@ -727,8 +792,8 @@ func (h *Handler) handleDORAUser(w http.ResponseWriter, r *http.Request) {
 // handleCopyTraders returns the list of traders available to be followed by
 // copy-trading runs. The list is sourced from DORA's dedicated
 // `GET /v1/user/copy-traders` endpoint, which is server-side filtered to users
-// with copy trading enabled. Only the user IDs are exposed; names and other
-// identifying information are intentionally omitted for user anonymity.
+// with copy trading enabled. Each entry exposes the user UUID (for use as
+// `followed_trader` in CopyTradingConfig) and the DORA-registered user_name.
 func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeMethodNotAllowed(w, http.MethodGet)
@@ -739,20 +804,20 @@ func (h *Handler) handleCopyTraders(w http.ResponseWriter, r *http.Request) {
 	if client == nil {
 		client = NewDORAClient()
 	}
-	ids, err := client.ListCopyTraders(r.Context())
+	traders, err := client.ListCopyTraders(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list copy traders: %v", err))
 		return
 	}
 
-	// `make(..., 0, len(ids))` is required, not `var items []CopyTraderSummary`:
+	// `make(..., 0, len(traders))` is required, not `var items []CopyTraderSummary`:
 	// when DORA returns no copy traders, the live client returns `nil`, and
 	// writeJSON serialises a nil slice as `"items": null`. The spec guarantees
 	// `"items": []` for empty results, so the handler must produce a non-nil
 	// empty slice explicitly.
-	items := make([]CopyTraderSummary, 0, len(ids))
-	for _, id := range ids {
-		items = append(items, CopyTraderSummary{ID: id})
+	items := make([]CopyTraderSummary, 0, len(traders))
+	for _, t := range traders {
+		items = append(items, CopyTraderSummary{ID: t.UserID, UserName: t.UserName})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -909,12 +974,11 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	// Inject the user's API key into the strategy so it can authenticate
 	// with DORA when resolving the asset ID for the order book.
 	info, _ := authctx.AuthInfoFromContext(r.Context())
-	if info != nil && info.APIKey != "" {
-		if withClient, ok := strat.(*meanreversion.Strategy); ok {
-			withClientOpts := meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))
-			withClientOpts(withClient)
-		}
+	var apiKey string
+	if info != nil {
+		apiKey = info.APIKey
 	}
+	h.applyUserAPIKey(strat, apiKey)
 
 	resultCh, err := h.service.RunBacktest(r.Context(), id, strat, req.Start, req.End)
 	if err != nil {
@@ -959,6 +1023,7 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, detail)
 }
 
+//nolint:funlen // 5 strategy result cases; consider a map-based dispatcher in a follow-up
 func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.BacktestResult, batcher *BatchingBacktestWriter) {
 	result, ok := <-resultCh
 	if !ok {
@@ -997,6 +1062,30 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 	case copytrading.BacktestResult:
 		detail.Status = "completed"
 		raw, err := newCopyTradingBacktestResult(r)
+		if err != nil {
+			detail.Status = "failed"
+			detail.Error = err.Error()
+			evtType = notifications.EventBacktestFailed
+			evtErr = err.Error()
+			break
+		}
+		detail.Result = raw
+		evtType = notifications.EventBacktestCompleted
+	case breakout.BacktestResult:
+		detail.Status = "completed"
+		raw, err := newBreakoutBacktestResult(r)
+		if err != nil {
+			detail.Status = "failed"
+			detail.Error = err.Error()
+			evtType = notifications.EventBacktestFailed
+			evtErr = err.Error()
+			break
+		}
+		detail.Result = raw
+		evtType = notifications.EventBacktestCompleted
+	case momentum.BacktestResult:
+		detail.Status = "completed"
+		raw, err := newMomentumBacktestResult(r)
 		if err != nil {
 			detail.Status = "failed"
 			detail.Error = err.Error()
@@ -1099,14 +1188,8 @@ func (h *Handler) listBacktests(w http.ResponseWriter, r *http.Request) {
 	}
 
 	total := len(items)
-	start := (page - 1) * limit
-	if start > total {
-		start = total
-	}
-	end := start + limit
-	if end > total {
-		end = total
-	}
+	start := min((page-1)*limit, total)
+	end := min(start+limit, total)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items[start:end],
@@ -1356,10 +1439,7 @@ func parsePagination(r *http.Request) (page, limit int) {
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if val, err := strconv.Atoi(l); err == nil && val > 0 {
-			limit = val
-			if limit > maxPaginationLimit {
-				limit = maxPaginationLimit
-			}
+			limit = min(val, maxPaginationLimit)
 		}
 	}
 	return page, limit
@@ -1511,19 +1591,17 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 
 	// Inject the user's API key into the strategy so it can authenticate with DORA.
 	info, _ := authctx.AuthInfoFromContext(r.Context())
-	if info != nil && info.APIKey != "" {
-		switch withClient := strat.(type) {
-		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(info.APIKey))(withClient)
-		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(info.APIKey))(withClient)
-		}
+	var apiKey string
+	if info != nil {
+		apiKey = info.APIKey
 	}
+	h.applyUserAPIKey(strat, apiKey)
 
 	// Attach the per-run decision recorder so every successful live
 	// market order is written to strategy_decisions. nil disables
 	// recording; the helper is a no-op for unknown strategy types.
 	h.attachDecisionStore(strat)
+	h.attachStateStore(strat)
 
 	var encryptedAPIKey []byte
 	if info != nil && info.APIKey != "" && len(h.encryptionKey) > 0 {
@@ -1568,7 +1646,10 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.startOrderUpdater(detail, strat)
+
 	h.startStopLossObserver(detail, strat)
+	h.startCompletionWatcher(detail.ID)
 
 	h.publishEvent(r.Context(), notifications.Event{
 		Type:      notifications.EventRunStarted,
@@ -1578,7 +1659,10 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		Payload:   map[string]any{"strategy_type": detail.StrategyType},
 	})
 
-	writeJSON(w, http.StatusCreated, detail)
+	h.mu.RLock()
+	snap := detail.snapshot()
+	h.mu.RUnlock()
+	writeJSON(w, http.StatusCreated, snap)
 }
 
 func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
@@ -1643,6 +1727,9 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 		detail.StoppedAt = &stoppedAt
 	}
 	if cancel, ok := h.stopLossObservers[id]; ok {
+		cancel()
+	}
+	if cancel, ok := h.runCompletionWatchers[id]; ok {
 		cancel()
 	}
 	h.mu.Unlock()
@@ -1806,6 +1893,14 @@ func (h *Handler) RestoreRuns(ctx context.Context) error {
 		if detail.Status != "running" {
 			continue
 		}
+		// Don't relaunch runs whose execution window has already
+		// passed — the strategy would only skip every bucket on
+		// startup. Mark them completed and publish EventRunCompleted
+		// so the client isn't left polling.
+		if h.runWindowExpired(detail) {
+			h.expireRun(ctx, detail)
+			continue
+		}
 		h.log.Info(
 			"resuming run",
 			"run_id", detail.ID,
@@ -1857,16 +1952,12 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		if err2 != nil {
 			return fmt.Errorf("decrypt api key for run %s: %w", detail.ID, err2)
 		}
-		switch withClient := strat.(type) {
-		case *meanreversion.Strategy:
-			meanreversion.WithMarketAPIClient(meanreversion.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		case *copytrading.Strategy:
-			copytrading.WithMarketAPIClient(copytrading.NewDoraClientWithKey(string(apiKeyDecrypted)))(withClient)
-		}
+		h.applyUserAPIKey(strat, string(apiKeyDecrypted))
 	}
 
 	// Attach the per-run decision recorder. nil disables recording.
 	h.attachDecisionStore(strat)
+	h.attachStateStore(strat)
 
 	// Seed the in-memory decision counter from the DB frontier so a
 	// resumed run (e.g. after a server restart) doesn't re-use seqs
@@ -1883,10 +1974,18 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 				s.SetDecisionSeq(maxSeq)
 			case *copytrading.Strategy:
 				s.SetDecisionSeq(maxSeq)
+			case *breakout.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *momentum.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *twap.Strategy:
+				s.SetDecisionSeq(maxSeq)
+			case *vwap.Strategy:
+				s.SetDecisionSeq(maxSeq)
 			}
 		}
 	}
-
+	h.startOrderUpdater(detail, strat)
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}
@@ -1896,7 +1995,154 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		}
 	}
 	h.startStopLossObserver(detail, strat)
+	h.startCompletionWatcher(detail.ID)
 	return nil
+}
+
+// startOrderUpdater spawns a per-run goroutine that subscribes to the
+// notifications bus for the run's DORA user, filters events for this
+// run, and forwards OrderFillEvents to the strategy's updates
+// channel. Supports both execution strategies:
+//
+//   - *twap.Strategy forwards via SetOrderUpdatesChannel(<-chan OrderFillEvent).
+//   - *vwap.Strategy forwards via SetOrderUpdatesChannel(<-chan OrderFillEvent).
+//
+// Both strategies use the same OrderFillEvent shape (it's a type
+// alias of exec.OrderFillEvent), so the parsed event value is
+// directly assignable to either channel. No-ops when the strategy
+// type is not one of the execution strategies, when h.notifier is
+// nil, or when the run has no DORA user (it was created without
+// one and will not receive DORA order events).
+func (h *Handler) startOrderUpdater(detail *RunDetail, strat strategycore.Strategy) {
+	if h.notifier == nil || detail.DORAUserID == "" {
+		return
+	}
+	switch s := strat.(type) {
+	case *twap.Strategy:
+		c := make(chan twap.OrderFillEvent, orderUpdatesBuffer)
+		s.SetOrderUpdatesChannel(c)
+		h.runOrderUpdater(detail, func(ctx context.Context, evt twap.OrderFillEvent) error {
+			select {
+			case c <- evt:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	case *vwap.Strategy:
+		c := make(chan vwap.OrderFillEvent, orderUpdatesBuffer)
+		s.SetOrderUpdatesChannel(c)
+		h.runOrderUpdater(detail, func(ctx context.Context, evt vwap.OrderFillEvent) error {
+			select {
+			case c <- evt:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	default:
+		return
+	}
+}
+
+// runOrderUpdater subscribes to the notifications bus for the run's
+// DORA user, filters events for this run, and forwards each parsed
+// OrderFillEvent to the strategy via the supplied callback. The
+// callback receives a context derived from h.service.BaseContext()
+// (or context.Background if none is configured). Closing the
+// callback's channel is the strategy's responsibility; runOrderUpdater
+// returns when the context is cancelled or the subscription ends.
+func (h *Handler) runOrderUpdater(detail *RunDetail, forward func(ctx context.Context, evt exec.OrderFillEvent) error) {
+	parentCtx := context.Background()
+	if h.service != nil {
+		parentCtx = h.service.BaseContext()
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	h.mu.Lock()
+	h.stopLossObservers[detail.ID] = cancel
+	h.mu.Unlock()
+
+	sub, err := h.notifier.Subscribe(ctx, detail.DORAUserID)
+	if err != nil {
+		slog.Error("order updates: subscribe failed",
+			"strategy_type", detail.StrategyType,
+			"run_id", detail.ID, "err", err)
+		return
+	}
+	defer func() {
+		if closer, ok := sub.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-sub.Events():
+			if !ok {
+				return
+			}
+			if evt.Type != notifications.EventOrderUpdate {
+				continue
+			}
+			if evt.RunID != detail.ID.String() {
+				continue
+			}
+			payload, _ := evt.Payload.(map[string]any)
+			if payload == nil {
+				continue
+			}
+			parsed, perr := parseOrderFillEvent(payload)
+			if perr != nil {
+				slog.Debug("order updates: skip event (missing fields)",
+					"run_id", detail.ID, "err", perr)
+				continue
+			}
+			if err := forward(ctx, parsed); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// parseOrderFillEvent extracts the TWAP fields from a DORA order
+// update event payload. The payload is a map[string]any decoded from
+// the notifications bus.
+func parseOrderFillEvent(payload map[string]any) (twap.OrderFillEvent, error) {
+	clientOrderID, _ := payload["client_order_id"].(string)
+	if clientOrderID == "" {
+		return twap.OrderFillEvent{}, fmt.Errorf("missing client_order_id")
+	}
+	status, _ := payload["status"].(string)
+	if status == "" {
+		return twap.OrderFillEvent{}, fmt.Errorf("missing status")
+	}
+	filledQty, err := parseDecimalField(payload["filled_quantity"])
+	if err != nil {
+		return twap.OrderFillEvent{}, fmt.Errorf("parse filled_quantity: %w", err)
+	}
+	return twap.OrderFillEvent{
+		ClientOrderID:  clientOrderID,
+		Status:         status,
+		FilledQuantity: filledQty,
+	}, nil
+}
+
+// parseDecimalField extracts a decimal value from a payload field that
+// may be a string or a number.
+func parseDecimalField(v any) (decimal.Decimal, error) {
+	switch x := v.(type) {
+	case string:
+		return decimal.Parse(x)
+	case float64:
+		return decimal.NewFromFloat64(x)
+	case nil:
+		return decimal.Zero, nil
+	default:
+		return decimal.Zero, fmt.Errorf("unsupported type %T", v)
+	}
 }
 
 func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strategycore.Strategy) (uuid.UUID, error) {
@@ -1912,6 +2158,54 @@ func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strateg
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// startCompletionWatcher spawns a per-run goroutine that fires
+// EventRunCompleted when the strategy's run loop exits naturally
+// (chunks exhausted, end_time elapsed, or skipped buckets consumed).
+// Distinct from startStopLossObserver which is a no-op for strategies
+// without stop-loss semantics — this runs unconditionally so every
+// execution strategy's natural completion is observable.
+func (h *Handler) startCompletionWatcher(id uuid.UUID) {
+	// ponytail: pass id, not *RunDetail. The goroutine below outlives
+	// the createRun handler and must not race with JSON marshalling of
+	// the same *RunDetail pointer that createRun wrote to the response.
+	parent := context.Background()
+	if h.service != nil {
+		if bc := h.service.BaseContext(); bc != nil {
+			parent = bc
+		}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	h.mu.Lock()
+	h.runCompletionWatchers[id] = cancel
+	h.runningStrategies[id] = nil // ensure map entry exists
+	h.mu.Unlock()
+	go func() {
+		defer cancel()
+		defer func() {
+			h.mu.Lock()
+			delete(h.runCompletionWatchers, id)
+			h.mu.Unlock()
+		}()
+		interval := h.stopLossObserverInterval
+		if interval <= 0 {
+			interval = defaultStopLossObserverInterval
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !h.runIsActive(id) {
+					h.maybePublishNaturalCompletion(ctx, id)
+					return
+				}
+			}
+		}
+	}()
 }
 
 // startStopLossObserver records strat in runningStrategies and spawns a
@@ -1963,6 +2257,7 @@ func (h *Handler) runStopLossObserver(ctx context.Context, detail *RunDetail, ob
 			return
 		case <-ticker.C:
 			if !h.runIsActive(detail.ID) {
+				h.maybePublishNaturalCompletion(ctx, detail.ID)
 				return
 			}
 			z, pnl, triggered := obs.LastStopLossTrigger()
@@ -1980,17 +2275,101 @@ func (h *Handler) runStopLossObserver(ctx context.Context, detail *RunDetail, ob
 	}
 }
 
-// runIsActive reports whether the run is still tracked in h.runs with
-// status "running". The observer uses this to exit when the run was
-// stopped or completed by some other path.
+// runIsActive reports whether the strategy's run goroutine for this
+// id is still alive by querying the Service. The Service deletes its
+// entry when strategy.Run returns, so this returns false once the run
+// naturally ends. The observer uses this to fire
+// maybePublishNaturalCompletion. We prefer this over checking
+// h.runningStrategies because the Handler's map is only cleaned up
+// when the observer goroutine exits — a chicken-and-egg deadlock
+// prevented natural-completion detection before.
 func (h *Handler) runIsActive(id uuid.UUID) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	detail, ok := h.runs[id]
-	if !ok {
+	if h.service == nil {
 		return false
 	}
-	return detail.Status == "running"
+	return h.service.IsRunActive(id)
+}
+
+// maybePublishNaturalCompletion publishes EventRunCompleted if the run
+// was active one tick ago but isn't now, and the status is still
+// "running" — that combination means the strategy's run loop
+// returned nil naturally (chunks exhausted, end_time elapsed, or all
+// skipped consumed) without going through stopRun. The observer
+// picks this up once per run. The status is also flipped to
+// "completed" so runIsActive returns false and the public status
+func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, id uuid.UUID) {
+	h.mu.Lock()
+	d, ok := h.runs[id]
+	if !ok || d.Status != "running" {
+		h.mu.Unlock()
+		return
+	}
+	d.Status = "completed"
+	d.UpdatedAt = h.now().UTC()
+	d.StoppedAt = &d.UpdatedAt
+	userID := d.DORAUserID
+	runID := id.String()
+	if err := h.saveRun(ctx, d); err != nil {
+		slog.Error("twap: save completed run", "err", err, "run_id", runID)
+	}
+	h.mu.Unlock()
+
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunCompleted,
+		UserID:    userID,
+		RunID:     runID,
+		Timestamp: h.now().UTC(),
+	})
+}
+
+// runWindowExpired returns true if the run's execution window has
+// already passed. Reads end_time out of the persisted config JSON,
+// which is the canonical source of truth (RunDetail does not expose
+// end_time directly).
+func (h *Handler) runWindowExpired(detail *RunDetail) bool {
+	var cfg struct {
+		EndTime time.Time `json:"end_time"`
+	}
+	if err := json.Unmarshal(detail.Config, &cfg); err != nil {
+		return false
+	}
+	if cfg.EndTime.IsZero() {
+		return false
+	}
+	return h.now().UTC().After(cfg.EndTime)
+}
+
+// expireRun marks the run as completed in the DB and publishes
+// EventRunCompleted. Called by RestoreRuns when a run with status
+// "running" is found past its end_time — we don't want to relaunch
+// a finished run because the strategy would only skip every chunk
+// at startup.
+func (h *Handler) expireRun(ctx context.Context, detail *RunDetail) {
+	h.log.Info(
+		"run expired during restart, marking completed",
+		"run_id", detail.ID,
+		"strategy_type", detail.StrategyType,
+	)
+	now := h.now().UTC()
+	userID := ""
+	runIDStr := detail.ID.String()
+	h.mu.Lock()
+	if d, ok := h.runs[detail.ID]; ok {
+		d.Status = "completed"
+		d.UpdatedAt = now
+		d.StoppedAt = &now
+		userID = d.DORAUserID
+		if err := h.saveRun(ctx, d); err != nil {
+			slog.Error("save expired run", "err", err, "run_id", runIDStr)
+		}
+	}
+	h.mu.Unlock()
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunCompleted,
+		UserID:    userID,
+		RunID:     runIDStr,
+		Timestamp: now,
+	})
 }
 
 func (h *Handler) resolveDORAUserID(ctx context.Context) (string, error) {
@@ -2075,6 +2454,56 @@ func (h *Handler) attachDecisionStore(strat strategycore.Strategy) {
 		meanreversion.WithDecisionStore(h.decisionStore)(s)
 	case *copytrading.Strategy:
 		copytrading.WithDecisionStore(h.decisionStore)(s)
+	case *breakout.Strategy:
+		breakout.WithDecisionStore(h.decisionStore)(s)
+	case *momentum.Strategy:
+		momentum.WithDecisionStore(h.decisionStore)(s)
+	case *twap.Strategy:
+		twap.WithDecisionStore(h.decisionStore)(s)
+	case *vwap.Strategy:
+		vwap.WithDecisionStore(h.decisionStore)(s)
+	}
+}
+
+// applyUserAPIKey injects the per-request DORA API key into the
+// strategy so it can authenticate against DORA with the caller's
+// credentials instead of the server-global key. No-op when key is
+// empty. Used by createBacktest, createRun, and resumePersistedRun
+// to fold the type switch into a single helper.
+func (h *Handler) applyUserAPIKey(strat strategycore.Strategy, apiKey string) {
+	if apiKey == "" {
+		return
+	}
+	client := strategycore.NewDoraClientWithKey(apiKey)
+	switch s := strat.(type) {
+	case *meanreversion.Strategy:
+		meanreversion.WithMarketAPIClient(client)(s)
+	case *copytrading.Strategy:
+		copytrading.WithMarketAPIClient(client)(s)
+	case *breakout.Strategy:
+		breakout.WithMarketAPIClient(client)(s)
+	case *momentum.Strategy:
+		momentum.WithMarketAPIClient(client)(s)
+	case *twap.Strategy:
+		twap.WithMarketAPIClient(client)(s)
+	case *vwap.Strategy:
+		vwap.WithMarketAPIClient(client)(s)
+	}
+}
+
+// attachStateStore wires the handler's configured StateStore into a
+// freshly-built strategy so the live run loop checkpoints progress for
+// crash recovery. Currently only TWAP uses it; no-op for other types
+// or when the handler has no store configured.
+func (h *Handler) attachStateStore(strat strategycore.Strategy) {
+	if h.stateStore == nil {
+		return
+	}
+	if s, ok := strat.(*twap.Strategy); ok {
+		twap.WithStateStore(h.stateStore)(s)
+	}
+	if s, ok := strat.(*vwap.Strategy); ok {
+		vwap.WithStateStore(h.stateStore)(s)
 	}
 }
 
@@ -2082,11 +2511,17 @@ func defaultStrategies(
 	pricesHandler *prices.Handler,
 	tradesHistoryStore *copytrading.PGTradesHistoryStore,
 	tradeStream *streams.TradeStream,
+	historicalPriceStore breakout.HistoricalPriceStore,
+	tradeHistoryStore breakout.TradeHistoryStore,
 	log *slog.Logger,
 ) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
 		newMeanReversionDefinition(pricesHandler, log),
+		newTWAPDefinition(log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
+		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, tradeHistoryStore, log),
+		newVWAPDefinition(tradeHistoryStore, log),
+		newMomentumDefinition(pricesHandler, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2194,6 +2629,139 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 	}
 }
 
+func newTWAPDefinition(log *slog.Logger) StrategyDefinition {
+	defaults := twap.DefaultConfig()
+	return StrategyDefinition{
+		Type:             "twap",
+		Status:           strategyStatusAvailable,
+		Description:      "Time-weighted average price execution strategy for a single order book.",
+		SupportsRun:      true,
+		SupportsBacktest: false,
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "order_book_id",
+				Type:        "string(uuid)",
+				Description: "Order book UUID where orders will be placed.",
+				Required:    true,
+			},
+			{
+				Name:        "total_amount",
+				Type:        "number",
+				Description: "Total quantity to trade across the execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "side",
+				Type:        "string",
+				Description: "Trade side: 'buy' or 'sell'.",
+				Required:    true,
+			},
+			{
+				Name:        "start_time",
+				Type:        "string",
+				Description: "ISO 8601 start time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "end_time",
+				Type:        "string",
+				Description: "ISO 8601 end time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "interval_seconds",
+				Type:        "number",
+				Description: "Time between each chunk order. Default 300 (5 minutes).",
+				Required:    false,
+				Default:     defaults.IntervalSeconds,
+			},
+		},
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			cfg, normalised, err := decodeTWAPConfig(raw)
+			if err != nil {
+				return nil, nil, err
+			}
+			return normalised, twap.New(cfg, log), nil
+		},
+	}
+}
+
+func newVWAPDefinition(tradeHistoryStore breakout.TradeHistoryStore, log *slog.Logger) StrategyDefinition {
+	defaults := vwap.DefaultConfig()
+	return StrategyDefinition{
+		Type:             "vwap",
+		Status:           strategyStatusAvailable,
+		Description:      "Volume-weighted average price execution strategy. Bucket schedule derived from historical trade volume.",
+		SupportsRun:      true,
+		SupportsBacktest: false,
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "order_book_id",
+				Type:        "string(uuid)",
+				Description: "Order book UUID where orders will be placed.",
+				Required:    true,
+			},
+			{
+				Name:        "total_amount",
+				Type:        "number",
+				Description: "Total quantity to trade across the execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "side",
+				Type:        "string",
+				Description: "Trade side: 'buy' or 'sell'.",
+				Required:    true,
+			},
+			{
+				Name:        "start_time",
+				Type:        "string",
+				Description: "ISO 8601 start time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "end_time",
+				Type:        "string",
+				Description: "ISO 8601 end time for execution window.",
+				Required:    true,
+			},
+			{
+				Name:        "window_days",
+				Type:        "integer",
+				Description: "Days of historical trade data used for ADV buckets. Default 30.",
+				Required:    false,
+				Default:     defaults.WindowDays,
+			},
+			{
+				Name:        "bucket_minutes",
+				Type:        "integer",
+				Description: "Granularity of each VWAP bucket. Default 5.",
+				Required:    false,
+				Default:     defaults.BucketMinutes,
+			},
+		},
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			cfg, normalised, err := decodeVWAPConfig(raw)
+			if err != nil {
+				return nil, nil, err
+			}
+			s := vwap.New(cfg, log)
+			if tradeHistoryStore != nil {
+				vwap.WithTradeHistoryStore(tradeHistoryStore)(s)
+			}
+			return normalised, s, nil
+		},
+	}
+}
+
 func newCopyTradingDefinition(tradesHistoryStore *copytrading.PGTradesHistoryStore, tradeStream *streams.TradeStream) StrategyDefinition {
 	return StrategyDefinition{
 		Type:        "copytrading",
@@ -2280,6 +2848,671 @@ type meanReversionConfigPayload struct {
 	Tenor           string   `json:"tenor,omitempty"`
 	InitialBalance  *float64 `json:"initial_balance,omitempty"`
 	Leverage        *float64 `json:"leverage,omitempty"`
+}
+
+type breakoutConfigPayload struct {
+	ShortVolWindow       int      `json:"short_vol_window"`
+	LongVolWindow        int      `json:"long_vol_window"`
+	CompressionThreshold float64  `json:"compression_threshold"`
+	ATRWindow            int      `json:"atr_window"`
+	BreakoutATRMultiple  float64  `json:"breakout_atr_multiple"`
+	ConfirmationBars     int      `json:"confirmation_bars"`
+	StopLossATR          *float64 `json:"stop_loss_atr,omitempty"`
+	TakeProfitATR        *float64 `json:"take_profit_atr,omitempty"`
+	MinLongVolFloor      float64  `json:"min_long_vol_floor"`
+
+	OBVTrendThreshold float64 `json:"obv_trend_threshold"`
+	OBVWindow         int     `json:"obv_window"`
+	OrderBookID       string  `json:"order_book_id,omitempty"`
+
+	InitialBalance *float64 `json:"initial_balance,omitempty"`
+	Leverage       *float64 `json:"leverage,omitempty"`
+}
+
+type momentumConfigPayload struct {
+	SignalSource    string   `json:"signal_source"`
+	FastWindow      *int     `json:"fast_window,omitempty"`
+	SlowWindow      *int     `json:"slow_window,omitempty"`
+	ATRWindow       *int     `json:"atr_window,omitempty"`
+	StopLossATR     *float64 `json:"stop_loss_atr,omitempty"`
+	TakeProfitATR   *float64 `json:"take_profit_atr,omitempty"`
+	MinOrderSize    float64  `json:"min_order_size"`
+	MaxOrderSize    float64  `json:"max_order_size"`
+	MaxPositionSize *float64 `json:"max_position_size,omitempty"`
+	Tenor           string   `json:"tenor,omitempty"`
+	OrderBookID     string   `json:"order_book_id,omitempty"`
+
+	InitialBalance *float64 `json:"initial_balance,omitempty"`
+	Leverage       *float64 `json:"leverage,omitempty"`
+}
+
+//nolint:funlen // strategy definition with 12 config fields
+func newBreakoutDefinition(
+	pricesHandler *prices.Handler,
+	tradeStream *streams.TradeStream,
+	historicalStore breakout.HistoricalPriceStore,
+	tradeHistoryStore breakout.TradeHistoryStore,
+	log *slog.Logger,
+) StrategyDefinition {
+	defaults := breakout.DefaultConfig()
+	return StrategyDefinition{
+		Type:   breakout.StrategyType,
+		Status: strategyStatusAvailable,
+		Description: "Volatility-compression / price-breakout strategy. Enters when short-window price volatility drops below a " +
+			"threshold of long-window volatility, then a close breaks above (or below) a k·ATR trigger band.",
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "short_vol_window",
+				Type:        "integer",
+				Description: "Short-window price-volatility observation count. Must be at least 2.",
+				Required:    false,
+				Default:     defaults.ShortVolWindow,
+			},
+			{
+				Name:        "long_vol_window",
+				Type:        "integer",
+				Description: "Long-window price-volatility observation count. Must be greater than short_vol_window.",
+				Required:    false,
+				Default:     defaults.LongVolWindow,
+			},
+			{
+				Name:        "compression_threshold",
+				Type:        "number",
+				Description: "ShortVol/LongVol ratio below which the strategy arms for a breakout. Must be in (0, 1].",
+				Required:    false,
+				Default:     mustFloat64(defaults.CompressionThreshold),
+			},
+			{
+				Name:        "atr_window",
+				Type:        "integer",
+				Description: "Rolling-mean window for ATR (mean absolute price diff). Must be at least 2.",
+				Required:    false,
+				Default:     defaults.ATRWindow,
+			},
+			{
+				Name:        "breakout_atr_multiple",
+				Type:        "number",
+				Description: "Number of ATR units above/below the most recent close that defines the breakout trigger. Must be non-negative.",
+				Required:    false,
+				Default:     mustFloat64(defaults.BreakoutATRMultiple),
+			},
+			{
+				Name: "confirmation_bars",
+				Type: "integer",
+				Description: "Consecutive closes beyond the trigger band required to fire. " +
+					"Calibrated for a continuously trading bond market (typical 5-30; min 1).",
+				Required: false,
+				Default:  defaults.ConfirmationBars,
+			},
+			{
+				Name:        "stop_loss_atr",
+				Type:        "number",
+				Description: "Stop-loss distance in ATR units. Set to 0 to disable. Mirrored in the live Run loop and the backtester.",
+				Required:    false,
+				Default:     mustFloat64(defaults.StopLossATR),
+			},
+			{
+				Name:        "take_profit_atr",
+				Type:        "number",
+				Description: "Take-profit distance in ATR units from entry. Set to 0 to disable. Mirrored in the live Run loop and the backtester.",
+				Required:    false,
+				Default:     mustFloat64(defaults.TakeProfitATR),
+			},
+			{
+				Name:        "min_long_vol_floor",
+				Type:        "number",
+				Description: "Minimum LongVol required to trade. Set to 0 to disable. Suppresses entries on a completely flat baseline.",
+				Required:    false,
+				Default:     mustFloat64(defaults.MinLongVolFloor),
+			},
+			{
+				Name:        "obv_trend_threshold",
+				Type:        "number",
+				Description: "OBV threshold for the volume confirmation filter. BUY > this, SELL < -this. Default 0 means any non-zero OBV works.",
+				Required:    false,
+				Default:     mustFloat64(defaults.OBVTrendThreshold),
+			},
+			{
+				Name:        "obv_window",
+				Type:        "integer",
+				Description: "Recent trades to include in windowed OBV. 0 = no volume verification. >0 = verify with last N trades.",
+				Required:    false,
+				Default:     defaults.OBVWindow,
+			},
+			{
+				Name:        "order_book_id",
+				Type:        "string(uuid)",
+				Description: "Order book UUID used to locate the traded asset and place orders.",
+				Required:    false,
+			},
+			{
+				Name:        "initial_balance",
+				Type:        "number",
+				Description: "Starting capital for backtests. Omitted for live runs — obtained from DORA positions.",
+				Required:    false,
+				Default:     mustFloat64(defaults.InitialBalance),
+			},
+			{
+				Name:        "leverage",
+				Type:        "number",
+				Description: "Leverage multiplier for live orders. Must be greater than 0.",
+				Required:    false,
+				Default:     mustFloat64(defaults.Leverage),
+			},
+		},
+		SupportsRun:      true,
+		SupportsBacktest: true,
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			forRun := capability == string(capabilityRun)
+			cfg, normalised, err := decodeBreakoutConfig(raw, forRun)
+			if err != nil {
+				return nil, nil, err
+			}
+			opts := []func(*breakout.Strategy){
+				breakout.WithLogger(log),
+			}
+			if tradeWriter != nil {
+				opts = append(opts, breakout.WithBacktestWriter(tradeWriter))
+			}
+			// Wire the live trade stream when the volume filter is active
+			// (OBVWindow > 0); ignored otherwise. tradeStream is always
+			// non-nil at runtime (cmd/strategy-server starts it in main.go).
+			if cfg.OBVWindow > 0 && tradeStream != nil {
+				opts = append(opts, breakout.WithTradeStream(tradeStream))
+			}
+			// Wire the historical price store so Strategy.Backtest can
+			// read candles_history. May be nil if no DB is configured;
+			// Backtest will then return an error.
+			if historicalStore != nil {
+				opts = append(opts, breakout.WithHistoricalStore(historicalStore))
+			}
+			// Wire the historical trade store so the backtester can
+			// compute OBV for the volume confirmation filter. May be
+			// nil if no DB is configured; the backtester simply skips
+			// OBV accumulation when no store is wired.
+			if tradeHistoryStore != nil {
+				opts = append(opts, breakout.WithTradeHistoryStore(tradeHistoryStore))
+			}
+			return normalised, breakout.New(cfg, pricesHandler, opts...), nil
+		},
+	}
+}
+
+//nolint:funlen // config decoding with validation
+func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, json.RawMessage, error) {
+	var payload breakoutConfigPayload
+	if err := decodeRawConfig(raw, &payload); err != nil {
+		return breakout.Config{}, nil, err
+	}
+	defaults := breakout.DefaultConfig()
+
+	// Apply defaults and validate windows.
+	if payload.ShortVolWindow == 0 {
+		payload.ShortVolWindow = defaults.ShortVolWindow
+	}
+	if payload.LongVolWindow == 0 {
+		payload.LongVolWindow = defaults.LongVolWindow
+	}
+	if payload.ATRWindow == 0 {
+		payload.ATRWindow = defaults.ATRWindow
+	}
+	if payload.ConfirmationBars == 0 {
+		payload.ConfirmationBars = defaults.ConfirmationBars
+	}
+	if payload.ShortVolWindow < 2 { //nolint:mnd
+		return breakout.Config{}, nil, fmt.Errorf("config.short_vol_window must be at least 2")
+	}
+	if payload.LongVolWindow <= payload.ShortVolWindow {
+		return breakout.Config{}, nil, fmt.Errorf("config.long_vol_window must be greater than short_vol_window")
+	}
+	if payload.ATRWindow < 2 { //nolint:mnd
+		return breakout.Config{}, nil, fmt.Errorf("config.atr_window must be at least 2")
+	}
+	if payload.ConfirmationBars < 1 {
+		return breakout.Config{}, nil, fmt.Errorf("config.confirmation_bars must be at least 1")
+	}
+
+	// Apply defaults and validate thresholds.
+	if payload.CompressionThreshold == 0 {
+		payload.CompressionThreshold = mustFloat64(defaults.CompressionThreshold)
+	}
+	if payload.BreakoutATRMultiple == 0 {
+		payload.BreakoutATRMultiple = mustFloat64(defaults.BreakoutATRMultiple)
+	}
+	// Explicit 0 must survive decoding ("0 disables"); only omitted
+	// fields get defaults. Pointer payload fields distinguish the two.
+	stopLossATR := mustFloat64(defaults.StopLossATR)
+	if payload.StopLossATR != nil {
+		stopLossATR = *payload.StopLossATR
+	}
+	takeProfitATR := mustFloat64(defaults.TakeProfitATR)
+	if payload.TakeProfitATR != nil {
+		takeProfitATR = *payload.TakeProfitATR
+	}
+	if payload.MinLongVolFloor == 0 {
+		payload.MinLongVolFloor = mustFloat64(defaults.MinLongVolFloor)
+	}
+	if payload.OBVTrendThreshold == 0 {
+		payload.OBVTrendThreshold = mustFloat64(defaults.OBVTrendThreshold)
+	}
+	if payload.OBVTrendThreshold < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.obv_trend_threshold must be non-negative")
+	}
+	if payload.OBVWindow < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.obv_window must be non-negative")
+	}
+	if payload.CompressionThreshold <= 0 || payload.CompressionThreshold > 1 {
+		return breakout.Config{}, nil, fmt.Errorf("config.compression_threshold must be in (0, 1]")
+	}
+	if payload.BreakoutATRMultiple < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.breakout_atr_multiple must be non-negative")
+	}
+	if stopLossATR < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr must be non-negative")
+	}
+	if takeProfitATR < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.take_profit_atr must be non-negative")
+	}
+	if payload.MinLongVolFloor < 0 {
+		return breakout.Config{}, nil, fmt.Errorf("config.min_long_vol_floor must be non-negative")
+	}
+
+	compression, err := decimal.NewFromFloat64(payload.CompressionThreshold)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.compression_threshold: %w", err)
+	}
+	breakoutATR, err := decimal.NewFromFloat64(payload.BreakoutATRMultiple)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.breakout_atr_multiple: %w", err)
+	}
+	stopLoss, err := decimal.NewFromFloat64(stopLossATR)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.stop_loss_atr: %w", err)
+	}
+	takeProfit, err := decimal.NewFromFloat64(takeProfitATR)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.take_profit_atr: %w", err)
+	}
+	obvThreshold, err := decimal.NewFromFloat64(payload.OBVTrendThreshold)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.obv_trend_threshold: %w", err)
+	}
+	minFloor, err := decimal.NewFromFloat64(payload.MinLongVolFloor)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.min_long_vol_floor: %w", err)
+	}
+
+	amount := defaults.InitialBalance
+	if payload.InitialBalance != nil {
+		if *payload.InitialBalance < 0 {
+			return breakout.Config{}, nil, fmt.Errorf("config.initial_balance must be non-negative")
+		}
+		if *payload.InitialBalance == 0 {
+			if !forRun {
+				return breakout.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0 for backtests")
+			}
+		} else {
+			amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
+			if err != nil {
+				return breakout.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+			}
+		}
+	}
+
+	leverage := defaults.Leverage
+	if payload.Leverage != nil {
+		if *payload.Leverage <= 0 {
+			return breakout.Config{}, nil, fmt.Errorf("config.leverage must be greater than 0")
+		}
+		leverage, err = decimal.NewFromFloat64(*payload.Leverage)
+		if err != nil {
+			return breakout.Config{}, nil, fmt.Errorf("config.leverage: %w", err)
+		}
+	}
+
+	var orderBookID uuid.UUID
+	if payload.OrderBookID != "" {
+		orderBookID, err = uuid.Parse(strings.TrimSpace(payload.OrderBookID))
+		if err != nil {
+			return breakout.Config{}, nil, fmt.Errorf("config.order_book_id: %w", err)
+		}
+	}
+
+	// Materialise the resolved ATR values so the normalized config always
+	// carries them (nil pointers would be dropped by omitempty).
+	payload.StopLossATR = &stopLossATR
+	payload.TakeProfitATR = &takeProfitATR
+	normalised, err := json.Marshal(payload)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("marshal normalised config: %w", err)
+	}
+
+	return breakout.Config{
+		ShortVolWindow:       payload.ShortVolWindow,
+		LongVolWindow:        payload.LongVolWindow,
+		CompressionThreshold: compression,
+		ATRWindow:            payload.ATRWindow,
+		BreakoutATRMultiple:  breakoutATR,
+		ConfirmationBars:     payload.ConfirmationBars,
+		StopLossATR:          stopLoss,
+		TakeProfitATR:        takeProfit,
+		MinLongVolFloor:      minFloor,
+		OBVTrendThreshold:    obvThreshold,
+		OBVWindow:            payload.OBVWindow,
+		OrderBookID:          orderBookID,
+		InitialBalance:       amount,
+		Leverage:             leverage,
+	}, normalised, nil
+}
+
+//nolint:funlen // config decoding with validation
+func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, json.RawMessage, error) {
+	var payload momentumConfigPayload
+	if err := decodeRawConfig(raw, &payload); err != nil {
+		return momentum.Config{}, nil, err
+	}
+	defaults := momentum.DefaultConfig()
+
+	if payload.SignalSource == "" {
+		payload.SignalSource = defaults.SignalSource
+	}
+	fastWindow := defaults.FastWindow
+	if payload.FastWindow != nil {
+		fastWindow = *payload.FastWindow
+	}
+	slowWindow := defaults.SlowWindow
+	if payload.SlowWindow != nil {
+		slowWindow = *payload.SlowWindow
+	}
+	atrWindow := defaults.ATRWindow
+	if payload.ATRWindow != nil {
+		atrWindow = *payload.ATRWindow
+	}
+	maxPositionSize := mustFloat64(defaults.MaxPositionSize)
+	if payload.MaxPositionSize != nil {
+		maxPositionSize = *payload.MaxPositionSize
+	}
+	stopLossATR := mustFloat64(defaults.StopLossATR)
+	if payload.StopLossATR != nil {
+		stopLossATR = *payload.StopLossATR
+	}
+	takeProfitATR := mustFloat64(defaults.TakeProfitATR)
+	if payload.TakeProfitATR != nil {
+		takeProfitATR = *payload.TakeProfitATR
+	}
+
+	if payload.SignalSource != momentum.SignalSourcePrice &&
+		payload.SignalSource != momentum.SignalSourceYTM &&
+		payload.SignalSource != momentum.SignalSourceSpread {
+		return momentum.Config{}, nil, fmt.Errorf("config.signal_source must be one of price, ytm, spread")
+	}
+	if fastWindow < 2 { //nolint:mnd
+		return momentum.Config{}, nil, fmt.Errorf("config.fast_window must be at least 2")
+	}
+	if slowWindow <= fastWindow {
+		return momentum.Config{}, nil, fmt.Errorf("config.slow_window must be greater than fast_window")
+	}
+	if atrWindow < 2 { //nolint:mnd
+		return momentum.Config{}, nil, fmt.Errorf("config.atr_window must be at least 2")
+	}
+	if stopLossATR < 0 {
+		return momentum.Config{}, nil, fmt.Errorf("config.stop_loss_atr must be non-negative")
+	}
+	if takeProfitATR < 0 {
+		return momentum.Config{}, nil, fmt.Errorf("config.take_profit_atr must be non-negative")
+	}
+	if payload.MinOrderSize < 0 {
+		return momentum.Config{}, nil, fmt.Errorf("config.min_order_size must be non-negative")
+	}
+	if payload.MaxOrderSize < 0 {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size must be non-negative")
+	}
+	if maxPositionSize <= 0 || maxPositionSize > 1 {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_position_size must be in (0,1]")
+	}
+	if payload.SignalSource == momentum.SignalSourceSpread {
+		if payload.Tenor == "" {
+			return momentum.Config{}, nil, fmt.Errorf("config.tenor is required when signal_source is spread")
+		}
+		if _, err := fred.ParseBenchmarkTenor(payload.Tenor); err != nil {
+			return momentum.Config{}, nil, fmt.Errorf("config.tenor: %w", err)
+		}
+	}
+
+	stopLoss, err := decimal.NewFromFloat64(stopLossATR)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.stop_loss_atr: %w", err)
+	}
+	takeProfit, err := decimal.NewFromFloat64(takeProfitATR)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.take_profit_atr: %w", err)
+	}
+	minOrder, err := decimal.NewFromFloat64(payload.MinOrderSize)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.min_order_size: %w", err)
+	}
+	maxOrder, err := decimal.NewFromFloat64(payload.MaxOrderSize)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size: %w", err)
+	}
+	maxPosition, err := decimal.NewFromFloat64(maxPositionSize)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_position_size: %w", err)
+	}
+
+	amount := defaults.InitialBalance
+	if payload.InitialBalance != nil {
+		if *payload.InitialBalance < 0 {
+			return momentum.Config{}, nil, fmt.Errorf("config.initial_balance must be non-negative")
+		}
+		if *payload.InitialBalance == 0 {
+			// For backtests, initial_balance must be > 0 because it is the
+			// seed capital. For runs, 0 means "fetch my USD balance": the live
+			// path overrides cfg.InitialBalance from the user's DORA portfolio
+			// (strategy/momentum/strategy.go:504). Store the explicit 0 so the
+			// persisted config reflects the request; if the portfolio fetch
+			// never succeeds the strategy sizes off 0 (opens nothing) rather
+			// than off the default.
+			if !forRun {
+				return momentum.Config{}, nil, fmt.Errorf("config.initial_balance must be greater than 0 for backtests")
+			}
+			amount = decimal.Zero
+		} else {
+			amount, err = decimal.NewFromFloat64(*payload.InitialBalance)
+			if err != nil {
+				return momentum.Config{}, nil, fmt.Errorf("config.initial_balance: %w", err)
+			}
+		}
+	}
+	leverage := defaults.Leverage
+	if payload.Leverage != nil {
+		if *payload.Leverage <= 0 {
+			return momentum.Config{}, nil, fmt.Errorf("config.leverage must be greater than 0")
+		}
+		leverage, err = decimal.NewFromFloat64(*payload.Leverage)
+		if err != nil {
+			return momentum.Config{}, nil, fmt.Errorf("config.leverage: %w", err)
+		}
+	}
+
+	// MaxOrderSize >= MinOrderSize when both are positive. Mirror copytrading's
+	// cross-check (decodeCopyTradingConfig); design §5 promises it explicitly.
+	// Without this, the strategy silently never opens because cappedOrderQuantity
+	// (strategy/momentum/strategy.go:208-213) clamps qty to MaxOrderSize then
+	// skips when clamped qty < MinOrderSize.
+	if payload.MinOrderSize > 0 && payload.MaxOrderSize > 0 && payload.MaxOrderSize < payload.MinOrderSize {
+		return momentum.Config{}, nil, fmt.Errorf("config.max_order_size must be greater than or equal to min_order_size")
+	}
+
+	if payload.OrderBookID == "" {
+		return momentum.Config{}, nil, fmt.Errorf("config.order_book_id is required")
+	}
+	orderBookID, err := uuid.Parse(payload.OrderBookID)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.order_book_id: %w", err)
+	}
+
+	out, err := json.Marshal(map[string]any{
+		"signal_source":     payload.SignalSource,
+		"fast_window":       fastWindow,
+		"slow_window":       slowWindow,
+		"atr_window":        atrWindow,
+		"stop_loss_atr":     mustFloat64(stopLoss),
+		"take_profit_atr":   mustFloat64(takeProfit),
+		"min_order_size":    mustFloat64(minOrder),
+		"max_order_size":    mustFloat64(maxOrder),
+		"max_position_size": maxPositionSize,
+		"tenor":             payload.Tenor,
+		"order_book_id":     payload.OrderBookID,
+		"initial_balance":   mustFloat64(amount),
+		"leverage":          mustFloat64(leverage),
+	})
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("marshal momentum config: %w", err)
+	}
+
+	return momentum.Config{
+		SignalSource:    payload.SignalSource,
+		FastWindow:      fastWindow,
+		SlowWindow:      slowWindow,
+		ATRWindow:       atrWindow,
+		StopLossATR:     stopLoss,
+		TakeProfitATR:   takeProfit,
+		MinOrderSize:    minOrder,
+		MaxOrderSize:    maxOrder,
+		MaxPositionSize: maxPosition,
+		Tenor:           payload.Tenor,
+		OrderBookID:     orderBookID,
+		InitialBalance:  amount,
+		Leverage:        leverage,
+	}, out, nil
+}
+
+//nolint:funlen // strategy definition with 13 config fields
+func newMomentumDefinition(pricesHandler *prices.Handler, log *slog.Logger) StrategyDefinition {
+	defaults := momentum.DefaultConfig()
+	return StrategyDefinition{
+		Type:             momentum.StrategyType,
+		Status:           strategyStatusAvailable,
+		Description:      "Momentum / trend-following strategy. Fast/slow MA crossover with ATR-anchored stops and opposite-signal reversal.",
+		SupportsRun:      true,
+		SupportsBacktest: true,
+		ConfigFields: []StrategyConfigField{
+			{
+				Name:        "signal_source",
+				Type:        "string",
+				Description: "Series the MA crossover runs on. One of price, ytm, spread.",
+				Required:    false,
+				Default:     defaults.SignalSource,
+			},
+			{
+				Name:        "fast_window",
+				Type:        "integer",
+				Description: "Fast MA tick window. Must be at least 2.",
+				Required:    false,
+				Default:     defaults.FastWindow,
+			},
+			{
+				Name:        "slow_window",
+				Type:        "integer",
+				Description: "Slow MA tick window. Must be greater than fast_window.",
+				Required:    false,
+				Default:     defaults.SlowWindow,
+			},
+			{
+				Name:        "atr_window",
+				Type:        "integer",
+				Description: "Mean absolute price diff window used for stops. Must be at least 2.",
+				Required:    false,
+				Default:     defaults.ATRWindow,
+			},
+			{
+				Name:        "stop_loss_atr",
+				Type:        "number",
+				Description: "Stop-loss distance in ATR units from entry. 0 disables.",
+				Required:    false,
+				Default:     mustFloat64(defaults.StopLossATR),
+			},
+			{
+				Name:        "take_profit_atr",
+				Type:        "number",
+				Description: "Take-profit distance in ATR units from entry. 0 disables.",
+				Required:    false,
+				Default:     mustFloat64(defaults.TakeProfitATR),
+			},
+			{
+				Name:        "min_order_size",
+				Type:        "number",
+				Description: "Minimum order size to open a position. 0 disables.",
+				Required:    false,
+				Default:     mustFloat64(defaults.MinOrderSize),
+			},
+			{
+				Name:        "max_order_size",
+				Type:        "number",
+				Description: "Maximum order size to open a position. 0 disables.",
+				Required:    false,
+				Default:     mustFloat64(defaults.MaxOrderSize),
+			},
+			{
+				Name:        "max_position_size",
+				Type:        "number",
+				Description: "Maximum fraction of capital per trade. Must be in (0,1].",
+				Required:    false,
+				Default:     mustFloat64(defaults.MaxPositionSize),
+			},
+			{
+				Name:        "tenor",
+				Type:        "string",
+				Description: "FRED benchmark tenor. Required when signal_source is spread.",
+				Required:    false,
+				Default:     "",
+			},
+			{
+				Name:        "order_book_id",
+				Type:        "string",
+				Description: "DORA order book UUID.",
+				Required:    true,
+				Default:     "",
+			},
+			{
+				Name:        "initial_balance",
+				Type:        "number",
+				Description: "Starting capital. Live runs override with the user's USD balance.",
+				Required:    false,
+				Default:     mustFloat64(defaults.InitialBalance),
+			},
+			{
+				Name:        "leverage",
+				Type:        "number",
+				Description: "Leverage multiplier on InitialBalance.",
+				Required:    false,
+				Default:     mustFloat64(defaults.Leverage),
+			},
+		},
+		DecodeConfig: func(
+			raw json.RawMessage,
+			capability string,
+			tradeWriter stats.BacktestTradeWriter,
+		) (json.RawMessage, strategycore.Strategy, error) {
+			forRun := capability == string(capabilityRun)
+			cfg, normalised, err := decodeMomentumConfig(raw, forRun)
+			if err != nil {
+				return nil, nil, err
+			}
+			opts := []func(*momentum.Strategy){
+				momentum.WithLogger(log),
+			}
+			if tradeWriter != nil {
+				opts = append(opts, momentum.WithBacktestWriter(tradeWriter))
+			}
+			return normalised, momentum.New(cfg, pricesHandler, opts...), nil
+		},
+	}
 }
 
 //nolint:funlen // config decoding with validation
@@ -2403,6 +3636,36 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 		InitialBalance:  amount,
 		Leverage:        leverage,
 	}, normalised, nil
+}
+
+func decodeTWAPConfig(raw json.RawMessage) (twap.Config, json.RawMessage, error) {
+	var cfg twap.Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return twap.Config{}, nil, fmt.Errorf("decode twap config: %w", err)
+	}
+	if err := cfg.Validate(time.Now().UTC()); err != nil {
+		return twap.Config{}, nil, err
+	}
+	normalised, err := json.Marshal(cfg)
+	if err != nil {
+		return twap.Config{}, nil, fmt.Errorf("marshal normalised twap config: %w", err)
+	}
+	return cfg, normalised, nil
+}
+
+func decodeVWAPConfig(raw json.RawMessage) (vwap.Config, json.RawMessage, error) {
+	var cfg vwap.Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return vwap.Config{}, nil, fmt.Errorf("decode vwap config: %w", err)
+	}
+	if err := cfg.Validate(time.Now().UTC()); err != nil {
+		return vwap.Config{}, nil, err
+	}
+	normalised, err := json.Marshal(cfg)
+	if err != nil {
+		return vwap.Config{}, nil, fmt.Errorf("marshal normalised vwap config: %w", err)
+	}
+	return cfg, normalised, nil
 }
 
 type copyTradingConfigPayload struct {
@@ -2538,6 +3801,44 @@ func newCopyTradingBacktestResult(result copytrading.BacktestResult) (json.RawMe
 	b, err := json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("marshal copytrading backtest result: %w", err)
+	}
+	return b, nil
+}
+
+func newBreakoutBacktestResult(result breakout.BacktestResult) (json.RawMessage, error) {
+	// Per-trade and per-closed-trade rows are persisted to
+	// strategy_backtest_trades and strategy_backtest_closed_trades by the
+	// backtest engine via stats.BacktestTradeWriter. The summary-result
+	// JSON only carries aggregate metrics.
+	out := BreakoutBacktestResult{
+		TotalPnL:    result.TotalPnL.String(),
+		WinCount:    result.WinCount,
+		LossCount:   result.LossCount,
+		MaxDrawdown: result.MaxDrawdown.String(),
+		SharpeRatio: result.SharpeRatio.String(),
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal breakout backtest result: %w", err)
+	}
+	return b, nil
+}
+
+func newMomentumBacktestResult(result momentum.BacktestResult) (json.RawMessage, error) {
+	// Per-trade and per-closed-trade rows are persisted to
+	// strategy_backtest_trades and strategy_backtest_closed_trades by the
+	// backtest engine via stats.BacktestTradeWriter. The summary-result
+	// JSON only carries aggregate metrics.
+	out := MomentumBacktestResult{
+		TotalPnL:    result.TotalPnL.String(),
+		WinCount:    result.WinCount,
+		LossCount:   result.LossCount,
+		MaxDrawdown: result.MaxDrawdown.String(),
+		SharpeRatio: result.SharpeRatio.String(),
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal momentum backtest result: %w", err)
 	}
 	return b, nil
 }

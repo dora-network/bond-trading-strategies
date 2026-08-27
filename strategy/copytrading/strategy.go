@@ -39,7 +39,7 @@ type Config struct {
 // Strategy implements the copy trading strategy.
 type Strategy struct {
 	cfg           Config
-	marketAPI     marketAPIClient
+	marketAPI     strategy.MarketAPIClient
 	backtestStore tradesHistoryStore
 	tradeWriter   stats.BacktestTradeWriter
 	log           *slog.Logger
@@ -83,7 +83,7 @@ func New(cfg Config, opts ...func(*Strategy)) *Strategy {
 }
 
 // WithMarketAPIClient sets the market API client for the strategy.
-func WithMarketAPIClient(client marketAPIClient) func(*Strategy) {
+func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 	return func(s *Strategy) {
 		s.marketAPI = client
 	}
@@ -366,7 +366,7 @@ func (s *Strategy) handleTrade(ctx context.Context, trade streams.TradeEvent) er
 	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 
 	// Place market order
-	err = s.marketAPI.CreateMarketOrder(
+	_, err = s.marketAPI.CreateMarketOrder(
 		ctx,
 		trade.OrderBookID.String(),
 		side,

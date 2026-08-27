@@ -182,11 +182,13 @@ func (s *PGBacktestStore) WriteTradeRecord(ctx context.Context, rec stats.TradeR
 		INSERT INTO strategy_backtest_trades (
 			backtest_id, time, bond_id, signal, price, quantity, entry_balance,
 			order_size, cash, open_position, trade_id,
-			spread, position_size, zscore
+			spread, position_size, zscore,
+			compression_ratio, entry_atr
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
 			$8, $9, $10, $11,
-			$12, $13, $14
+			$12, $13, $14,
+			$15, $16
 		)
 	`
 	var bondID, tradeID any
@@ -196,11 +198,13 @@ func (s *PGBacktestStore) WriteTradeRecord(ctx context.Context, rec stats.TradeR
 	if rec.TradeID != uuid.Nil {
 		tradeID = rec.TradeID
 	}
-	_, err := s.pool.Exec(ctx, q,
+	_, err := s.pool.Exec(
+		ctx, q,
 		rec.BacktestID, rec.Time, bondID, rec.Signal,
 		nullableDecimal(rec.Price), nullableDecimal(rec.Quantity), nullableDecimal(rec.EntryBalance),
 		nullableDecimal(rec.OrderSize), nullableDecimal(rec.Cash), nullableDecimal(rec.OpenPosition), tradeID,
 		nullableDecimal(rec.Spread), nullableDecimal(rec.PositionSize), nullableDecimal(rec.ZScore),
+		nullableDecimal(rec.CompressionRatio), nullableDecimal(rec.EntryATR),
 	)
 	if err != nil {
 		return fmt.Errorf("write trade record for backtest %s: %w", rec.BacktestID, err)
@@ -215,12 +219,14 @@ func (s *PGBacktestStore) WriteClosedTrade(ctx context.Context, trade stats.Clos
 			backtest_id, open_time, close_time, bond_id, open_signal, close_signal,
 			quantity, entry_price, exit_price, pnl, entry_balance,
 			open_trade_id, close_trade_id,
-			entry_spread, exit_spread, entry_zscore, exit_zscore, position_size, exit_reason
+			entry_spread, exit_spread, entry_zscore, exit_zscore, position_size, exit_reason,
+			entry_compression_ratio, exit_compression_ratio
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
 			$12, $13,
-			$14, $15, $16, $17, $18, $19
+			$14, $15, $16, $17, $18, $19,
+			$20, $21
 		)
 	`
 	var bondID, openID, closeID any
@@ -233,7 +239,8 @@ func (s *PGBacktestStore) WriteClosedTrade(ctx context.Context, trade stats.Clos
 	if trade.CloseTradeID != uuid.Nil {
 		closeID = trade.CloseTradeID
 	}
-	_, err := s.pool.Exec(ctx, q,
+	_, err := s.pool.Exec(
+		ctx, q,
 		trade.BacktestID, trade.OpenTime, trade.CloseTime, bondID, trade.OpenSignal, trade.CloseSignal,
 		trade.Quantity.String(), nullableDecimal(trade.EntryPrice), nullableDecimal(trade.ExitPrice),
 		trade.PnL.String(), nullableDecimal(trade.EntryBalance),
@@ -241,6 +248,7 @@ func (s *PGBacktestStore) WriteClosedTrade(ctx context.Context, trade stats.Clos
 		nullableDecimal(trade.EntrySpread), nullableDecimal(trade.ExitSpread),
 		nullableDecimal(trade.EntryZScore), nullableDecimal(trade.ExitZScore),
 		nullableDecimal(trade.PositionSize), nullableString(trade.ExitReason),
+		nullableDecimal(trade.EntryCompressionRatio), nullableDecimal(trade.ExitCompressionRatio),
 	)
 	if err != nil {
 		return fmt.Errorf("write closed trade for backtest %s: %w", trade.BacktestID, err)
@@ -316,6 +324,7 @@ func tradeRecordInsertRow(r stats.TradeRecordInsert) []any {
 		nullableDecimal(r.Price), nullableDecimal(r.Quantity), nullableDecimal(r.EntryBalance),
 		nullableDecimal(r.OrderSize), nullableDecimal(r.Cash), nullableDecimal(r.OpenPosition), tradeID,
 		nullableDecimal(r.Spread), nullableDecimal(r.PositionSize), nullableDecimal(r.ZScore),
+		nullableDecimal(r.CompressionRatio), nullableDecimal(r.EntryATR),
 	}
 }
 
@@ -340,6 +349,7 @@ func closedTradeInsertRow(t stats.ClosedTradeInsert) []any {
 		nullableDecimal(t.EntrySpread), nullableDecimal(t.ExitSpread),
 		nullableDecimal(t.EntryZScore), nullableDecimal(t.ExitZScore),
 		nullableDecimal(t.PositionSize), nullableString(t.ExitReason),
+		nullableDecimal(t.EntryCompressionRatio), nullableDecimal(t.ExitCompressionRatio),
 	}
 }
 
@@ -349,32 +359,36 @@ var (
 		"price", "quantity", "entry_balance",
 		"order_size", "cash", "open_position", "trade_id",
 		"spread", "position_size", "zscore",
+		"compression_ratio", "entry_atr",
 	}
 	closedTradeCopyColumns = []string{ //nolint:gochecknoglobals
 		"backtest_id", "open_time", "close_time", "bond_id", "open_signal", "close_signal",
 		"quantity", "entry_price", "exit_price", "pnl", "entry_balance",
 		"open_trade_id", "close_trade_id",
 		"entry_spread", "exit_spread", "entry_zscore", "exit_zscore", "position_size", "exit_reason",
+		"entry_compression_ratio", "exit_compression_ratio",
 	}
 )
 
 // tradeRecordRow is the column shape of strategy_backtest_trades.
 type tradeRecordRow struct {
-	ID           int64
-	BacktestID   uuid.UUID
-	Time         time.Time
-	BondID       *uuid.UUID
-	Signal       string
-	Price        *string
-	Quantity     *string
-	EntryBalance *string
-	OrderSize    *string
-	Cash         *string
-	OpenPosition *string
-	TradeID      *uuid.UUID
-	Spread       *string
-	PositionSize *string
-	ZScore       *string
+	ID               int64
+	BacktestID       uuid.UUID
+	Time             time.Time
+	BondID           *uuid.UUID
+	Signal           string
+	Price            *string
+	Quantity         *string
+	EntryBalance     *string
+	OrderSize        *string
+	Cash             *string
+	OpenPosition     *string
+	TradeID          *uuid.UUID
+	Spread           *string
+	PositionSize     *string
+	ZScore           *string
+	CompressionRatio *string
+	EntryATR         *string
 }
 
 func (s *PGBacktestStore) listTradeRecords(
@@ -388,7 +402,8 @@ func (s *PGBacktestStore) listTradeRecords(
 	const q = `
 		SELECT id, backtest_id, time, bond_id, signal, price, quantity, entry_balance,
 			order_size, cash, open_position, trade_id,
-			spread, position_size, zscore
+			spread, position_size, zscore,
+			compression_ratio, entry_atr
 		FROM strategy_backtest_trades
 		WHERE backtest_id = $1
 		ORDER BY time, id
@@ -406,6 +421,7 @@ func (s *PGBacktestStore) listTradeRecords(
 			&r.ID, &r.BacktestID, &r.Time, &r.BondID, &r.Signal, &r.Price, &r.Quantity, &r.EntryBalance,
 			&r.OrderSize, &r.Cash, &r.OpenPosition, &r.TradeID,
 			&r.Spread, &r.PositionSize, &r.ZScore,
+			&r.CompressionRatio, &r.EntryATR,
 		); err != nil {
 			return nil, fmt.Errorf("scan trade record: %w", err)
 		}
@@ -416,26 +432,28 @@ func (s *PGBacktestStore) listTradeRecords(
 
 // closedTradeRow is the column shape of strategy_backtest_closed_trades.
 type closedTradeRow struct {
-	ID           int64
-	BacktestID   uuid.UUID
-	OpenTime     time.Time
-	CloseTime    time.Time
-	BondID       *uuid.UUID
-	OpenSignal   string
-	CloseSignal  string
-	Quantity     string
-	EntryPrice   *string
-	ExitPrice    *string
-	PnL          string
-	EntryBalance *string
-	OpenTradeID  *uuid.UUID
-	CloseTradeID *uuid.UUID
-	EntrySpread  *string
-	ExitSpread   *string
-	EntryZScore  *string
-	ExitZScore   *string
-	PositionSize *string
-	ExitReason   *string
+	ID                    int64
+	BacktestID            uuid.UUID
+	OpenTime              time.Time
+	CloseTime             time.Time
+	BondID                *uuid.UUID
+	OpenSignal            string
+	CloseSignal           string
+	Quantity              string
+	EntryPrice            *string
+	ExitPrice             *string
+	PnL                   string
+	EntryBalance          *string
+	OpenTradeID           *uuid.UUID
+	CloseTradeID          *uuid.UUID
+	EntrySpread           *string
+	ExitSpread            *string
+	EntryZScore           *string
+	ExitZScore            *string
+	PositionSize          *string
+	ExitReason            *string
+	EntryCompressionRatio *string
+	ExitCompressionRatio  *string
 }
 
 func (s *PGBacktestStore) listClosedTrades(
@@ -450,7 +468,8 @@ func (s *PGBacktestStore) listClosedTrades(
 		SELECT id, backtest_id, open_time, close_time, bond_id, open_signal, close_signal,
 			quantity, entry_price, exit_price, pnl, entry_balance,
 			open_trade_id, close_trade_id,
-			entry_spread, exit_spread, entry_zscore, exit_zscore, position_size, exit_reason
+			entry_spread, exit_spread, entry_zscore, exit_zscore, position_size, exit_reason,
+			entry_compression_ratio, exit_compression_ratio
 		FROM strategy_backtest_closed_trades
 		WHERE backtest_id = $1
 		ORDER BY close_time, id
@@ -469,6 +488,7 @@ func (s *PGBacktestStore) listClosedTrades(
 			&r.Quantity, &r.EntryPrice, &r.ExitPrice, &r.PnL, &r.EntryBalance,
 			&r.OpenTradeID, &r.CloseTradeID,
 			&r.EntrySpread, &r.ExitSpread, &r.EntryZScore, &r.ExitZScore, &r.PositionSize, &r.ExitReason,
+			&r.EntryCompressionRatio, &r.ExitCompressionRatio,
 		); err != nil {
 			return nil, fmt.Errorf("scan closed trade: %w", err)
 		}
@@ -499,6 +519,32 @@ func tradeRecordToResponse(strategyType string, r *tradeRecordRow) (json.RawMess
 		}
 		if r.TradeID != nil {
 			rec.TradeID = r.TradeID.String()
+		}
+		return json.Marshal(rec)
+	case "breakout":
+		rec := BreakoutTradeRecord{
+			Time:             r.Time,
+			BondID:           bondID,
+			Signal:           r.Signal,
+			Price:            price,
+			Quantity:         quantity,
+			PositionSize:     derefString(r.PositionSize),
+			CompressionRatio: derefString(r.CompressionRatio),
+			EntryATR:         derefString(r.EntryATR),
+		}
+		return json.Marshal(rec)
+	case "momentum":
+		// FastMA/SlowMA have no backing DB columns so they are
+		// empty here. The shared slot (EntryATR) is the only
+		// momentum-specific field persisted.
+		rec := MomentumTradeRecord{
+			Time:         r.Time,
+			BondID:       bondID,
+			Signal:       r.Signal,
+			Price:        price,
+			Quantity:     quantity,
+			PositionSize: derefString(r.PositionSize),
+			EntryATR:     derefString(r.EntryATR),
 		}
 		return json.Marshal(rec)
 	default:
@@ -543,6 +589,38 @@ func closedTradeToResponse(strategyType string, r *closedTradeRow) (json.RawMess
 		}
 		if r.CloseTradeID != nil {
 			ct.CloseTradeID = r.CloseTradeID.String()
+		}
+		return json.Marshal(ct)
+	case "breakout":
+		ct := BreakoutClosedTrade{
+			BondID:                bondID,
+			OpenTime:              r.OpenTime,
+			CloseTime:             r.CloseTime,
+			Signal:                r.OpenSignal,
+			ExitSignal:            r.CloseSignal,
+			EntryPrice:            derefString(r.EntryPrice),
+			ExitPrice:             derefString(r.ExitPrice),
+			Quantity:              r.Quantity,
+			PositionSize:          derefString(r.PositionSize),
+			PnL:                   r.PnL,
+			ExitReason:            derefString(r.ExitReason),
+			EntryCompressionRatio: derefString(r.EntryCompressionRatio),
+			ExitCompressionRatio:  derefString(r.ExitCompressionRatio),
+		}
+		return json.Marshal(ct)
+	case "momentum":
+		ct := MomentumClosedTrade{
+			BondID:       bondID,
+			OpenTime:     r.OpenTime,
+			CloseTime:    r.CloseTime,
+			Signal:       r.OpenSignal,
+			ExitSignal:   r.CloseSignal,
+			EntryPrice:   derefString(r.EntryPrice),
+			ExitPrice:    derefString(r.ExitPrice),
+			Quantity:     r.Quantity,
+			PositionSize: derefString(r.PositionSize),
+			PnL:          r.PnL,
+			ExitReason:   derefString(r.ExitReason),
 		}
 		return json.Marshal(ct)
 	default:

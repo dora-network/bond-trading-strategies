@@ -110,6 +110,15 @@ func BuildClientOrderID(strategyName string, runID uuid.UUID) string {
 	return fmt.Sprintf("%s.%s.%s", strategyName, runID, uuid.Must(uuid.NewV7()))
 }
 
+// BuildClientOrderIDPrefix returns the prefix shared by every
+// client_order_id the live run will generate, e.g.
+// "twap.<run_id>." — the trailing dot ensures only this run's
+// orders match. Used by execution strategies to list DORA orders
+// on restart (the PlaceOrder/SaveState crash-window recovery).
+func BuildClientOrderIDPrefix(strategyName string, runID uuid.UUID) string {
+	return fmt.Sprintf("%s.%s.", strategyName, runID)
+}
+
 // DecisionRecorder is the minimal interface the live strategy loop uses
 // to persist a Decision row.  It is satisfied by *http.PGDecisionStore
 // in production and by a fake in tests.  The interface lives in this
@@ -131,4 +140,18 @@ type DecisionRecorder interface {
 	// continue with seq starting at 1 and the first duplicate-key
 	// collision surfaces as a save error, not a panic.
 	MaxSeq(ctx context.Context, runID uuid.UUID) (int64, error)
+}
+
+// StateStore persists and loads per-run strategy state as opaque JSON.
+// Execution strategies (e.g. TWAP) use it to checkpoint progress so
+// they can recover and rebalance after a server restart without
+// over-executing. Satisfied by *http.PGRunStore in production.
+//
+// Implementations MUST be safe for concurrent use. A failed SaveState
+// is degraded-but-correct: the strategy continues, and the next
+// checkpoint overwrites the stale row. LoadState returns (nil, nil)
+// when no state has been persisted for the run.
+type StateStore interface {
+	SaveState(ctx context.Context, runID uuid.UUID, state []byte) error
+	LoadState(ctx context.Context, runID uuid.UUID) ([]byte, error)
 }

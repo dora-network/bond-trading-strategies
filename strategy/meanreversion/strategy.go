@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -95,7 +96,7 @@ type Strategy struct {
 	isRunning             bool
 	paused                bool
 	pricesHandler         *prices.Handler
-	marketAPIClient       marketAPIClient
+	marketAPIClient       strategy.MarketAPIClient
 	historyStore          historicalPriceStore
 	benchmarkClient       benchmarkYieldClient
 	pricesReqID           uuid.UUID
@@ -162,7 +163,7 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		cfg:              cfg,
 		window:           window.NewRollingWindow(cfg.LookbackWindow),
 		pricesHandler:    pricesHandler,
-		marketAPIClient:  newDoraClient(),
+		marketAPIClient:  strategy.NewDoraClientWithKey(os.Getenv("DORA_API_KEY")),
 		errs:             make([]error, 0),
 		collateralWeight: decimal.One,
 	}
@@ -183,7 +184,7 @@ func WithLogger(log *slog.Logger) func(*Strategy) {
 // Use this to inject a client that authenticates with a specific API key
 // (e.g. the user's own key decrypted from storage) instead of the default
 // client that reads DORA_API_KEY from the environment.
-func WithMarketAPIClient(client marketAPIClient) func(*Strategy) {
+func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 	return func(s *Strategy) {
 		s.marketAPIClient = client
 	}
@@ -284,21 +285,8 @@ func (s *Strategy) unsubscribePrices() {
 	}
 }
 
-func (s *Strategy) lookupAssetID(orderBookID uuid.UUID) (string, error) {
-	if s.marketAPIClient == nil {
-		return "", errors.New("DORA order book lookup client is not configured")
-	}
-	if orderBookID == uuid.Nil {
-		return "", errors.New("order book ID is required")
-	}
-	assetID, err := s.marketAPIClient.BaseAssetID(context.Background(), orderBookID.String())
-	if err != nil {
-		return "", err
-	}
-	if assetID == "" {
-		return "", fmt.Errorf("order book %s returned an empty base asset ID", orderBookID)
-	}
-	return assetID, nil
+func (s *Strategy) lookupAssetID(ctx context.Context, orderBookID uuid.UUID) (string, error) {
+	return strategy.LookupAssetID(ctx, s.marketAPIClient, orderBookID)
 }
 
 func (s *Strategy) currentPosition(ctx context.Context, assetID string) (decimal.Decimal, error) {
@@ -514,7 +502,7 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 	// flows into the DORA request and the recorded decision row.
 	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
 
-	if err := s.marketAPIClient.CreateMarketOrder(
+	if _, err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, closeQty, inverseLeverage, false, clientOrderID,
 	); err != nil {
 		// Self-healing: if the order failed, check the live position on the exchange.
@@ -542,7 +530,7 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 	s.mu.RUnlock()
 	s.recordDecision(ctx, strategy.Decision{
 		OrderBookID:        s.cfg.OrderBookID,
-		Asset:              mustParseUUID(assetID),
+		Asset:              strategy.MustParseUUID(assetID),
 		Side:               string(side),
 		Signal:             closeSignal.String(),
 		Quantity:           closeQty,
@@ -565,8 +553,8 @@ func (s *Strategy) closePosition(ctx context.Context, assetID string) error {
 	return nil
 }
 
-func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision, assetID string) (bool, error) {
-	if decision.Signal != types.SignalBuy && decision.Signal != types.SignalSell {
+func (s *Strategy) executeDecision(ctx context.Context, decision Decision, assetID string) (bool, error) {
+	if decision.Signal() != types.SignalBuy && decision.Signal() != types.SignalSell {
 		return false, nil
 	}
 
@@ -586,11 +574,11 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		}
 	}
 
-	price := decision.Price
+	price := decision.Price()
 	if price.IsZero() {
 		return false, errors.New("cannot execute decision: price is zero")
 	}
-	quantity, ok, err := s.cappedOrderQuantity(decision.PositionSize, position, price)
+	quantity, ok, err := s.cappedOrderQuantity(decision.PositionSize(), position, price)
 	if err != nil {
 		return false, err
 	}
@@ -598,7 +586,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		return false, nil
 	}
 	side := doraclient.SIDE_BUY
-	if decision.Signal == types.SignalSell {
+	if decision.Signal() == types.SignalSell {
 		side = doraclient.SIDE_SELL
 	}
 
@@ -612,8 +600,9 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 	// only in inverse_leverage.
 	fromGlobalPosition := false
 
-	s.log.Info("opening position", "runID", s.runID, "assetID", assetID, "signal", decision.Signal)
-	s.log.Info("creating market order",
+	s.log.Info("opening position", "runID", s.runID, "assetID", assetID, "signal", decision.Signal())
+	s.log.Info(
+		"creating market order",
 		"runID", s.runID,
 		"assetID", assetID,
 		"side", side,
@@ -625,7 +614,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 	// Build the client_order_id before submitting so the same value
 	// flows into the DORA request and the recorded decision row.
 	clientOrderID := strategy.BuildClientOrderID(StrategyType, s.runID)
-	if err := s.marketAPIClient.CreateMarketOrder(
+	if _, err := s.marketAPIClient.CreateMarketOrder(
 		ctx, s.cfg.OrderBookID.String(), side, quantity, inverseLeverage, fromGlobalPosition, clientOrderID,
 	); err != nil {
 		return false, err
@@ -636,9 +625,9 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 	// orders that actually reached DORA.
 	s.recordDecision(ctx, strategy.Decision{
 		OrderBookID:        s.cfg.OrderBookID,
-		Asset:              mustParseUUID(assetID),
+		Asset:              strategy.MustParseUUID(assetID),
 		Side:               string(side),
-		Signal:             decision.Signal.String(),
+		Signal:             decision.Signal().String(),
 		Quantity:           quantity,
 		Price:              price,
 		Leverage:           s.cfg.Leverage,
@@ -646,7 +635,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 		FromGlobalPosition: fromGlobalPosition,
 		Kind:               strategy.DecisionKindOpen,
 		Reason:             "z_score_entry",
-		ReasonDetail:       fmt.Sprintf("z-score entry: z=%s signal=%s", decision.ZScore.String(), decision.Signal),
+		ReasonDetail:       fmt.Sprintf("z-score entry: z=%s signal=%s", decision.ZScore.String(), decision.Signal()),
 		ClientOrderID:      clientOrderID,
 	})
 
@@ -676,7 +665,7 @@ func (s *Strategy) executeDecision(ctx context.Context, decision types.Decision,
 	} else {
 		// Balance tracking is unavailable; set openSignal from the decision
 		// direction since we cannot derive it from bondQty.
-		s.openSignal = decision.Signal
+		s.openSignal = decision.Signal()
 	}
 	s.mu.Unlock()
 	return true, nil
@@ -691,7 +680,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 	}()
 	defer s.unsubscribePrices()
 
-	assetID, err := s.lookupAssetID(s.cfg.OrderBookID)
+	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
 	if err != nil {
 		return fmt.Errorf("error looking up asset ID: %w", err)
 	}
@@ -774,10 +763,11 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 					Price:          px.Price,
 				}
 				// Track the most recent clean price for the configured
-				// asset.  Recorded on close decisions as the approximate
+				// asset. Recorded on close decisions as the approximate
 				// fill price (DORA fills at the market mid, which is
-				// approximately the last observed mid).
-				s.lastPrice = px.Price
+				// approximately the last observed mid). s.lastPrice is
+				// also updated inside Update() so a single tick update
+				// is enough — no separate per-tick write needed here.
 				// Read window readiness before Update so the guard and the
 				// z-score in decision are computed from the same window state.
 				// On the tick that makes the window full, decision.ZScore is
@@ -785,12 +775,13 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 				// we must not evaluate exit conditions on that tick.
 				windowReadyBeforeUpdate := s.window.Ready()
 				decision, err := s.Update(obs)
-				s.log.Debug("decision generated",
+				s.log.Debug(
+					"decision generated",
 					"runID", s.runID,
 					"assetID", px.AssetID,
 					"time", px.Time,
 					"zScore", decision.ZScore,
-					"signal", decision.Signal,
+					"signal", decision.Signal(),
 				)
 				if err != nil {
 					s.log.Error("failed to update strategy", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "err", err)
@@ -828,7 +819,7 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 				}
 
 				// No open position — check for a new entry signal.
-				if decision.Signal == types.SignalHold {
+				if decision.Signal() == types.SignalHold {
 					continue
 				}
 
@@ -852,14 +843,14 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 
 func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.Decimal {
 	// First, check the in-memory cache.
-	yield, cachedDate, ok := s.cachedBenchmarkYield(ts)
-	normedTS := normalizeDate(ts)
-	if ok && !cachedDate.Before(normedTS) {
+	yield, date, ok := s.cachedBenchmarkYield(ts)
+	normedTS := fred.NormalizeDate(ts)
+	if ok && !date.Before(normedTS) {
 		return yield
 	}
 
 	// Cache miss or stale — fetch from FRED.
-	tenor, err := parseBenchmarkTenor(s.cfg.Tenor)
+	tenor, err := fred.ParseBenchmarkTenor(s.cfg.Tenor)
 	if err != nil {
 		s.mu.Lock()
 		s.errs = append(s.errs, fmt.Errorf("get benchmark yield: parse tenor: %w", err))
@@ -909,8 +900,9 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 	// Merge new observations into the in-memory cache.
 	s.mergeBenchmarkObservations(obs)
 
-	// Return the yield from the in-memory cache (FRED yields are converted to
-	// percentage format during merge, consistent with DORA YTM).
+	// Return the yield from the in-memory cache. fred.Observation.Yield
+	// is a decimal fraction, the same unit as DORA YTM — stored
+	// unchanged (no ×100) so the spread stays unit-coherent.
 	yield, _, ok = s.cachedBenchmarkYield(ts)
 	if !ok {
 		return decimal.Zero
@@ -927,10 +919,17 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 //
 // If the rolling window is not yet full (not enough history), the signal will
 // always be SignalHold.
-func (s *Strategy) Update(obs types.YieldObservation) (types.Decision, error) {
+func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
+	// Update the last-observed price under the same lock that protects
+	// the rolling-window state, so closePosition (which reads
+	// s.lastPrice via a separate RLock) sees a consistent snapshot.
+	// The value is set before we touch the window so the next tick's
+	// close records this tick's price.
+	s.lastPrice = obs.Price
+
 	spread, err := obs.Spread()
 	if err != nil {
-		return types.Decision{}, err
+		return Decision{}, err
 	}
 
 	// Compute rolling statistics from the window state BEFORE adding the
@@ -938,7 +937,7 @@ func (s *Strategy) Update(obs types.YieldObservation) (types.Decision, error) {
 	// bar measures the current spread against the distribution of past spreads.
 	stdDev, err := s.window.StdDev()
 	if err != nil {
-		return types.Decision{}, err
+		return Decision{}, err
 	}
 	rollingMean := s.window.Mean()
 
@@ -947,58 +946,61 @@ func (s *Strategy) Update(obs types.YieldObservation) (types.Decision, error) {
 	if s.window.Ready() && stdDev.Cmp(s.cfg.MinStdDev) >= 0 {
 		num, err := spread.Sub(rollingMean)
 		if err != nil {
-			return types.Decision{}, err
+			return Decision{}, err
 		}
 		zScore, err = num.Quo(stdDev)
 		if err != nil {
-			return types.Decision{}, err
+			return Decision{}, err
 		}
 	}
 
 	// Add the current spread to the window for future observations.
 	if err = s.window.Add(spread); err != nil {
-		return types.Decision{}, err
+		return Decision{}, err
 	}
 
-	d := types.Decision{
-		Time:           obs.Time,
-		BondID:         obs.BondID,
+	d := Decision{
+		time:           obs.Time,
+		bondID:         obs.BondID,
 		YTM:            obs.YTM,
 		BenchmarkYield: obs.BenchmarkYield,
 		Spread:         spread,
 		RollingMean:    rollingMean,
 		RollingStdDev:  stdDev,
 		ZScore:         zScore,
-		Price:          obs.Price,
-		Signal:         types.SignalHold,
+		price:          obs.Price,
+		signal:         types.SignalHold,
+		reason:         DecisionReasonWarmingUp,
 	}
 
 	// Signal logic uses the pre-add z-score.
 	switch {
 	case zScore.Cmp(s.cfg.EntryZScore) >= 0:
 		// Spread is abnormally wide -> bond is cheap -> BUY
-		d.Signal = types.SignalBuy
+		d.signal = types.SignalBuy
+		d.reason = DecisionReasonZEntry
 	case zScore.Cmp(s.cfg.EntryZScore.Neg()) <= 0:
 		// Spread is abnormally tight -> bond is rich -> SELL
-		d.Signal = types.SignalSell
+		d.signal = types.SignalSell
+		d.reason = DecisionReasonZEntry
 	}
 
 	// Position size is proportional to the absolute z-score above the entry
 	// threshold, capped at MaxPositionSize.
-	if d.Signal != types.SignalHold {
+	if d.signal != types.SignalHold {
 		excess, err := zScore.Abs().Sub(s.cfg.EntryZScore)
 		if err != nil {
-			return types.Decision{}, err
+			return Decision{}, err
 		}
 		// scales 0->1 for each std-dev above entry
 		size, err := excess.Quo(s.cfg.EntryZScore)
 		if err != nil {
-			return types.Decision{}, err
+			return Decision{}, err
 		}
 		if size.Cmp(s.cfg.MaxPositionSize) > 0 {
 			size = s.cfg.MaxPositionSize
 		}
-		d.PositionSize = size
+		d.positionSize = size
 	}
 
 	return d, nil
@@ -1103,7 +1105,8 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 		d.CreatedAt = time.Now().UTC()
 	}
 	if err := s.decisionStore.SaveDecision(ctx, d); err != nil {
-		s.log.Error("save strategy decision",
+		s.log.Error(
+			"save strategy decision",
 			"err", err,
 			"run_id", d.RunID,
 			"seq", d.Seq,
@@ -1112,20 +1115,4 @@ func (s *Strategy) recordDecision(ctx context.Context, d strategy.Decision) {
 			"quantity", d.Quantity,
 		)
 	}
-}
-
-// mustParseUUID converts a non-empty DORA asset/order-book ID string
-// (which the upstream API hands us as a string) into a uuid.UUID.
-// Empty input is treated as uuid.Nil so the live-run path can record
-// a decision even if the asset ID lookup failed earlier; the row
-// still preserves run_id + seq for forensics.
-func mustParseUUID(s string) uuid.UUID {
-	if s == "" {
-		return uuid.Nil
-	}
-	id, err := uuid.Parse(s)
-	if err != nil {
-		return uuid.Nil
-	}
-	return id
 }

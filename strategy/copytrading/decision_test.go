@@ -78,8 +78,8 @@ func buildStrategyForDecisionTest(rec strategy.DecisionRecorder) (*Strategy, *fa
 	api.portfolio = &doraclient.AccountPortfolioV2{
 		Accounts: map[string]map[string]doraclient.AccountV2{
 			"isolated-bond": {
-				bondID.String(): {AssetId: bondID.String(), IsGlobal: boolPtr(false), Available: "1000", Borrowed: "0"},
-				usdID:           {AssetId: usdID, IsGlobal: boolPtr(false), Available: "10000"},
+				bondID.String(): {AssetId: bondID.String(), IsGlobal: new(false), Available: "1000", Borrowed: "0"},
+				usdID:           {AssetId: usdID, IsGlobal: new(false), Available: "10000"},
 			},
 		},
 	}
@@ -118,7 +118,7 @@ func TestRecordDecision_LiveRunRecordsOnOrder(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+		_ = RunWithTrades(ctx, s, msgCh, tradeCh)
 	}()
 
 	// Fire two trades so we can also verify seq is monotonic.
@@ -186,7 +186,7 @@ func TestRecordDecision_FailedOrderNotRecorded(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+		_ = RunWithTrades(ctx, s, msgCh, tradeCh)
 	}()
 
 	tradeCh <- streams.TradeEvent{
@@ -278,7 +278,7 @@ func TestRecordDecision_CloseForcesLeverageOne(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+		_ = RunWithTrades(ctx, s, msgCh, tradeCh)
 	}()
 
 	tradeCh <- streams.TradeEvent{

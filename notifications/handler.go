@@ -126,7 +126,7 @@ func typeAllowed(filter string, t EventType) bool {
 	if filter == "" {
 		return true
 	}
-	for _, want := range strings.Split(filter, ",") {
+	for want := range strings.SplitSeq(filter, ",") {
 		if strings.TrimSpace(want) == string(t) {
 			return true
 		}

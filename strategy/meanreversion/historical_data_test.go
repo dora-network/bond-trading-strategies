@@ -53,17 +53,17 @@ func TestStrategyGetObservations(t *testing.T) {
 		meanreversion.SetBenchmarkYieldClient(s, benchmark)
 
 		obs, err := meanreversion.GetObservations(
-			s,
 			context.Background(),
+			s,
 			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC),
 		)
 
 		require.NoError(t, err)
 		require.Len(t, obs, 2)
-		assert.True(t, obs[0].BenchmarkYield.Equal(decimal.MustNew(45, 1)))
-		assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(47, 1)))
-		assert.True(t, meanreversion.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 4, 9, 0, 0, 0, time.UTC)).Equal(decimal.MustNew(47, 1)))
+		assert.True(t, obs[0].BenchmarkYield.Equal(decimal.MustNew(45, 3)))
+		assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(47, 3)))
+		assert.True(t, meanreversion.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 4, 9, 0, 0, 0, time.UTC)).Equal(decimal.MustNew(47, 3)))
 		assert.Equal(t, 1, history.LoadHistoricalPricesCallCount())
 		assert.Equal(t, 2, benchmark.FetchHistoricalYieldsCallCount())
 		_, tenor, _, _ := benchmark.FetchHistoricalYieldsArgsForCall(0)
@@ -108,8 +108,8 @@ func TestStrategyGetObservations(t *testing.T) {
 		meanreversion.SetBenchmarkYieldClient(s, benchmark)
 
 		obs, err := meanreversion.GetObservations(
-			s,
 			context.Background(),
+			s,
 			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC),
 		)
@@ -124,7 +124,7 @@ func TestStrategyGetObservations(t *testing.T) {
 		cfg.Tenor = "bad-tenor"
 		s := meanreversion.New(cfg, nil)
 
-		_, err := meanreversion.GetObservations(s, context.Background(), time.Now().Add(-24*time.Hour), time.Now().Add(-time.Hour))
+		_, err := meanreversion.GetObservations(context.Background(), s, time.Now().Add(-24*time.Hour), time.Now().Add(-time.Hour))
 
 		require.ErrorContains(t, err, "unsupported tenor")
 	})
@@ -145,8 +145,8 @@ func TestStrategyGetObservations(t *testing.T) {
 		meanreversion.SetBenchmarkYieldClient(s, &meanreversionfakes.FakeBenchmarkYieldClient{})
 
 		_, err := meanreversion.GetObservations(
-			s,
 			context.Background(),
+			s,
 			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC),
 		)
@@ -173,8 +173,8 @@ func TestStrategyGetObservations(t *testing.T) {
 		meanreversion.SetBenchmarkYieldClient(s, benchmark)
 
 		_, err := meanreversion.GetObservations(
-			s,
 			context.Background(),
+			s,
 			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC),
 		)

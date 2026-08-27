@@ -39,6 +39,11 @@ type Service interface {
 	// must be honoured by any asynchronous work whose request context
 	// may have already finished.
 	BaseContext() context.Context
+	// IsRunActive returns true if the strategy's run goroutine for the
+	// given id is still registered with the Service (i.e. has not yet
+	// returned). Once the goroutine completes, the Service deletes the
+	// entry from its internal map and IsRunActive returns false.
+	IsRunActive(id uuid.UUID) bool
 }
 
 var (
@@ -81,6 +86,19 @@ func WithBaseContext(ctx context.Context) func(*service) {
 
 func (s *service) BaseContext() context.Context {
 	return s.baseCtx
+}
+
+// IsRunActive returns true if the strategy's run goroutine for the
+// given id is still registered (has not yet returned). The
+// RunStrategyWithID goroutine deletes its entry when strategy.Run
+// returns, so this returns false once the run naturally ends. The
+// Handler's observer uses this to detect run completion and emit
+// EventRunCompleted.
+func (s *service) IsRunActive(id uuid.UUID) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.strategies[id]
+	return ok
 }
 
 func (s *service) RunBacktest(

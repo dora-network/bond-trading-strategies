@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
@@ -35,8 +38,11 @@ func TestHandlerListsCopyTraders(t *testing.T) {
 	trader2 := "22222222-2222-2222-2222-222222222222"
 
 	fake := doraClientFunc{
-		listCopyTraders: func(_ context.Context) ([]string, error) {
-			return []string{trader1, trader2}, nil
+		listCopyTraders: func(_ context.Context) ([]strategyhttp.CopyTrader, error) {
+			return []strategyhttp.CopyTrader{
+				{UserID: trader1, UserName: "alpha_trader"},
+				{UserID: trader2, UserName: "beta_trader"},
+			}, nil
 		},
 	}
 
@@ -52,25 +58,13 @@ func TestHandlerListsCopyTraders(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	// Assert items contain only the id field — no display_name leakage.
-	var rawBody struct {
-		Items []map[string]any `json:"items"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rawBody))
-	require.Len(t, rawBody.Items, 2)
-	for _, item := range rawBody.Items {
-		_, hasDisplayName := item["display_name"]
-		assert.False(t, hasDisplayName, "response must not contain display_name")
-		assert.Len(t, item, 1, "each item must contain only the id field")
-	}
-
 	var body struct {
 		Items []strategyhttp.CopyTraderSummary `json:"items"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Len(t, body.Items, 2)
-	assert.Equal(t, trader1, body.Items[0].ID)
-	assert.Equal(t, trader2, body.Items[1].ID)
+	assert.Equal(t, strategyhttp.CopyTraderSummary{ID: trader1, UserName: "alpha_trader"}, body.Items[0])
+	assert.Equal(t, strategyhttp.CopyTraderSummary{ID: trader2, UserName: "beta_trader"}, body.Items[1])
 }
 
 func TestHandlerListsCopyTradersRequiresAuth(t *testing.T) {
@@ -91,7 +85,7 @@ func TestHandlerListsCopyTradersEmpty(t *testing.T) {
 	t.Parallel()
 
 	fake := doraClientFunc{
-		listCopyTraders: func(_ context.Context) ([]string, error) {
+		listCopyTraders: func(_ context.Context) ([]strategyhttp.CopyTrader, error) {
 			return nil, nil
 		},
 	}
@@ -120,7 +114,7 @@ func TestHandlerListsCopyTradersDORAError(t *testing.T) {
 	t.Parallel()
 
 	fake := doraClientFunc{
-		listCopyTraders: func(_ context.Context) ([]string, error) {
+		listCopyTraders: func(_ context.Context) ([]strategyhttp.CopyTrader, error) {
 			return nil, assert.AnError
 		},
 	}
@@ -156,36 +150,116 @@ func TestHandlerListsStrategies(t *testing.T) {
 		Items []strategyhttp.StrategySummary `json:"items"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp.Items, 2)
-	assert.Equal(t, "copytrading", resp.Items[0].Type)
-	assert.Equal(t, "available", resp.Items[0].Status)
-	require.Len(t, resp.Items[0].ConfigFields, 7)
-	assert.Equal(t, "followed_trader", resp.Items[0].ConfigFields[0].Name)
-	assert.Equal(t, "initial_balance", resp.Items[0].ConfigFields[6].Name)
-	assert.Equal(t, "number", resp.Items[0].ConfigFields[6].Type)
-	assert.False(t, resp.Items[0].ConfigFields[6].Required)
-	assert.True(t, resp.Items[0].ConfigFields[0].Required)
-	assert.Equal(t, "percentage_of_available", resp.Items[0].ConfigFields[1].Name)
-	assert.Equal(t, "number", resp.Items[0].ConfigFields[1].Type)
-	assert.True(t, resp.Items[0].ConfigFields[1].Required)
-	assert.Equal(t, "leverage", resp.Items[0].ConfigFields[2].Name)
-	assert.Equal(t, "number", resp.Items[0].ConfigFields[2].Type)
-	assert.True(t, resp.Items[0].ConfigFields[2].Required)
-	assert.Equal(t, "min_order_size", resp.Items[0].ConfigFields[3].Name)
-	assert.False(t, resp.Items[0].ConfigFields[3].Required)
-	assert.Equal(t, "max_order_size", resp.Items[0].ConfigFields[4].Name)
-	assert.False(t, resp.Items[0].ConfigFields[4].Required)
-	assert.Equal(t, "disallowed_bonds", resp.Items[0].ConfigFields[5].Name)
-	assert.False(t, resp.Items[0].ConfigFields[5].Required)
-	assert.Equal(t, "mean_reversion", resp.Items[1].Type)
-	assert.Equal(t, "available", resp.Items[1].Status)
-	require.Len(t, resp.Items[1].ConfigFields, 10)
-	assert.Equal(t, "lookback_window", resp.Items[1].ConfigFields[0].Name)
-	assert.Equal(t, float64(20), resp.Items[1].ConfigFields[0].Default)
-	assert.Equal(t, "order_book_id", resp.Items[1].ConfigFields[6].Name)
-	assert.Equal(t, "tenor", resp.Items[1].ConfigFields[7].Name)
-	assert.Equal(t, float64(1), resp.Items[1].ConfigFields[8].Default)
-	assert.Equal(t, float64(1), resp.Items[1].ConfigFields[9].Default)
+	require.Len(t, resp.Items, 6)
+	byType := map[string]strategyhttp.StrategySummary{}
+	for _, it := range resp.Items {
+		byType[it.Type] = it
+		t.Logf("got strategy type=%q status=%q fields=%d", it.Type, it.Status, len(it.ConfigFields))
+	}
+	t.Logf("raw body: %s", rec.Body.String())
+
+	breakout, ok := byType["breakout"]
+	require.True(t, ok, "breakout should be in the strategies list")
+	assert.Equal(t, "available", breakout.Status)
+	require.Len(t, breakout.ConfigFields, 14)
+	assert.Equal(t, "short_vol_window", breakout.ConfigFields[0].Name)
+	assert.Equal(t, "long_vol_window", breakout.ConfigFields[1].Name)
+	assert.Equal(t, "compression_threshold", breakout.ConfigFields[2].Name)
+	assert.Equal(t, "atr_window", breakout.ConfigFields[3].Name)
+	assert.Equal(t, "breakout_atr_multiple", breakout.ConfigFields[4].Name)
+	assert.Equal(t, "confirmation_bars", breakout.ConfigFields[5].Name)
+	assert.Equal(t, "stop_loss_atr", breakout.ConfigFields[6].Name)
+	assert.Equal(t, "take_profit_atr", breakout.ConfigFields[7].Name)
+	assert.Equal(t, "min_long_vol_floor", breakout.ConfigFields[8].Name)
+	assert.Equal(t, "obv_trend_threshold", breakout.ConfigFields[9].Name)
+	assert.Equal(t, "obv_window", breakout.ConfigFields[10].Name)
+	assert.Equal(t, "order_book_id", breakout.ConfigFields[11].Name)
+	assert.Equal(t, "initial_balance", breakout.ConfigFields[12].Name)
+	assert.Equal(t, "leverage", breakout.ConfigFields[13].Name)
+	assert.True(t, breakout.SupportsRun)
+	assert.True(t, breakout.SupportsBacktest)
+
+	copytrading, ok := byType["copytrading"]
+	require.True(t, ok, "copytrading should be in the strategies list")
+	assert.Equal(t, "available", copytrading.Status)
+	require.Len(t, copytrading.ConfigFields, 7)
+	assert.Equal(t, "followed_trader", copytrading.ConfigFields[0].Name)
+	assert.Equal(t, "initial_balance", copytrading.ConfigFields[6].Name)
+	assert.Equal(t, "number", copytrading.ConfigFields[6].Type)
+	assert.False(t, copytrading.ConfigFields[6].Required)
+	assert.True(t, copytrading.ConfigFields[0].Required)
+	assert.Equal(t, "percentage_of_available", copytrading.ConfigFields[1].Name)
+	assert.Equal(t, "number", copytrading.ConfigFields[1].Type)
+	assert.True(t, copytrading.ConfigFields[1].Required)
+	assert.Equal(t, "leverage", copytrading.ConfigFields[2].Name)
+	assert.Equal(t, "number", copytrading.ConfigFields[2].Type)
+	assert.True(t, copytrading.ConfigFields[2].Required)
+	assert.Equal(t, "min_order_size", copytrading.ConfigFields[3].Name)
+	assert.False(t, copytrading.ConfigFields[3].Required)
+	assert.Equal(t, "max_order_size", copytrading.ConfigFields[4].Name)
+	assert.False(t, copytrading.ConfigFields[4].Required)
+	assert.Equal(t, "disallowed_bonds", copytrading.ConfigFields[5].Name)
+	assert.False(t, copytrading.ConfigFields[5].Required)
+
+	mr, ok := byType["mean_reversion"]
+	require.True(t, ok, "mean_reversion should be in the strategies list")
+	assert.Equal(t, "available", mr.Status)
+	require.Len(t, mr.ConfigFields, 10)
+	assert.Equal(t, "lookback_window", mr.ConfigFields[0].Name)
+	assert.Equal(t, float64(20), mr.ConfigFields[0].Default)
+	assert.Equal(t, "order_book_id", mr.ConfigFields[6].Name)
+	assert.Equal(t, "tenor", mr.ConfigFields[7].Name)
+	assert.Equal(t, float64(1), mr.ConfigFields[8].Default)
+	assert.Equal(t, float64(1), mr.ConfigFields[9].Default)
+	twap, ok := byType["twap"]
+	require.True(t, ok, "twap should be in the strategies list")
+	assert.Equal(t, "available", twap.Status)
+	require.Len(t, twap.ConfigFields, 6)
+	assert.Equal(t, "order_book_id", twap.ConfigFields[0].Name)
+	assert.Equal(t, "total_amount", twap.ConfigFields[1].Name)
+	assert.Equal(t, "side", twap.ConfigFields[2].Name)
+	assert.Equal(t, "start_time", twap.ConfigFields[3].Name)
+	assert.Equal(t, "end_time", twap.ConfigFields[4].Name)
+	assert.Equal(t, "interval_seconds", twap.ConfigFields[5].Name)
+	assert.True(t, twap.SupportsRun)
+	assert.False(t, twap.SupportsBacktest)
+	vwap, ok := byType["vwap"]
+	require.True(t, ok, "vwap should be in the strategies list")
+	assert.Equal(t, "available", vwap.Status)
+	require.Len(t, vwap.ConfigFields, 7)
+	assert.Equal(t, "order_book_id", vwap.ConfigFields[0].Name)
+	assert.Equal(t, "total_amount", vwap.ConfigFields[1].Name)
+	assert.Equal(t, "side", vwap.ConfigFields[2].Name)
+	assert.Equal(t, "start_time", vwap.ConfigFields[3].Name)
+	assert.Equal(t, "end_time", vwap.ConfigFields[4].Name)
+	assert.Equal(t, "window_days", vwap.ConfigFields[5].Name)
+	assert.Equal(t, "bucket_minutes", vwap.ConfigFields[6].Name)
+	assert.True(t, vwap.SupportsRun)
+	assert.False(t, vwap.SupportsBacktest)
+
+	mom, ok := byType["momentum"]
+	require.True(t, ok, "momentum should be in the strategies list")
+	assert.Equal(t, "available", mom.Status)
+	require.Len(t, mom.ConfigFields, 13)
+	// Field order mirrors newMomentumDefinition (handler.go:3346-3438).
+	assert.Equal(t, "signal_source", mom.ConfigFields[0].Name)
+	assert.Equal(t, "fast_window", mom.ConfigFields[1].Name)
+	assert.Equal(t, "slow_window", mom.ConfigFields[2].Name)
+	assert.Equal(t, "atr_window", mom.ConfigFields[3].Name)
+	assert.Equal(t, "stop_loss_atr", mom.ConfigFields[4].Name)
+	assert.Equal(t, "take_profit_atr", mom.ConfigFields[5].Name)
+	assert.Equal(t, "min_order_size", mom.ConfigFields[6].Name)
+	assert.Equal(t, "max_order_size", mom.ConfigFields[7].Name)
+	assert.Equal(t, "max_position_size", mom.ConfigFields[8].Name)
+	assert.Equal(t, "tenor", mom.ConfigFields[9].Name)
+	assert.Equal(t, "order_book_id", mom.ConfigFields[10].Name)
+	assert.True(t, mom.ConfigFields[10].Required, "order_book_id must be required for momentum")
+	assert.Equal(t, "initial_balance", mom.ConfigFields[11].Name)
+	assert.Equal(t, "number", mom.ConfigFields[11].Type)
+	assert.Equal(t, "leverage", mom.ConfigFields[12].Name)
+	assert.Equal(t, "number", mom.ConfigFields[12].Type)
+	assert.True(t, mom.SupportsRun)
+	assert.True(t, mom.SupportsBacktest)
 }
 
 func TestHandlerListsTenors(t *testing.T) {
@@ -420,6 +494,69 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 			return false
 		}
 		return summary.Status == "completed"
+	}, time.Second, 10*time.Millisecond)
+}
+
+// TestHandlerMomentumBacktestCompletes pins awaitBacktestResult's
+// momentum.BacktestResult case: a momentum result delivered on the
+// run channel must mark the backtest completed and persist the
+// momentum summary shape (string-decimal aggregates).
+func TestHandlerMomentumBacktestCompletes(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	resultCh := make(chan types.BacktestResult, 1)
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(ctx context.Context, _ uuid.UUID, strat strategycore.Strategy, start, end time.Time) (<-chan types.BacktestResult, error) {
+			return resultCh, nil
+		},
+	}
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithNow(func() time.Time { return now }),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, error) {
+				return "user-test-1", nil
+			},
+		}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	body := map[string]any{
+		"strategy_type": "momentum",
+		"config": map[string]any{
+			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+			"initial_balance": 1000,
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	}
+
+	rec := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, 1, svc.RunBacktestCallCount())
+
+	var accepted strategyhttp.BacktestDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+	backtestID := accepted.ID
+
+	resultCh <- momentum.BacktestResult{
+		TotalPnL:    decimal.MustNew(25, 2),
+		WinCount:    2,
+		LossCount:   1,
+		MaxDrawdown: decimal.MustNew(5, 2),
+		SharpeRatio: decimal.MustNew(13, 1),
+	}
+
+	require.Eventually(t, func() bool {
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return false
+		}
+		return strings.Contains(rec.Body.String(), `"total_pnl":"0.25"`)
 	}, time.Second, 10*time.Millisecond)
 }
 
@@ -738,10 +875,7 @@ func TestHandlerListBacktests(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{
 			getUserID: func(context.Context) (string, error) {
 				return "user-test-1", nil
@@ -799,10 +933,7 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -896,10 +1027,7 @@ func TestHandlerListRuns(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -944,10 +1072,7 @@ func TestHandlerRejectsDuplicateOrderBookRun(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -996,10 +1121,7 @@ func TestHandlerAllowsDifferentOrderBookRun(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -1051,10 +1173,7 @@ func TestHandlerAllowsRunAfterPreviousStopped(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	handler := strategyhttp.NewHandler(
 		svc,
-		strategyhttp.WithNow(func() time.Time {
-			now = now.Add(time.Second)
-			return now
-		}),
+		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -1645,6 +1764,309 @@ func TestHandlerValidationErrors(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "config.initial_balance must be non-negative")
 }
 
+// TestHandlerMomentumValidationErrors pins the validation branches of
+// decodeMomentumConfig. Each row exercises one rejection; mutation
+// tests against these assertions would catch a regression where the
+// branch is silently removed. Mirrors the meanreversion block in
+// TestHandlerValidationErrors above.
+func TestHandlerMomentumValidationErrors(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	tests := []struct {
+		name        string
+		body        map[string]any
+		path        string
+		wantCode    int
+		wantContain string
+	}{
+		{
+			name: "backtest requires positive initial_balance",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"initial_balance": 0},
+				"start":         time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
+				"end":           time.Now().Format(time.RFC3339),
+			},
+			path:        "/v1/backtests",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.initial_balance must be greater than 0 for backtests",
+		},
+		{
+			name: "run allows zero initial_balance (fetched from DORA)",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"initial_balance": 0,
+					"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+				},
+			},
+			path:     "/v1/runs",
+			wantCode: http.StatusCreated,
+		},
+		{
+			name: "missing order_book_id rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"signal_source": "price"},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.order_book_id is required",
+		},
+		{
+			name: "negative initial_balance rejected for runs",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"initial_balance": -1},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.initial_balance must be non-negative",
+		},
+		{
+			name: "negative leverage rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"leverage": -1},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.leverage must be greater than 0",
+		},
+		{
+			name: "unsupported spread tenor rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"signal_source": "spread",
+					"tenor":         "99Y",
+					"order_book_id": uuid.Must(uuid.NewV7()).String(),
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.tenor: unsupported tenor",
+		},
+		{
+			name: "explicit fast_window 0 rejected, not defaulted",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"fast_window":   0,
+					"order_book_id": uuid.Must(uuid.NewV7()).String(),
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.fast_window must be at least 2",
+		},
+		{
+			name: "max_order_size below min_order_size rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"min_order_size": 5, "max_order_size": 2},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.max_order_size must be greater than or equal to min_order_size",
+		},
+		{
+			name: "fast_window must be >= 2",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"fast_window": 1},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.fast_window must be at least 2",
+		},
+		{
+			name: "slow_window must be greater than fast_window",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"fast_window": 5, "slow_window": 5},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.slow_window must be greater than fast_window",
+		},
+		{
+			name: "spread signal_source requires tenor",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"signal_source": "spread"},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.tenor is required when signal_source is spread",
+		},
+		{
+			name: "unknown signal_source rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config":        map[string]any{"signal_source": "bogus"},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.signal_source must be one of price, ytm, spread",
+		},
+		{
+			name: "atr_window must be >= 2",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"atr_window":    1,
+					"order_book_id": uuid.Must(uuid.NewV7()).String(),
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.atr_window must be at least 2",
+		},
+		{
+			name: "max_position_size out of bounds rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"max_position_size": 1.5,
+					"order_book_id":     uuid.Must(uuid.NewV7()).String(),
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.max_position_size must be in (0,1]",
+		},
+		{
+			name: "malformed order_book_id rejected",
+			body: map[string]any{
+				"strategy_type": "momentum",
+				"config": map[string]any{
+					"order_book_id": "not-a-uuid",
+				},
+			},
+			path:        "/v1/runs",
+			wantCode:    http.StatusBadRequest,
+			wantContain: "config.order_book_id",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := performJSONRequest(t, handler, tt.path, tt.body)
+			require.Equal(t, tt.wantCode, rec.Code)
+			if tt.wantContain != "" {
+				assert.Contains(t, rec.Body.String(), tt.wantContain)
+			}
+		})
+	}
+}
+
+// TestHandlerMomentumExplicitZeroRoundTrip pins the "0 disables"/"0 means
+// fetch my balance" contracts the config-field docs promise: explicit
+// stop_loss_atr/take_profit_atr/initial_balance of 0 must round-trip as 0
+// in the normalized config, not be silently rewritten to the default.
+// Round-4 review P2: the decoder previously rewrote explicit 0 to the
+// default 20, making the documented disable unreachable over HTTP; and
+// persisted initial_balance 0 as the default 1 for runs.
+func TestHandlerMomentumExplicitZeroRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+		"strategy_type": "momentum",
+		"config": map[string]any{
+			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+			"stop_loss_atr":   0,
+			"take_profit_atr": 0,
+			"initial_balance": 0,
+		},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var detail struct {
+		Config struct {
+			StopLossATR    float64 `json:"stop_loss_atr"`
+			TakeProfitATR  float64 `json:"take_profit_atr"`
+			InitialBalance float64 `json:"initial_balance"`
+		} `json:"config"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+	assert.Zero(t, detail.Config.StopLossATR, "explicit stop_loss_atr 0 must persist as 0 (0 disables)")
+	assert.Zero(t, detail.Config.TakeProfitATR, "explicit take_profit_atr 0 must persist as 0 (0 disables)")
+	assert.Zero(t, detail.Config.InitialBalance,
+		"explicit initial_balance 0 for a run must persist as 0 (0 = fetch my USD balance), not the default 1")
+}
+
+// TestHandlerBreakoutExplicitZeroATR pins breakout's "0 disables" contract:
+// explicit stop_loss_atr/take_profit_atr of 0 must round-trip as 0 in the
+// normalized config, not be silently rewritten to the defaults. The decoder
+// previously treated 0 as omitted (non-pointer payload field).
+func TestHandlerBreakoutExplicitZeroATR(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	t.Run("explicit 0 persists as 0", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+			"strategy_type": "breakout",
+			"config": map[string]any{
+				"short_vol_window": 10,
+				"long_vol_window":  30,
+				"stop_loss_atr":    0,
+				"take_profit_atr":  0,
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code)
+
+		var detail struct {
+			Config struct {
+				StopLossATR   float64 `json:"stop_loss_atr"`
+				TakeProfitATR float64 `json:"take_profit_atr"`
+			} `json:"config"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+		assert.Zero(t, detail.Config.StopLossATR, "explicit stop_loss_atr 0 must persist as 0 (0 disables)")
+		assert.Zero(t, detail.Config.TakeProfitATR, "explicit take_profit_atr 0 must persist as 0 (0 disables)")
+	})
+
+	t.Run("omitted falls back to defaults", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+			"strategy_type": "breakout",
+			"config": map[string]any{
+				"short_vol_window": 10,
+				"long_vol_window":  30,
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code)
+
+		var detail struct {
+			Config struct {
+				StopLossATR   float64 `json:"stop_loss_atr"`
+				TakeProfitATR float64 `json:"take_profit_atr"`
+			} `json:"config"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+		assert.Equal(t, 20.0, detail.Config.StopLossATR, "omitted stop_loss_atr must get the default 20")
+		assert.Zero(t, detail.Config.TakeProfitATR, "omitted take_profit_atr must get the default 0")
+	})
+}
+
 func performJSONRequest(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	payload, err := json.Marshal(body)
@@ -1657,6 +2079,19 @@ func performJSONRequest(t *testing.T, handler http.Handler, path string, body an
 	return rec
 }
 
+// tickClock returns a closure suitable for strategyhttp.WithNow that
+// yields a monotonically-advancing time on every call, safe for
+// concurrent invocation by background goroutines (e.g. the completion
+// and stop-loss watchers). Each call returns start + n*step, where n is
+// the call count.
+func tickClock(start time.Time) func() time.Time {
+	var ns atomic.Int64
+	ns.Store(start.UnixNano())
+	return func() time.Time {
+		return time.Unix(0, ns.Add(int64(time.Second))).UTC()
+	}
+}
+
 type memoryRunStore struct {
 	runs map[uuid.UUID]*strategyhttp.RunDetail
 }
@@ -1665,7 +2100,7 @@ type doraClientFunc struct {
 	listOrderBooks  func(context.Context) ([]strategyhttp.DORAOrderBookSummary, error)
 	getUserID       func(context.Context) (string, error)
 	getAssetByID    func(context.Context, string) (*strategyhttp.AssetInfo, error)
-	listCopyTraders func(context.Context) ([]string, error)
+	listCopyTraders func(context.Context) ([]strategyhttp.CopyTrader, error)
 }
 
 func (f doraClientFunc) ListOrderBooks(ctx context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
@@ -1689,7 +2124,7 @@ func (f doraClientFunc) GetUserID(ctx context.Context) (string, error) {
 	return f.getUserID(ctx)
 }
 
-func (f doraClientFunc) ListCopyTraders(ctx context.Context) ([]string, error) {
+func (f doraClientFunc) ListCopyTraders(ctx context.Context) ([]strategyhttp.CopyTrader, error) {
 	if f.listCopyTraders == nil {
 		return nil, fmt.Errorf("not implemented")
 	}
@@ -1864,10 +2299,7 @@ func paginateInserts[T any](items []T, page, limit int) []T {
 	if start >= len(items) {
 		return []T{}
 	}
-	end := start + limit
-	if end > len(items) {
-		end = len(items)
-	}
+	end := min(start+limit, len(items))
 	return items[start:end]
 }
 
@@ -1887,6 +2319,18 @@ func tradeRecordInsertToResponse(strategyType string, r stats.TradeRecordInsert)
 		}
 		if r.TradeID != uuid.Nil {
 			rec.TradeID = r.TradeID.String()
+		}
+		return json.Marshal(rec)
+	case "breakout":
+		rec := strategyhttp.BreakoutTradeRecord{
+			Time:             r.Time,
+			BondID:           bondID,
+			Signal:           r.Signal,
+			Price:            r.Price.String(),
+			Quantity:         r.Quantity.String(),
+			PositionSize:     r.PositionSize.String(),
+			CompressionRatio: r.CompressionRatio.String(),
+			EntryATR:         r.EntryATR.String(),
 		}
 		return json.Marshal(rec)
 	default:
@@ -1926,6 +2370,23 @@ func closedTradeInsertToResponse(strategyType string, r stats.ClosedTradeInsert)
 		}
 		if r.CloseTradeID != uuid.Nil {
 			ct.CloseTradeID = r.CloseTradeID.String()
+		}
+		return json.Marshal(ct)
+	case "breakout":
+		ct := strategyhttp.BreakoutClosedTrade{
+			BondID:                bondID,
+			OpenTime:              r.OpenTime,
+			CloseTime:             r.CloseTime,
+			Signal:                r.OpenSignal,
+			ExitSignal:            r.CloseSignal,
+			EntryPrice:            r.EntryPrice.String(),
+			ExitPrice:             r.ExitPrice.String(),
+			Quantity:              r.Quantity.String(),
+			PositionSize:          r.PositionSize.String(),
+			PnL:                   r.PnL.String(),
+			ExitReason:            r.ExitReason,
+			EntryCompressionRatio: r.EntryCompressionRatio.String(),
+			ExitCompressionRatio:  r.ExitCompressionRatio.String(),
 		}
 		return json.Marshal(ct)
 	default:
@@ -2250,7 +2711,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 	// Trade records and closed trades are now persisted via the writer
 	// interface, not embedded in the result JSON. Add 15 of each so the
 	// pagination assertions below have something to page through.
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		require.NoError(t, store.WriteTradeRecord(context.Background(), stats.TradeRecordInsert{
 			BacktestID: backtestID,
 			BondID:     fmt.Sprintf("bond-%d", i),
@@ -2401,7 +2862,6 @@ func TestHandlerCopyTradingBacktestInitialBalance(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rec := performJSONRequest(t, newHandler(), "/v1/backtests", buildBody(tc.initial))
@@ -2461,6 +2921,14 @@ func TestHandler_EmitsRunStopLossEvent(t *testing.T) {
 		RunStrategyStub: func(_ context.Context, s strategycore.Strategy) (uuid.UUID, error) {
 			capturedStrat = s
 			return runID, nil
+		},
+		IsRunActiveStub: func(_ uuid.UUID) bool {
+			// Run is active while the stop-loss observer polls.
+			// The test triggers stop-loss via ShouldExit + the next
+			// observer tick fires EventRunStopLoss. The fake service
+			// does not actually run a goroutine, so IsRunActive stays
+			// true for the duration of the test.
+			return true
 		},
 	}
 	notifier := &notificationsfakes.FakeNotifier{}

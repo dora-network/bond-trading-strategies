@@ -74,7 +74,7 @@ func TestBatchingWriter_FlushesAtBatchSize(t *testing.T) {
 	b := NewBatchingBacktestWriter(store, 10, 10*time.Second)
 	t.Cleanup(func() { _ = b.Close() })
 
-	for i := 0; i < 25; i++ {
+	for i := range 25 {
 		require.NoError(t, b.WriteTradeRecord(context.Background(), stats.TradeRecordInsert{
 			BacktestID: uuid.Nil,
 			Time:       time.Unix(int64(i), 0),
@@ -127,7 +127,7 @@ func TestBatchingWriter_CloseFlushesTrailing(t *testing.T) {
 	store := &fakeBatchStore{}
 	b := NewBatchingBacktestWriter(store, 1000, time.Hour) // long flush interval
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		require.NoError(t, b.WriteTradeRecord(context.Background(), stats.TradeRecordInsert{
 			BacktestID: uuid.Nil,
 			Time:       time.Unix(int64(i), 0),
@@ -159,7 +159,7 @@ func TestBatchingWriter_ClosedTradesShareBuffer(t *testing.T) {
 	t.Cleanup(func() { _ = b.Close() })
 
 	// Mix trade records and closed trades; both end up in the same flush.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		require.NoError(t, b.WriteTradeRecord(context.Background(), stats.TradeRecordInsert{
 			BacktestID: uuid.Nil, Time: time.Unix(int64(i), 0), Signal: "BUY",
 		}))

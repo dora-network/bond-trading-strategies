@@ -1,5 +1,11 @@
 # AGENTS.md — bond-trading-strategies
 
+## Methodology
+
+Regardless of what other skills say, you are not to commit any code without a review from the user. Tasks should be executed until a commit can be made without compromising pre-commit checks.
+At the end of each task, stage the changes and execute `pre-commit run` to run pre-commit checks. If a task cannot be committed due to failed linting, or other pre-commit check failures,
+continue with the next task. If pre-commit checks all pass, prompt user for review. Do not continue until you receive further instructions for the user.
+
 ## Three binaries
 
 ```
@@ -24,10 +30,10 @@ Order: price-daemon → strategy-server → mcp-server. `.env` is auto-sourced b
 - Run: `tern migrate --config migrations/tern.conf`
 - Schema: `price_history`, `candles_history`, `strategy_runs`, `strategy_backtests`
 - **Time storage convention:** all `TIMESTAMP` (no time zone) columns hold
-  wall-clock values in **UTC**.  The database server is configured with its
+  wall-clock values in **UTC**. The database server is configured with its
   system time zone set to UTC, so `pgx` reads the wall-clock value back as
-  UTC.  Writers MUST serialise `time.Time` values as UTC before binding
-  them.  Do not introduce `TIMESTAMPTZ` columns in new tables; the codebase
+  UTC. Writers MUST serialise `time.Time` values as UTC before binding
+  them. Do not introduce `TIMESTAMPTZ` columns in new tables; the codebase
   is deliberately consistent on `TIMESTAMP` + UTC.
 
 ## Tests

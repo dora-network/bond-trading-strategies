@@ -108,13 +108,13 @@ func TestHandler_processMessage(t *testing.T) {
 
 		assetID := uuid.Must(uuid.NewV7())
 
-		payload := []byte(fmt.Sprintf(`{
+		payload := fmt.Appendf(nil, `{
 			"%s": {
 				"asset_id": "%s",
 				"price": "100.50",
 				"time": "2026-04-10T15:30:00Z"
 			}
-		}`, assetID.String(), assetID.String()))
+		}`, assetID.String(), assetID.String())
 
 		time.Sleep(time.Second)
 		err := h.ProcessMessage(context.Background(), payload)
@@ -160,10 +160,10 @@ func TestHandler_Stream(t *testing.T) {
 
 			// Send one valid message
 			assetID := uuid.Must(uuid.NewV7())
-			msg := []byte(fmt.Sprintf(`{"%s": {"asset_id": "%s", "price": "100.50", "time": "2026-04-10T15:30:00Z"}}`,
+			msg := fmt.Appendf(nil, `{"%s": {"asset_id": "%s", "price": "100.50", "time": "2026-04-10T15:30:00Z"}}`,
 				assetID.String(),
 				assetID.String(),
-			))
+			)
 			wg.Wait()
 			err = c.Write(r.Context(), websocket.MessageText, msg)
 			require.NoError(t, err)

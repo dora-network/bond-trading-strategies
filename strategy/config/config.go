@@ -1,3 +1,3 @@
 package config
 
-type Config interface{}
+type Config any

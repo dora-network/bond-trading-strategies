@@ -144,7 +144,7 @@ func TestPGTradesHistoryStore_StreamTrades_Ordered(t *testing.T) {
 	// 999 rows fits a single batch (batchSize=1000) so the loop
 	// terminates after the first query. The multi-batch keyset path
 	// is covered by TestPGTradesHistoryStore_StreamTrades_MultiBatchKeyset.
-	for i := 0; i < 999; i++ {
+	for i := range 999 {
 		rows.AddRow(
 			"tx-"+strconv.Itoa(i),
 			"ord-"+strconv.Itoa(i),
@@ -199,7 +199,7 @@ func TestPGTradesHistoryStore_StreamTrades_MultiBatchKeyset(t *testing.T) {
 		"user_id", "asset", "quantity", "price", "side",
 		"aggressor_indicator", "created_at",
 	})
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		firstBatch.AddRow(
 			"tx-"+strconv.Itoa(i),
 			"ord-"+strconv.Itoa(i),

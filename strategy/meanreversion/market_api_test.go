@@ -21,7 +21,7 @@ func TestStrategyLookupAssetID(t *testing.T) {
 		lookup.BaseAssetIDReturns("asset-123", nil)
 		meanreversion.SetLookupClient(s, lookup)
 
-		assetID, err := meanreversion.LookupAssetID(s, orderBookID)
+		assetID, err := meanreversion.LookupAssetID(context.Background(), s, orderBookID)
 
 		require.NoError(t, err)
 		assert.Equal(t, "asset-123", assetID)
@@ -35,7 +35,7 @@ func TestStrategyLookupAssetID(t *testing.T) {
 		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		meanreversion.SetLookupClient(s, lookup)
 
-		_, err := meanreversion.LookupAssetID(s, uuid.Nil)
+		_, err := meanreversion.LookupAssetID(context.Background(), s, uuid.Nil)
 
 		require.ErrorContains(t, err, "order book ID is required")
 		assert.Zero(t, lookup.BaseAssetIDCallCount())
@@ -47,7 +47,7 @@ func TestStrategyLookupAssetID(t *testing.T) {
 		lookup.BaseAssetIDReturns("", errors.New("some error"))
 		meanreversion.SetLookupClient(s, lookup)
 
-		_, err := meanreversion.LookupAssetID(s, uuid.Must(uuid.NewV7()))
+		_, err := meanreversion.LookupAssetID(context.Background(), s, uuid.Must(uuid.NewV7()))
 
 		require.ErrorContains(t, err, "some error")
 	})
@@ -57,7 +57,7 @@ func TestStrategyLookupAssetID(t *testing.T) {
 		lookup := &meanreversionfakes.FakeMarketAPIClient{}
 		meanreversion.SetLookupClient(s, lookup)
 
-		_, err := meanreversion.LookupAssetID(s, uuid.Must(uuid.NewV7()))
+		_, err := meanreversion.LookupAssetID(context.Background(), s, uuid.Must(uuid.NewV7()))
 
 		require.ErrorContains(t, err, "returned an empty base asset ID")
 	})
@@ -70,7 +70,7 @@ func TestStrategyCurrentPosition(t *testing.T) {
 		lookup.AssetPositionReturns(decimal.MustNew(3, 1), decimal.Zero, nil)
 		meanreversion.SetLookupClient(s, lookup)
 
-		position, err := meanreversion.CurrentPosition(s, context.Background(), "asset-123")
+		position, err := meanreversion.CurrentPosition(context.Background(), s, "asset-123")
 
 		require.NoError(t, err)
 		assert.True(t, position.Equal(decimal.MustNew(3, 1)))
@@ -85,7 +85,7 @@ func TestStrategyCurrentPosition(t *testing.T) {
 		lookup.AssetPositionReturns(decimal.Zero, decimal.Zero, errors.New("user unavailable"))
 		meanreversion.SetLookupClient(s, lookup)
 
-		_, err := meanreversion.CurrentPosition(s, context.Background(), "asset-123")
+		_, err := meanreversion.CurrentPosition(context.Background(), s, "asset-123")
 
 		require.ErrorContains(t, err, "user unavailable")
 		assert.Equal(t, 1, lookup.AssetPositionCallCount())

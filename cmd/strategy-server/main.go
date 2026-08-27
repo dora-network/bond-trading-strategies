@@ -22,14 +22,40 @@ import (
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/ratelimit"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
+	"github.com/dora-network/bond-trading-strategies/strategy/twap"
+	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	flag "github.com/spf13/pflag"
 )
+
+// newBreakoutHistoricalStore wires a Postgres-backed
+// breakout.HistoricalPriceStore. Returns nil when pool is nil so a
+// missing DATABASE_URL leaves the backtest endpoint disabled rather
+// than crashing startup.
+func newBreakoutHistoricalStore(pool *pgxpool.Pool) breakout.HistoricalPriceStore {
+	if pool == nil {
+		return nil
+	}
+	return breakout.NewPostgresHistoricalStore(pool)
+}
+
+// newBreakoutTradeHistoryStore wires a Postgres-backed
+// breakout.TradeHistoryStore. Returns nil when pool is nil so a
+// missing DATABASE_URL leaves the OBV backtest feature disabled
+// rather than crashing startup.
+func newBreakoutTradeHistoryStore(pool *pgxpool.Pool) breakout.TradeHistoryStore {
+	if pool == nil {
+		return nil
+	}
+	return breakout.NewPGTradeHistoryStore(pool)
+}
 
 //nolint:funlen, mnd // main function with flag setup and orchestration
 func main() {
@@ -122,13 +148,11 @@ func main() {
 	pricesDaemon := streams.New(streams.Config{ReconnectDelay: *reconnectDelay})
 	errCh := make(chan error, 2) //nolint:mnd
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := pricesDaemon.Run(ctx, pricesHandler.Stream); err != nil && !errors.Is(err, context.Canceled) {
 			errCh <- err
 		}
-	}()
+	})
 
 	// Start the live trade stream for copy-trading runs.
 	tradeStream := streams.NewTradeStream()
@@ -145,13 +169,11 @@ func main() {
 					openBooks = append(openBooks, uuid.MustParse(ob.ID))
 				}
 			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				if err := tradeStream.Start(ctx, *wsURL, *apiKey, openBooks); err != nil && !errors.Is(err, context.Canceled) {
 					errCh <- err
 				}
-			}()
+			})
 		}
 	}
 
@@ -167,11 +189,9 @@ func main() {
 		)
 		notifier = bus
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			retentionLoop(ctx, bus, log)
-		}()
+		})
 	}
 	runStore := strategyhttp.NewPGRunStore(pool)
 
@@ -188,7 +208,14 @@ func main() {
 			ctx,
 			notifier,
 			lookup,
-			[]string{meanreversion.StrategyType, copytrading.StrategyType},
+			[]string{
+				meanreversion.StrategyType,
+				copytrading.StrategyType,
+				breakout.StrategyType,
+				momentum.StrategyType,
+				twap.StrategyType,
+				vwap.StrategyType,
+			},
 			orderupdates.NewStream(*wsURL, log),
 			orderupdates.WithLogger(log),
 		)
@@ -201,11 +228,19 @@ func main() {
 		service,
 		strategyhttp.WithRunStore(runStore),
 		strategyhttp.WithBacktestStore(strategyhttp.NewPGBacktestStore(pool)),
+		// runStore also serves as the per-run StateStore for execution
+		// strategies (TWAP) — it implements strategy.StateStore.
+		strategyhttp.WithStateStore(runStore),
 		strategyhttp.WithDecisionStore(decisionStore),
 		strategyhttp.WithDecisionReader(decisionStore),
 		strategyhttp.WithTradesHistoryStore(copytrading.NewPGTradesHistoryStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithTradeStream(tradeStream),
+		// Wire the breakout backtest data source from candles_history.
+		// nil-safe: an empty pool (no DATABASE_URL) leaves the breakout
+		// Backtest disabled rather than crashing startup.
+		strategyhttp.WithHistoricalPriceStore(newBreakoutHistoricalStore(pool)),
+		strategyhttp.WithTradeHistoryStore(newBreakoutTradeHistoryStore(pool)),
 		strategyhttp.WithLogger(log),
 		strategyhttp.WithEncryptionKey(encryptionKey),
 		strategyhttp.WithNotifier(notifier),

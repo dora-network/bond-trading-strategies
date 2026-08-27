@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -152,4 +153,30 @@ func (s *PGRunStore) LookupRunByID(ctx context.Context, id uuid.UUID) (*RunDetai
 		d.EncryptedAPIKey = encKey
 	}
 	return &d, nil
+}
+
+// SaveState persists opaque JSON state for a run. Used by execution
+// strategies (e.g. TWAP) to checkpoint progress between restarts.
+// Satisfies strategy.StateStore.
+func (s *PGRunStore) SaveState(ctx context.Context, runID uuid.UUID, state []byte) error {
+	const q = `UPDATE strategy_runs SET state = $1, updated_at = $2 WHERE id = $3`
+	if _, err := s.pool.Exec(ctx, q, state, time.Now().UTC(), runID); err != nil {
+		return fmt.Errorf("save state for run %s: %w", runID, err)
+	}
+	return nil
+}
+
+// LoadState returns the persisted JSON state for a run, or (nil, nil)
+// when no state has been checkpointed. Satisfies strategy.StateStore.
+func (s *PGRunStore) LoadState(ctx context.Context, runID uuid.UUID) ([]byte, error) {
+	const q = `SELECT state FROM strategy_runs WHERE id = $1`
+	var state []byte
+	err := s.pool.QueryRow(ctx, q, runID).Scan(&state)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load state for run %s: %w", runID, err)
+	}
+	return state, nil
 }

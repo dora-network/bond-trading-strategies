@@ -123,7 +123,6 @@ func TestInverseLeverage(t *testing.T) {
 		{name: "leverage 0.5 → 1 (degenerate, only leverage>1 triggers division)", leverage: decimal.MustParse("0.5"), want: "1"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			inverse := decimal.One
@@ -159,7 +158,6 @@ func TestBalanceAssetFor(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := balanceAssetFor(tt.side, tt.current, bond, usd)
@@ -253,7 +251,6 @@ func TestAvailableBalanceFor(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var got decimal.Decimal
@@ -287,8 +284,8 @@ func TestRunLoop_PauseSuppressesTradeHandling(t *testing.T) {
 	client.portfolio = &doraclient.AccountPortfolioV2{
 		Accounts: map[string]map[string]doraclient.AccountV2{
 			"isolated-bond": {
-				bondID.String(): {AssetId: bondID.String(), IsGlobal: boolPtr(false), Available: "1000"},
-				usdID:           {AssetId: usdID, IsGlobal: boolPtr(false), Available: "10000"},
+				bondID.String(): {AssetId: bondID.String(), IsGlobal: new(false), Available: "1000"},
+				usdID:           {AssetId: usdID, IsGlobal: new(false), Available: "10000"},
 			},
 		},
 	}
@@ -304,7 +301,7 @@ func TestRunLoop_PauseSuppressesTradeHandling(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RunWithTrades(s, ctx, msgCh, tradeCh)
+		_ = RunWithTrades(ctx, s, msgCh, tradeCh)
 	}()
 
 	trade := streams.TradeEvent{
@@ -368,7 +365,7 @@ type fakeMarketAPI struct {
 	orderErr error
 }
 
-func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, side doraclient.Side, quantity decimal.Decimal, inverse decimal.Decimal, fromGlobal bool, _ string) error {
+func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, side doraclient.Side, quantity decimal.Decimal, inverse decimal.Decimal, fromGlobal bool, _ string) (string, error) {
 	f.mu.Lock()
 	f.createMarketOrderCalls++
 	f.capturedQuantity = quantity
@@ -377,11 +374,23 @@ func (f *fakeMarketAPI) CreateMarketOrder(_ context.Context, _ string, side dora
 	f.capturedInverse = inverse
 	err := f.orderErr
 	f.mu.Unlock()
-	return err
+	return "", err
 }
 
 func (f *fakeMarketAPI) GetAssetPosition(_ context.Context, _ string) (decimal.Decimal, decimal.Decimal, error) {
 	return decimal.Zero, decimal.Zero, nil
+}
+
+func (f *fakeMarketAPI) BaseAssetID(_ context.Context, _ string) (string, error) {
+	return "asset-fake", nil
+}
+
+func (f *fakeMarketAPI) AssetPosition(_ context.Context, _ string) (decimal.Decimal, decimal.Decimal, error) {
+	return decimal.Zero, decimal.Zero, nil
+}
+
+func (f *fakeMarketAPI) AssetCollateralWeight(_ context.Context, _ string) (decimal.Decimal, error) {
+	return decimal.One, nil
 }
 
 func (f *fakeMarketAPI) GetPortfolioV2(_ context.Context) (*doraclient.AccountPortfolioV2, error) {
@@ -392,14 +401,18 @@ func (f *fakeMarketAPI) QuoteAssetID(_ context.Context, _ string) (string, error
 	return f.quoteAssetID, nil
 }
 
+func (f *fakeMarketAPI) GetOrderFilledStatus(_ context.Context, _ string) (string, decimal.Decimal, error) {
+	return "OPEN", decimal.Zero, nil
+}
+
+func (f *fakeMarketAPI) ListOrdersByClientOrderIDPrefix(_ context.Context, _ string) ([]doraclient.Order, error) {
+	return nil, nil
+}
+
 func (f *fakeMarketAPI) createMarketOrderCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.createMarketOrderCalls
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }
 
 func TestProperty_PositionLogic(t *testing.T) {

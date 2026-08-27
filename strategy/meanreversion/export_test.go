@@ -11,7 +11,7 @@ import (
 	"github.com/govalues/decimal"
 )
 
-func SetLookupClient(s *Strategy, client marketAPIClient) {
+func SetLookupClient(s *Strategy, client strategyPkg.MarketAPIClient) {
 	s.marketAPIClient = client
 }
 
@@ -23,11 +23,11 @@ func SetBenchmarkYieldClient(s *Strategy, client benchmarkYieldClient) {
 	s.benchmarkClient = client
 }
 
-func LookupAssetID(s *Strategy, orderBookID uuid.UUID) (string, error) {
-	return s.lookupAssetID(orderBookID)
+func LookupAssetID(ctx context.Context, s *Strategy, orderBookID uuid.UUID) (string, error) {
+	return s.lookupAssetID(ctx, orderBookID)
 }
 
-func GetObservations(s *Strategy, ctx context.Context, start, end time.Time) ([]types.YieldObservation, error) {
+func GetObservations(ctx context.Context, s *Strategy, start, end time.Time) ([]types.YieldObservation, error) {
 	return s.getObservations(ctx, start, end)
 }
 
@@ -35,7 +35,7 @@ func GetBenchmarkYield(ctx context.Context, s *Strategy, ts time.Time) decimal.D
 	return s.getBenchmarkYield(ctx, ts)
 }
 
-func CurrentPosition(s *Strategy, ctx context.Context, assetID string) (decimal.Decimal, error) {
+func CurrentPosition(ctx context.Context, s *Strategy, assetID string) (decimal.Decimal, error) {
 	return s.currentPosition(ctx, assetID)
 }
 
@@ -55,7 +55,7 @@ func UsdBal(s *Strategy) decimal.Decimal {
 	return s.usdBal
 }
 
-func InitializeBalances(s *Strategy, ctx context.Context, baseAssetID string) {
+func InitializeBalances(ctx context.Context, s *Strategy, baseAssetID string) {
 	s.initializeBalances(ctx, baseAssetID)
 }
 
@@ -73,7 +73,7 @@ func OpenSignal(s *Strategy) types.Signal {
 
 // RunWithPrices runs the strategy's internal run loop with a caller-supplied
 // price channel, bypassing the prices.Handler subscription. For unit tests only.
-func RunWithPrices(s *Strategy, ctx context.Context, msgs <-chan strategyPkg.Message, priceCh <-chan map[uuid.UUID]pricesPkg.AssetPrice) error {
+func RunWithPrices(ctx context.Context, s *Strategy, msgs <-chan strategyPkg.Message, priceCh <-chan map[uuid.UUID]pricesPkg.AssetPrice) error {
 	s.mu.Lock()
 	if s.isRunning {
 		s.mu.Unlock()

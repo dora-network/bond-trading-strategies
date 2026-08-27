@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Strategy Service API",
-    "version": "1.5.0",
+    "version": "1.9.0",
     "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`."
   },
   "servers": [
@@ -304,7 +304,13 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/TradeRecord" }
+                      "items": {
+                        "anyOf": [
+                          { "$ref": "#/components/schemas/TradeRecord" },
+                          { "$ref": "#/components/schemas/MomentumTradeRecord" },
+                          { "$ref": "#/components/schemas/BreakoutTradeRecord" }
+                        ]
+                      }
                     }
                   }
                 }
@@ -335,7 +341,13 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/ClosedTrade" }
+                      "items": {
+                        "anyOf": [
+                          { "$ref": "#/components/schemas/ClosedTrade" },
+                          { "$ref": "#/components/schemas/MomentumClosedTrade" },
+                          { "$ref": "#/components/schemas/BreakoutClosedTrade" }
+                        ]
+                      }
                     }
                   }
                 }
@@ -702,11 +714,12 @@
       },
       "CopyTraderSummary": {
         "type": "object",
-        "description": "A single entry in the list-copy-traders response. The `id` is the DORA user id and matches the `followed_trader` field accepted by CopyTradingConfig. Names and other identifying information are intentionally omitted for user anonymity.",
+        "description": "A single entry in the list-copy-traders response. The `id` is the DORA user id and matches the `followed_trader` field accepted by CopyTradingConfig. `user_name` is the DORA-registered handle surfaced for display in copy-trading run configuration UIs.",
         "properties": {
-          "id": { "type": "string", "format": "uuid" }
+          "id": { "type": "string", "format": "uuid" },
+          "user_name": { "type": "string" }
         },
-        "required": ["id"]
+        "required": ["id", "user_name"]
       },
       "TenorSummary": {
         "type": "object",
@@ -750,12 +763,14 @@
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading"]
+            "enum": ["mean_reversion", "copytrading", "breakout", "momentum"]
           },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
-              { "$ref": "#/components/schemas/CopyTradingConfig" }
+              { "$ref": "#/components/schemas/CopyTradingConfig" },
+              { "$ref": "#/components/schemas/BreakoutConfig" },
+              { "$ref": "#/components/schemas/MomentumConfig" }
             ]
           },
           "start": { "type": "string", "format": "date-time" },
@@ -768,12 +783,14 @@
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading"]
+            "enum": ["mean_reversion", "copytrading", "breakout", "momentum"]
           },
           "config": {
             "oneOf": [
               { "$ref": "#/components/schemas/MeanReversionConfig" },
-              { "$ref": "#/components/schemas/CopyTradingConfig" }
+              { "$ref": "#/components/schemas/CopyTradingConfig" },
+              { "$ref": "#/components/schemas/BreakoutConfig" },
+              { "$ref": "#/components/schemas/MomentumConfig" }
             ]
           }
         },
@@ -815,6 +832,178 @@
             "exclusiveMinimum": 0,
             "default": 1.0,
             "description": "Starting capital for backtests. Omitted for live runs — obtained from DORA positions."
+          },
+          "leverage": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "Leverage multiplier for live orders."
+          }
+        }
+      },
+      "BreakoutConfig": {
+        "type": "object",
+        "description": "Volatility-compression / price-breakout strategy. Enters when short-window price volatility drops below a threshold of long-window volatility, then a close breaks above (or below) a k·ATR trigger band.",
+        "properties": {
+          "short_vol_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 240,
+            "description": "Short-window price-volatility observation count."
+          },
+          "long_vol_window": {
+            "type": "integer",
+            "minimum": 3,
+            "default": 1440,
+            "description": "Long-window price-volatility observation count. Must be greater than short_vol_window."
+          },
+          "compression_threshold": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 0.3,
+            "description": "ShortVol/LongVol ratio below which the strategy arms for a breakout."
+          },
+          "atr_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 240,
+            "description": "Rolling-mean window for ATR (mean absolute price diff)."
+          },
+          "breakout_atr_multiple": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1.5,
+            "description": "Number of ATR units above/below the most recent close that defines the breakout trigger band."
+          },
+          "confirmation_bars": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 5,
+            "description": "Number of consecutive closes beyond the trigger band required to fire."
+          },
+          "stop_loss_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 20,
+            "description": "Stop-loss distance in ATR units. Mirrored in the live Run loop and the backtester."
+          },
+          "take_profit_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Take-profit distance in ATR units from entry. Set to 0 to disable. Mirrored in the live Run loop and the backtester."
+          },
+          "obv_window": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Recent trades to include in windowed OBV (On-Balance Volume). 0 = no volume verification; > 0 verifies signals with the last N trades, sourced from the live trade stream (runs) or trades_history (backtests)."
+          },
+          "obv_trend_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Absolute OBV threshold the breakout signal must clear when obv_window > 0. Direction-mapped."
+          },
+          "min_long_vol_floor": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Minimum LongVol required to trade. Suppresses entries on a completely flat baseline."
+          },
+          "order_book_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "DORA order book UUID used to locate the traded asset and place orders."
+          },
+          "initial_balance": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "Starting capital for backtests. Omitted for live runs — obtained from DORA positions."
+          },
+          "leverage": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1.0,
+            "description": "Leverage multiplier for live orders."
+          }
+        }
+      },
+      "MomentumConfig": {
+        "type": "object",
+        "description": "Moving-average-crossover trend strategy with configurable signal source (price / ytm / spread) and entry-anchored ATR exits.",
+        "properties": {
+          "signal_source": {
+            "type": "string",
+            "enum": ["price", "ytm", "spread"],
+            "default": "price",
+            "description": "Series the MA crossover runs on. `spread` requires `tenor`."
+          },
+          "fast_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 240,
+            "description": "Fast-MA tick window."
+          },
+          "slow_window": {
+            "type": "integer",
+            "minimum": 3,
+            "default": 1440,
+            "description": "Slow-MA tick window. Must be greater than fast_window."
+          },
+          "atr_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 240,
+            "description": "Mean-absolute-price-diff window for exits."
+          },
+          "stop_loss_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 20.0,
+            "description": "Stop-loss distance in ATR units. 0 disables."
+          },
+          "take_profit_atr": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Take-profit distance in ATR units. 0 disables."
+          },
+          "min_order_size": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Skip opening when the computed quantity is below this. 0 disables."
+          },
+          "max_order_size": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Clamp the order quantity down to this. 0 disables."
+          },
+          "max_position_size": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 1.0,
+            "description": "Maximum fraction of capital allocated per trade."
+          },
+          "order_book_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "DORA order book UUID."
+          },
+          "tenor": {
+            "type": "string",
+            "description": "Benchmark Treasury tenor (e.g. 2Y, 5Y, 10Y). Required when signal_source is spread."
+          },
+          "initial_balance": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1.0,
+            "description": "Starting capital. Must be greater than 0 for backtests; live runs may pass 0 to use the user's DORA USD balance."
           },
           "leverage": {
             "type": "number",
@@ -1014,6 +1203,75 @@
         },
         "required": ["time", "bond_id", "signal", "price"]
       },
+      "MomentumTradeRecord": {
+        "type": "object",
+        "description": "Momentum trade row emitted by GET /v1/backtests/{id}/trades for momentum backtests.",
+        "properties": {
+          "time": { "type": "string", "format": "date-time" },
+          "bond_id": { "type": "string" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "fast_ma": { "type": "string", "description": "Fast MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint." },
+          "slow_ma": { "type": "string", "description": "Slow MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint." },
+          "entry_atr": { "type": "string", "description": "ATR captured on the opening row; mirrored onto the matching exit row." }
+        },
+        "required": ["time", "bond_id", "signal", "price"]
+      },
+      "MomentumClosedTrade": {
+        "type": "object",
+        "description": "Momentum closed-trade row emitted by GET /v1/backtests/{id}/closed-trades for momentum backtests.",
+        "properties": {
+          "bond_id": { "type": "string" },
+          "open_time": { "type": "string", "format": "date-time" },
+          "close_time": { "type": "string", "format": "date-time" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "exit_signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "entry_price": { "type": "string" },
+          "exit_price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "pnl": { "type": "string", "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction." },
+          "exit_reason": { "type": "string", "description": "One of stop_loss, take_profit, reversal, strategy_exit." }
+        },
+        "required": ["bond_id", "open_time", "close_time", "signal", "pnl"]
+      },
+      "BreakoutTradeRecord": {
+        "type": "object",
+        "description": "Breakout trade row emitted by GET /v1/backtests/{id}/trades for breakout backtests.",
+        "properties": {
+          "time": { "type": "string", "format": "date-time" },
+          "bond_id": { "type": "string" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "compression_ratio": { "type": "string", "description": "Short-window / long-window volatility ratio at the tick that armed the breakout (armed ratio on entry rows)." },
+          "entry_atr": { "type": "string", "description": "ATR captured on the opening row; mirrored onto the matching exit row." }
+        },
+        "required": ["time", "bond_id", "signal", "price"]
+      },
+      "BreakoutClosedTrade": {
+        "type": "object",
+        "description": "Breakout closed-trade row emitted by GET /v1/backtests/{id}/closed-trades for breakout backtests.",
+        "properties": {
+          "bond_id": { "type": "string" },
+          "open_time": { "type": "string", "format": "date-time" },
+          "close_time": { "type": "string", "format": "date-time" },
+          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "exit_signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
+          "entry_price": { "type": "string" },
+          "exit_price": { "type": "string" },
+          "quantity": { "type": "string" },
+          "position_size": { "type": "string" },
+          "pnl": { "type": "string", "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction." },
+          "exit_reason": { "type": "string", "description": "One of stop_loss, take_profit, reversal, strategy_exit." },
+          "entry_compression_ratio": { "type": "string", "description": "Compression ratio at the entry tick (short/long window volatility)." },
+          "exit_compression_ratio": { "type": "string", "description": "Compression ratio at the exit tick." }
+        },
+        "required": ["bond_id", "open_time", "close_time", "signal", "pnl"]
+      },
       "RunSummary": {
         "type": "object",
         "properties": {
@@ -1048,8 +1306,10 @@
             "type": "object",
             "properties": {
               "config": {
-                "oneOf": [
+                "anyOf": [
                   { "$ref": "#/components/schemas/MeanReversionConfig" },
+                  { "$ref": "#/components/schemas/BreakoutConfig" },
+                  { "$ref": "#/components/schemas/MomentumConfig" },
                   { "$ref": "#/components/schemas/CopyTradingConfig" }
                 ]
               },

@@ -18,7 +18,16 @@ type doraClient interface {
 	ListOrderBooks(context.Context) ([]DORAOrderBookSummary, error)
 	GetAssetByID(context.Context, string) (*AssetInfo, error)
 	GetUserID(context.Context) (string, error)
-	ListCopyTraders(context.Context) ([]string, error)
+	ListCopyTraders(context.Context) ([]CopyTrader, error)
+}
+
+// CopyTrader is a single entry returned by DORA's
+// `GET /v1/user/copy_traders` endpoint. The user_id is the DORA user UUID
+// (matches the `followed_trader` field accepted by CopyTradingConfig) and
+// user_name is the DORA-registered handle.
+type CopyTrader struct {
+	UserID   string `json:"user_id"`
+	UserName string `json:"user_name"`
 }
 
 const (
@@ -164,10 +173,10 @@ func (c *liveDORAClient) GetUserID(ctx context.Context) (string, error) {
 	return resp.Data.ID, nil
 }
 
-// ListCopyTraders returns the user IDs of DORA users who have allow_copy_trading
-// enabled. Pagination is hidden from the caller: pages of `copyTraderPageSize`
-// are requested until DORA returns an empty data array or a short page.
-func (c *liveDORAClient) ListCopyTraders(ctx context.Context) ([]string, error) {
+// ListCopyTraders returns the DORA users who have allow_copy_trading enabled.
+// Pagination is hidden from the caller: pages of `copyTraderPageSize` are
+// requested until DORA returns an empty data array or a short page.
+func (c *liveDORAClient) ListCopyTraders(ctx context.Context) ([]CopyTrader, error) {
 	authCtx, err := c.authContext(ctx)
 	if err != nil {
 		return nil, err
@@ -177,7 +186,7 @@ func (c *liveDORAClient) ListCopyTraders(ctx context.Context) ([]string, error) 
 	// an empty data array or a short one (len(resp.Data) < limit). If DORA ever
 	// returns a full page indefinitely, this loops forever. Upgrade when DORA
 	// exposes a total/has_more field on GetCopyTradersResponse.
-	var all []string
+	var all []CopyTrader
 	for page := int32(1); ; page++ {
 		resp, rawResp, err := c.client.DefaultAPI.
 			GetCopyTraders(authCtx).
@@ -193,7 +202,9 @@ func (c *liveDORAClient) ListCopyTraders(ctx context.Context) ([]string, error) 
 		if resp == nil || len(resp.Data) == 0 {
 			break
 		}
-		all = append(all, resp.Data...)
+		for _, t := range resp.Data {
+			all = append(all, CopyTrader{UserID: t.UserId, UserName: t.UserName})
+		}
 		if len(resp.Data) < int(copyTraderPageSize) {
 			break
 		}
