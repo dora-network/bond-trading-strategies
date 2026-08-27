@@ -5,6 +5,8 @@ on:
     branches:
       - development
       - main
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       environment:
@@ -14,26 +16,27 @@ on:
         options:
           - dev
           - staging
+          - prod
 
 permissions:
   id-token: write
   contents: read
 
 concurrency:
-  group: deploy-bond-trading-${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || 'dev') }}
+  group: deploy-bond-trading-${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || (startsWith(github.ref, 'refs/tags/') && 'prod' || 'dev')) }}
   cancel-in-progress: false
 
 env:
   AWS_REGION: us-east-1
   REPOSITORY: dora-bond-trading-strategies
-  DEPLOY_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || 'dev') }}
+  DEPLOY_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || (startsWith(github.ref, 'refs/tags/') && 'prod' || 'dev')) }}
 
 jobs:
   deploy:
-    name: Build and deploy ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || 'dev') }}
-    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'development' || github.ref_name == 'main'
+    name: Build and deploy ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || (startsWith(github.ref, 'refs/tags/') && 'prod' || 'dev')) }}
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'development' || github.ref_name == 'main' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || 'dev') }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'staging' || (startsWith(github.ref, 'refs/tags/') && 'prod' || 'dev')) }}
     steps:
       - uses: actions/checkout@v4
 
