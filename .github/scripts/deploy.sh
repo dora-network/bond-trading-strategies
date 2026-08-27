@@ -17,16 +17,16 @@ dev)
   DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-dev.dora.co,https://dora-awsdev.vercel.app"
   ;;
 staging)
-  DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-staging.dora.co,https://staging.dora.co,https://navion-paper.dora.co,https://blkbox-paper.dora.co"
+  DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-staging.dora.co,https://staging.dora.co,https://navion-paper.dora.co,https://blkbox-paper.dora.co,https://gold-i-paper.dora.co"
   ;;
 prod)
-  DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-prod.dora.co,https://aws-bondtrader-prod.dora.co,https://dora.co,https://app.bondtrader.io"
+  DEFAULT_CORS_ALLOWED_ORIGINS="https://aws-prod.dora.co,https://aws-bondtrader-prod.dora.co,https://dora.co,https://app.bondtrader.io,https://navion.dora.co,https://blkbox.dora.co,https://blkbox-prod.vercel.app"
   WS_URL="wss://api.dora.co"
   DORA_BASE_URL="https://api.dora.co"
   ;;
 *)
   # Custom/integrator domains should pass CORS_ALLOWED_ORIGINS explicitly.
-  DEFAULT_CORS_ALLOWED_ORIGINS="https://${ENVIRONMENT}.dora.co,https://navion.dora.co,https://blkbox.dora.co"
+  DEFAULT_CORS_ALLOWED_ORIGINS="https://${ENVIRONMENT}.dora.co,https://navion.dora.co,https://blkbox.dora.co,https://app.bondtrader.io"
   ;;
 esac
 CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS:-$DEFAULT_CORS_ALLOWED_ORIGINS}"
