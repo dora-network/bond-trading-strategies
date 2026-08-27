@@ -364,6 +364,22 @@ func (d *BacktestDetail) GetCreatedAt() time.Time { return d.CreatedAt }
 func (d *RunDetail) GetDORAUserID() string   { return d.DORAUserID }
 func (d *RunDetail) GetCreatedAt() time.Time { return d.CreatedAt }
 
+// snapshot returns a value-copy of d that is safe to JSON-marshal
+// without contending with concurrent mutations by the completion watcher.
+// ponytail: shallow copy + a fresh *time.Time for StoppedAt; Config bytes
+// are immutable post-create so we share the slice.
+func (d *RunDetail) snapshot() RunDetail {
+	cp := *d
+	if d.StoppedAt != nil {
+		t := *d.StoppedAt
+		cp.StoppedAt = &t
+	}
+	if d.Config != nil {
+		cp.Config = append(json.RawMessage(nil), d.Config...)
+	}
+	return cp
+}
+
 // orderBookIDCfg is a minimal struct for extracting order_book_id from strategy config JSON.
 type orderBookIDCfg struct {
 	OrderBookID string `json:"order_book_id"`
@@ -1633,7 +1649,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	h.startOrderUpdater(detail, strat)
 
 	h.startStopLossObserver(detail, strat)
-	h.startCompletionWatcher(detail)
+	h.startCompletionWatcher(detail.ID)
 
 	h.publishEvent(r.Context(), notifications.Event{
 		Type:      notifications.EventRunStarted,
@@ -1643,7 +1659,10 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		Payload:   map[string]any{"strategy_type": detail.StrategyType},
 	})
 
-	writeJSON(w, http.StatusCreated, detail)
+	h.mu.RLock()
+	snap := detail.snapshot()
+	h.mu.RUnlock()
+	writeJSON(w, http.StatusCreated, snap)
 }
 
 func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
@@ -1976,7 +1995,7 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 		}
 	}
 	h.startStopLossObserver(detail, strat)
-	h.startCompletionWatcher(detail)
+	h.startCompletionWatcher(detail.ID)
 	return nil
 }
 
@@ -2147,7 +2166,10 @@ func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strateg
 // Distinct from startStopLossObserver which is a no-op for strategies
 // without stop-loss semantics — this runs unconditionally so every
 // execution strategy's natural completion is observable.
-func (h *Handler) startCompletionWatcher(detail *RunDetail) {
+func (h *Handler) startCompletionWatcher(id uuid.UUID) {
+	// ponytail: pass id, not *RunDetail. The goroutine below outlives
+	// the createRun handler and must not race with JSON marshalling of
+	// the same *RunDetail pointer that createRun wrote to the response.
 	parent := context.Background()
 	if h.service != nil {
 		if bc := h.service.BaseContext(); bc != nil {
@@ -2156,14 +2178,14 @@ func (h *Handler) startCompletionWatcher(detail *RunDetail) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	h.mu.Lock()
-	h.runCompletionWatchers[detail.ID] = cancel
-	h.runningStrategies[detail.ID] = nil // ensure map entry exists
+	h.runCompletionWatchers[id] = cancel
+	h.runningStrategies[id] = nil // ensure map entry exists
 	h.mu.Unlock()
 	go func() {
 		defer cancel()
 		defer func() {
 			h.mu.Lock()
-			delete(h.runCompletionWatchers, detail.ID)
+			delete(h.runCompletionWatchers, id)
 			h.mu.Unlock()
 		}()
 		interval := h.stopLossObserverInterval
@@ -2177,8 +2199,8 @@ func (h *Handler) startCompletionWatcher(detail *RunDetail) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if !h.runIsActive(detail.ID) {
-					h.maybePublishNaturalCompletion(ctx, detail)
+				if !h.runIsActive(id) {
+					h.maybePublishNaturalCompletion(ctx, id)
 					return
 				}
 			}
@@ -2235,7 +2257,7 @@ func (h *Handler) runStopLossObserver(ctx context.Context, detail *RunDetail, ob
 			return
 		case <-ticker.C:
 			if !h.runIsActive(detail.ID) {
-				h.maybePublishNaturalCompletion(ctx, detail)
+				h.maybePublishNaturalCompletion(ctx, detail.ID)
 				return
 			}
 			z, pnl, triggered := obs.LastStopLossTrigger()
@@ -2275,10 +2297,9 @@ func (h *Handler) runIsActive(id uuid.UUID) bool {
 // skipped consumed) without going through stopRun. The observer
 // picks this up once per run. The status is also flipped to
 // "completed" so runIsActive returns false and the public status
-// reflects reality.
-func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, detail *RunDetail) {
+func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, id uuid.UUID) {
 	h.mu.Lock()
-	d, ok := h.runs[detail.ID]
+	d, ok := h.runs[id]
 	if !ok || d.Status != "running" {
 		h.mu.Unlock()
 		return
@@ -2287,7 +2308,7 @@ func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, detail *Run
 	d.UpdatedAt = h.now().UTC()
 	d.StoppedAt = &d.UpdatedAt
 	userID := d.DORAUserID
-	runID := d.ID.String()
+	runID := id.String()
 	if err := h.saveRun(ctx, d); err != nil {
 		slog.Error("twap: save completed run", "err", err, "run_id", runID)
 	}
