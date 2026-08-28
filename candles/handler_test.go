@@ -145,6 +145,60 @@ func TestHandler_processMessage(t *testing.T) {
 		assert.Equal(t, expectedOpen, c.Val.Open)
 	})
 
+	t.Run("valid message with YTM fields", func(t *testing.T) {
+		wg := sync.WaitGroup{}
+		wg.Add(1)
+		var captured []candles.Candle
+		fakeStore := &candlesfakes.FakeCandleStore{
+			SaveCandlesStub: func(ctx context.Context, entries []candles.StreamCandlesEntry) error {
+				for _, e := range entries {
+					captured = append(captured, e.Val)
+				}
+				wg.Done()
+				return nil
+			},
+		}
+		h := candles.New(candles.Config{}, fakeStore)
+
+		s := candles.NewStoreSubscriber(fakeStore, h.Subscribe)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		go func() {
+			_ = s.Start(ctx)
+		}()
+
+		payload := []byte(`[
+			{
+				"Time": "2026-04-10T15:30:00Z",
+				"Val": {
+					"order_book_id": "book-123",
+					"start_timestamp": "2026-04-10T15:30:00Z",
+					"open": "100.00",
+					"high": "105.00",
+					"low": "95.00",
+					"close": "102.50",
+					"volume": "1000",
+					"open_ytm": "4.20",
+					"high_ytm": "4.30",
+					"low_ytm": "4.10",
+					"close_ytm": "4.25"
+				}
+			}
+		]`)
+
+		time.Sleep(time.Second)
+		err := h.ProcessMessage(context.Background(), "book-123", payload)
+		require.NoError(t, err)
+		wg.Wait()
+
+		require.Len(t, captured, 1)
+		c := captured[0]
+		assert.True(t, c.OpenYTM.Equal(decimal.MustParse("4.20")), "OpenYTM")
+		assert.True(t, c.HighYTM.Equal(decimal.MustParse("4.30")), "HighYTM")
+		assert.True(t, c.LowYTM.Equal(decimal.MustParse("4.10")), "LowYTM")
+		assert.True(t, c.CloseYTM.Equal(decimal.MustParse("4.25")), "CloseYTM")
+	})
+
 	t.Run("empty list", func(t *testing.T) {
 		fakeStore := &candlesfakes.FakeCandleStore{}
 		h := candles.New(candles.Config{}, fakeStore)

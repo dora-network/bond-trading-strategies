@@ -26,6 +26,10 @@ type Candle struct {
 	Low            decimal.Decimal `json:"low"`
 	Close          decimal.Decimal `json:"close"`
 	Volume         decimal.Decimal `json:"volume"`
+	OpenYTM        decimal.Decimal `json:"open_ytm"`
+	HighYTM        decimal.Decimal `json:"high_ytm"`
+	LowYTM         decimal.Decimal `json:"low_ytm"`
+	CloseYTM       decimal.Decimal `json:"close_ytm"`
 }
 
 // StreamCandlesEntry wraps a Candle with its stream timestamp.
@@ -58,8 +62,8 @@ type Config struct {
 type CandleStore interface {
 	GetLastTimestamp(ctx context.Context, orderBookID string) (*time.Time, error)
 	SaveCandles(ctx context.Context, entries []StreamCandlesEntry) error
+	LoadCandles(ctx context.Context, orderBookID string, since, until time.Time) ([]Candle, error)
 }
-
 type Handler struct {
 	mu          sync.RWMutex
 	cfg         Config
