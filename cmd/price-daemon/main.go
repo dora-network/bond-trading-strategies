@@ -205,6 +205,9 @@ func main() {
 		candlesHandler := candles.New(candlesCfg, candlesStore, candles.WithMessageHook(func() {
 			checker.markCandleStream(time.Now())
 		}))
+		// One global subscriber drains the fan-out into SaveCandles.
+		// Future strategy-server code can subscribe its own chans
+		// to the same handler.
 		candlesStoreSubscriber := candles.NewStoreSubscriber(
 			candlesStore,
 			candlesHandler.Subscribe,

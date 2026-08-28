@@ -75,7 +75,8 @@ func TestHandler_OrderUpdatesCallSitesAreIsolatedPerUser(t *testing.T) {
 	notifier := &notificationsfakes.FakeNotifier{}
 	spy := &orderUpdatesManagerSpy{}
 
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 		strategyhttp.WithNotifier(notifier),
@@ -106,6 +107,7 @@ func TestHandler_OrderUpdatesCallSitesAreIsolatedPerUser(t *testing.T) {
 	rec = httptest.NewRecorder()
 	stopReq := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/runs/"+runID.String(), nil)
 	stopReq.Header.Set("Authorization", "ApiKey test-key")
+	stopReq.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, stopReq)
 	require.Equal(t, http.StatusOK, rec.Code, "unexpected stop status %d", rec.Code)
 
@@ -145,7 +147,8 @@ func TestHandler_OrderUpdatesNilManagerIsNoop(t *testing.T) {
 		},
 	}
 	// Note: WithOrderUpdatesManager is intentionally NOT applied.
-	handler := strategyhttp.NewHandler(svc,
+	handler := strategyhttp.NewHandler(
+		svc,
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
 	)
@@ -176,6 +179,7 @@ func TestHandler_OrderUpdatesNilManagerIsNoop(t *testing.T) {
 		rec := httptest.NewRecorder()
 		stopReq := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/runs/"+runID.String(), nil)
 		stopReq.Header.Set("Authorization", "ApiKey test-key")
+		stopReq.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, stopReq)
 	}, "stopRun must not panic when WithOrderUpdatesManager was not applied")
 }

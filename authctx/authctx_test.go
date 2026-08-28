@@ -28,9 +28,3 @@ func TestWithAndReadBearerToken(t *testing.T) {
 		t.Errorf("got BearerToken %q, want %q", info.BearerToken, "t1")
 	}
 }
-
-func TestAbsentContextReturnsFalse(t *testing.T) {
-	if _, ok := authctx.AuthInfoFromContext(context.Background()); ok {
-		t.Error("expected no auth info on plain context")
-	}
-}

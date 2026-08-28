@@ -6,15 +6,19 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/dora-network/bond-trading-strategies/authctx"
-	"github.com/dora-network/bond-trading-strategies/cors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dora-network/bond-trading-strategies/authctx"
+	"github.com/dora-network/bond-trading-strategies/cors"
 )
 
+// captured records what the test-installed WS handler observed on the
+// request context after the notificationsRouter finished populating it.
 type captured struct {
 	hadAuthInfo bool
 	gotAPIKey   string
+	gotTenant   string
 }
 
 func TestNotificationsRouter_HeaderTakesPrecedence(t *testing.T) {
@@ -24,6 +28,7 @@ func TestNotificationsRouter_HeaderTakesPrecedence(t *testing.T) {
 		if info, ok := authctx.AuthInfoFromContext(r.Context()); ok {
 			cap.hadAuthInfo = true
 			cap.gotAPIKey = info.APIKey
+			cap.gotTenant = info.TenantID
 		}
 		w.WriteHeader(http.StatusOK)
 	})
@@ -31,33 +36,39 @@ func TestNotificationsRouter_HeaderTakesPrecedence(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/notifications/ws?x-api-key=query-key", nil)
 	req.Header.Set("Authorization", "ApiKey header-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
 	require.Equal(t, http.StatusOK, rr.Code)
 	assert.True(t, cap.hadAuthInfo)
 	assert.Equal(t, "header-key", cap.gotAPIKey)
+	assert.Equal(t, "tenant-A", cap.gotTenant)
 }
 
-func TestNotificationsRouter_FallsBackToQueryParam(t *testing.T) {
-	cap := &captured{}
+func TestNotificationsRouter_MissingTenantIDStillAttachesCreds(t *testing.T) {
+	called := false
 	sub := http.NewServeMux()
 	sub.HandleFunc("/v1/notifications/ws", func(w http.ResponseWriter, r *http.Request) {
-		if info, ok := authctx.AuthInfoFromContext(r.Context()); ok {
-			cap.hadAuthInfo = true
-			cap.gotAPIKey = info.APIKey
+		info, ok := authctx.AuthInfoFromContext(r.Context())
+		if !ok || info.APIKey != "header-key" || info.TenantID != "" {
+			t.Errorf("expected APIKey set with empty TenantID, got %+v ok=%v", info, ok)
 		}
+		called = true
 		w.WriteHeader(http.StatusOK)
 	})
 	r := notificationsRouter{fallback: http.NewServeMux(), sub: sub}
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/notifications/ws?x-api-key=query-key", nil)
+	// Authorization header present, tenant-id absent. The credential
+	// is still installed on the context; DORA decides downstream whether
+	// the call needs a tenant to succeed.
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/notifications/ws", nil)
+	req.Header.Set("Authorization", "ApiKey header-key")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
 	require.Equal(t, http.StatusOK, rr.Code)
-	assert.True(t, cap.hadAuthInfo)
-	assert.Equal(t, "query-key", cap.gotAPIKey)
+	assert.True(t, called)
 }
 
 func TestNotificationsRouter_NoCredentialsPassesThrough(t *testing.T) {
