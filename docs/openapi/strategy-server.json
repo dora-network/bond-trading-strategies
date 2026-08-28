@@ -3,7 +3,7 @@
   "info": {
     "title": "Strategy Service API",
     "version": "1.9.0",
-    "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`."
+    "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require:\n- `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`\n- `tenant-id: <id>` — DORA tenant identifier required on every authed request and forwarded on outbound DORA calls. See the TenantID parameter."
   },
   "servers": [
     {
@@ -33,7 +33,9 @@
                       "type": "boolean"
                     }
                   },
-                  "required": ["ok"]
+                  "required": [
+                    "ok"
+                  ]
                 }
               }
             }
@@ -45,7 +47,11 @@
       "get": {
         "operationId": "listDORAOrderBooks",
         "summary": "List DORA order books available to the configured API key",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "DORA order books",
@@ -65,33 +71,57 @@
               }
             }
           },
-          "500": { "$ref": "#/components/responses/InternalError" }
-        }
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantID"
+          }
+        ]
       }
     },
     "/v1/dora/user": {
       "get": {
         "operationId": "getDORAUser",
         "summary": "Look up the current DORA user for the configured API key",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Current DORA user",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/DORAUserSummary" }
+                "schema": {
+                  "$ref": "#/components/schemas/DORAUserSummary"
+                }
               }
             }
           },
-          "500": { "$ref": "#/components/responses/InternalError" }
-        }
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantID"
+          }
+        ]
       }
     },
     "/v1/copy-traders": {
       "get": {
         "operationId": "listCopyTraders",
         "summary": "List traders available to be followed by a copy-trading run",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Available copy traders",
@@ -111,15 +141,26 @@
               }
             }
           },
-          "500": { "$ref": "#/components/responses/InternalError" }
-        }
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantID"
+          }
+        ]
       }
     },
     "/v1/tenors": {
       "get": {
         "operationId": "listTenors",
         "summary": "List supported benchmark Treasury tenors",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Supported benchmark tenors",
@@ -130,21 +171,32 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/TenorSummary" }
+                      "items": {
+                        "$ref": "#/components/schemas/TenorSummary"
+                      }
                     }
                   }
                 }
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantID"
+          }
+        ]
       }
     },
     "/v1/strategies": {
       "get": {
         "operationId": "listStrategies",
         "summary": "List available strategies and their capabilities",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Registered strategies",
@@ -164,34 +216,56 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantID"
+          }
+        ]
       }
     },
     "/v1/backtests": {
       "get": {
         "operationId": "listBacktests",
         "summary": "List all backtests for the authenticated user",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "parameters": [
-          { "$ref": "#/components/parameters/Page" },
-          { "$ref": "#/components/parameters/Limit" },
+          {
+            "$ref": "#/components/parameters/TenantID"
+          },
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
           {
             "name": "status",
             "in": "query",
             "description": "Comma-separated status filter: running,completed,failed,cancelled",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "from",
             "in": "query",
             "description": "Earliest created_at (RFC3339 or YYYY-MM-DD)",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "to",
             "in": "query",
             "description": "Latest created_at (RFC3339 or YYYY-MM-DD)",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -208,25 +282,37 @@
                         "$ref": "#/components/schemas/BacktestSummary"
                       }
                     },
-                    "page": { "type": "integer" },
-                    "limit": { "type": "integer" }
+                    "page": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer"
+                    }
                   }
                 }
               }
             }
           },
-          "500": { "$ref": "#/components/responses/InternalError" }
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
         }
       },
       "post": {
         "operationId": "createBacktest",
         "summary": "Create a new asynchronous backtest",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/CreateBacktestRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/CreateBacktestRequest"
+              }
             }
           }
         },
@@ -235,23 +321,47 @@
             "description": "Backtest accepted",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/BacktestDetail" }
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestDetail"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "501": { "$ref": "#/components/responses/NotImplemented" },
-          "500": { "$ref": "#/components/responses/InternalError" }
-        }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantID"
+          }
+        ]
       }
     },
     "/v1/backtests/{id}": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        },
+        {
+          "$ref": "#/components/parameters/TenantID"
+        }
+      ],
       "get": {
         "operationId": "getBacktest",
         "summary": "Get summarised backtest result by ID",
         "description": "Returns a flattened result summary (total_pnl, win_count, etc.) rather than the full BacktestDetail. For metadata-only lookups (id, status, timestamps) use the /metadata sub-resource.",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Backtest result summary",
@@ -263,37 +373,62 @@
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "delete": {
         "operationId": "cancelBacktest",
         "summary": "Cancel / delete a backtest",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Backtest cancelled — returns updated metadata",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/BacktestSummary" }
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestSummary"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/InternalError" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
         }
       }
     },
     "/v1/backtests/{id}/trades": {
       "parameters": [
-        { "$ref": "#/components/parameters/ID" },
-        { "$ref": "#/components/parameters/Page" },
-        { "$ref": "#/components/parameters/Limit" }
+        {
+          "$ref": "#/components/parameters/ID"
+        },
+        {
+          "$ref": "#/components/parameters/Page"
+        },
+        {
+          "$ref": "#/components/parameters/Limit"
+        },
+        {
+          "$ref": "#/components/parameters/TenantID"
+        }
       ],
       "get": {
         "operationId": "getBacktestTrades",
         "summary": "Get paginated trade records for a completed backtest",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Paginated trade records",
@@ -306,9 +441,15 @@
                       "type": "array",
                       "items": {
                         "anyOf": [
-                          { "$ref": "#/components/schemas/TradeRecord" },
-                          { "$ref": "#/components/schemas/MomentumTradeRecord" },
-                          { "$ref": "#/components/schemas/BreakoutTradeRecord" }
+                          {
+                            "$ref": "#/components/schemas/TradeRecord"
+                          },
+                          {
+                            "$ref": "#/components/schemas/MomentumTradeRecord"
+                          },
+                          {
+                            "$ref": "#/components/schemas/BreakoutTradeRecord"
+                          }
                         ]
                       }
                     }
@@ -317,20 +458,35 @@
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/v1/backtests/{id}/closed-trades": {
       "parameters": [
-        { "$ref": "#/components/parameters/ID" },
-        { "$ref": "#/components/parameters/Page" },
-        { "$ref": "#/components/parameters/Limit" }
+        {
+          "$ref": "#/components/parameters/ID"
+        },
+        {
+          "$ref": "#/components/parameters/Page"
+        },
+        {
+          "$ref": "#/components/parameters/Limit"
+        },
+        {
+          "$ref": "#/components/parameters/TenantID"
+        }
       ],
       "get": {
         "operationId": "getBacktestClosedTrades",
         "summary": "Get paginated closed trades for a completed backtest",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Paginated closed trades",
@@ -343,9 +499,15 @@
                       "type": "array",
                       "items": {
                         "anyOf": [
-                          { "$ref": "#/components/schemas/ClosedTrade" },
-                          { "$ref": "#/components/schemas/MomentumClosedTrade" },
-                          { "$ref": "#/components/schemas/BreakoutClosedTrade" }
+                          {
+                            "$ref": "#/components/schemas/ClosedTrade"
+                          },
+                          {
+                            "$ref": "#/components/schemas/MomentumClosedTrade"
+                          },
+                          {
+                            "$ref": "#/components/schemas/BreakoutClosedTrade"
+                          }
                         ]
                       }
                     }
@@ -354,26 +516,43 @@
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/v1/backtests/{id}/metadata": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        },
+        {
+          "$ref": "#/components/parameters/TenantID"
+        }
+      ],
       "get": {
         "operationId": "getBacktestMetadata",
         "summary": "Get backtest metadata (ID, status, timestamps) — lighter than full detail",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Backtest metadata",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/BacktestSummary" }
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestSummary"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
@@ -381,7 +560,11 @@
       "get": {
         "operationId": "listRuns",
         "summary": "List all strategy runs for the authenticated user",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Run summaries",
@@ -392,25 +575,40 @@
                   "properties": {
                     "items": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/RunSummary" }
+                      "items": {
+                        "$ref": "#/components/schemas/RunSummary"
+                      }
                     }
                   }
                 }
               }
             }
           },
-          "500": { "$ref": "#/components/responses/InternalError" }
-        }
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantID"
+          }
+        ]
       },
       "post": {
         "operationId": "createRun",
         "summary": "Create a new live strategy run",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/CreateRunRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunRequest"
+              }
             }
           }
         },
@@ -419,122 +617,216 @@
             "description": "Run created",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/RunDetail" }
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "501": { "$ref": "#/components/responses/NotImplemented" },
-          "500": { "$ref": "#/components/responses/InternalError" }
-        }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantID"
+          }
+        ]
       }
     },
     "/v1/runs/{id}": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        },
+        {
+          "$ref": "#/components/parameters/TenantID"
+        }
+      ],
       "get": {
         "operationId": "getRun",
         "summary": "Get a specific run by ID",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Run detail",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/RunDetail" }
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       },
       "delete": {
         "operationId": "stopRun",
         "summary": "Stop and delete a strategy run",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Run stopped",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/RunDetail" }
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/InternalError" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
         }
       }
     },
     "/v1/runs/{id}/pause": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        },
+        {
+          "$ref": "#/components/parameters/TenantID"
+        }
+      ],
       "post": {
         "operationId": "pauseRun",
         "summary": "Pause a running strategy",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Run paused",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/RunDetail" }
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
               }
             }
           },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/InternalError" }
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
         }
       }
     },
     "/v1/runs/{id}/resume": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        },
+        {
+          "$ref": "#/components/parameters/TenantID"
+        }
+      ],
       "post": {
         "operationId": "resumeRun",
         "summary": "Resume a paused strategy",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Run resumed",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/RunDetail" }
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
               }
             }
           },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/InternalError" }
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
         }
       }
     },
     "/v1/notifications/ws": {
       "get": {
-        "tags": ["notifications"],
+        "tags": [
+          "notifications"
+        ],
         "operationId": "subscribeNotifications",
         "summary": "Open a WebSocket connection for real-time lifecycle notifications",
         "description": "Upgrades the HTTP connection to a WebSocket. The server authenticates using the standard Authorization header (ApiKey <key> or Bearer <token>), resolves the DORA user, and streams JSON-encoded Event objects as text frames. Clients that cannot set request headers may alternatively pass `x-api-key` as a query parameter; the header takes precedence when both are present. Optional query params: Last-Event-ID (UUIDv7) replays events from the log; types (comma-separated) filters by EventType. Heartbeat is WS-level ping/pong every 30s.",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantID"
+          },
           {
             "name": "Last-Event-ID",
             "in": "query",
             "required": false,
-            "schema": { "type": "string", "format": "uuid" },
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
             "description": "Replay events with id > Last-Event-ID (UUIDv7). Capped at 1000 events or 24h, whichever is smaller."
           },
           {
             "name": "types",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Comma-separated whitelist of EventType values. Default: all."
           },
           {
             "name": "x-api-key",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Alternative to the Authorization header for clients that cannot set request headers on the WebSocket handshake. Ignored when the Authorization header is present."
           }
         ],
@@ -554,21 +846,28 @@
           "name": "run_id",
           "in": "path",
           "required": true,
-          "schema": { "type": "string", "format": "uuid" }
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
         },
         {
           "name": "from",
           "in": "query",
           "required": false,
           "description": "RFC3339 or YYYY-MM-DD. Inclusive lower bound on created_at. Malformed values are rejected with 400.",
-          "schema": { "type": "string" }
+          "schema": {
+            "type": "string"
+          }
         },
         {
           "name": "to",
           "in": "query",
           "required": false,
           "description": "RFC3339 or YYYY-MM-DD. Inclusive upper bound on created_at. Malformed values are rejected with 400.",
-          "schema": { "type": "string" }
+          "schema": {
+            "type": "string"
+          }
         },
         {
           "name": "limit",
@@ -587,26 +886,43 @@
           "in": "query",
           "required": false,
           "description": "Opaque continuation token returned by a previous call. Malformed values are rejected with 400.",
-          "schema": { "type": "string" }
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "$ref": "#/components/parameters/TenantID"
         }
       ],
       "get": {
         "operationId": "listTradingDecisions",
         "summary": "List the trading decisions recorded for a live strategy run, newest first",
         "description": "Returns the strategy_decisions rows for a single run owned by the authenticated user. Backtest runs are not represented in this table. The user is derived from the auth token, not the URL — wrong-user and not-found both produce 404. The cursor is opaque and versioned; do not parse it.",
-        "security": [{ "ApiKeyAuth": [] }],
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "One page of decisions",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/DecisionList" }
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionList"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/InternalError" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
         }
       }
     }
@@ -625,13 +941,20 @@
         "name": "id",
         "in": "path",
         "required": true,
-        "schema": { "type": "string", "format": "uuid" }
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
       },
       "Page": {
         "name": "page",
         "in": "query",
         "description": "Page number (default 1)",
-        "schema": { "type": "integer", "minimum": 1, "default": 1 }
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        }
       },
       "Limit": {
         "name": "limit",
@@ -643,6 +966,15 @@
           "maximum": 50,
           "default": 10
         }
+      },
+      "TenantID": {
+        "name": "tenant-id",
+        "in": "header",
+        "required": true,
+        "description": "DORA tenant identifier required on every authed request; forwarded to DORA on every outbound call.",
+        "schema": {
+          "type": "string"
+        }
       }
     },
     "responses": {
@@ -650,7 +982,9 @@
         "description": "Invalid request",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
           }
         }
       },
@@ -658,7 +992,9 @@
         "description": "Resource not found",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
           }
         }
       },
@@ -666,7 +1002,9 @@
         "description": "Strategy is known but not implemented for the requested operation",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
           }
         }
       },
@@ -674,7 +1012,9 @@
         "description": "A strategy is already active for this order book",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
           }
         }
       },
@@ -682,7 +1022,9 @@
         "description": "Internal server error",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
           }
         }
       }
@@ -691,11 +1033,21 @@
       "DORAOrderBookSummary": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "display_name": { "type": "string" },
-          "base_asset_id": { "type": "string" },
-          "quote_asset_id": { "type": "string" },
-          "status": { "type": "string" }
+          "id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "base_asset_id": {
+            "type": "string"
+          },
+          "quote_asset_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
         },
         "required": [
           "id",
@@ -708,110 +1060,212 @@
       "DORAUserSummary": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" }
+          "id": {
+            "type": "string"
+          }
         },
-        "required": ["id"]
+        "required": [
+          "id"
+        ]
       },
       "CopyTraderSummary": {
         "type": "object",
         "description": "A single entry in the list-copy-traders response. The `id` is the DORA user id and matches the `followed_trader` field accepted by CopyTradingConfig. `user_name` is the DORA-registered handle surfaced for display in copy-trading run configuration UIs.",
         "properties": {
-          "id": { "type": "string", "format": "uuid" },
-          "user_name": { "type": "string" }
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_name": {
+            "type": "string"
+          }
         },
-        "required": ["id", "user_name"]
+        "required": [
+          "id",
+          "user_name"
+        ]
       },
       "TenorSummary": {
         "type": "object",
         "properties": {
-          "code": { "type": "string" },
-          "description": { "type": "string" }
+          "code": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
         },
-        "required": ["code", "description"]
+        "required": [
+          "code",
+          "description"
+        ]
       },
       "StrategySummary": {
         "type": "object",
         "properties": {
-          "type": { "type": "string" },
+          "type": {
+            "type": "string"
+          },
           "status": {
             "type": "string",
-            "enum": ["available", "not_implemented"]
+            "enum": [
+              "available",
+              "not_implemented"
+            ]
           },
-          "description": { "type": "string" },
+          "description": {
+            "type": "string"
+          },
           "config_fields": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/StrategyConfigField" }
+            "items": {
+              "$ref": "#/components/schemas/StrategyConfigField"
+            }
           },
-          "supports_run": { "type": "boolean" },
-          "supports_backtest": { "type": "boolean" }
+          "supports_run": {
+            "type": "boolean"
+          },
+          "supports_backtest": {
+            "type": "boolean"
+          }
         },
-        "required": ["type", "status", "supports_run", "supports_backtest"]
+        "required": [
+          "type",
+          "status",
+          "supports_run",
+          "supports_backtest"
+        ]
       },
       "StrategyConfigField": {
         "type": "object",
         "properties": {
-          "name": { "type": "string" },
-          "type": { "type": "string" },
-          "description": { "type": "string" },
-          "required": { "type": "boolean" },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
           "default": {}
         },
-        "required": ["name", "type", "description", "required"]
+        "required": [
+          "name",
+          "type",
+          "description",
+          "required"
+        ]
       },
       "CreateBacktestRequest": {
         "type": "object",
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading", "breakout", "momentum"]
+            "enum": [
+              "mean_reversion",
+              "copytrading",
+              "breakout",
+              "momentum"
+            ]
           },
           "config": {
             "oneOf": [
-              { "$ref": "#/components/schemas/MeanReversionConfig" },
-              { "$ref": "#/components/schemas/CopyTradingConfig" },
-              { "$ref": "#/components/schemas/BreakoutConfig" },
-              { "$ref": "#/components/schemas/MomentumConfig" }
+              {
+                "$ref": "#/components/schemas/MeanReversionConfig"
+              },
+              {
+                "$ref": "#/components/schemas/CopyTradingConfig"
+              },
+              {
+                "$ref": "#/components/schemas/BreakoutConfig"
+              },
+              {
+                "$ref": "#/components/schemas/MomentumConfig"
+              }
             ]
           },
-          "start": { "type": "string", "format": "date-time" },
-          "end": { "type": "string", "format": "date-time" }
+          "start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time"
+          }
         },
-        "required": ["strategy_type", "config", "start", "end"]
+        "required": [
+          "strategy_type",
+          "config",
+          "start",
+          "end"
+        ]
       },
       "CreateRunRequest": {
         "type": "object",
         "properties": {
           "strategy_type": {
             "type": "string",
-            "enum": ["mean_reversion", "copytrading", "breakout", "momentum"]
+            "enum": [
+              "mean_reversion",
+              "copytrading",
+              "breakout",
+              "momentum"
+            ]
           },
           "config": {
             "oneOf": [
-              { "$ref": "#/components/schemas/MeanReversionConfig" },
-              { "$ref": "#/components/schemas/CopyTradingConfig" },
-              { "$ref": "#/components/schemas/BreakoutConfig" },
-              { "$ref": "#/components/schemas/MomentumConfig" }
+              {
+                "$ref": "#/components/schemas/MeanReversionConfig"
+              },
+              {
+                "$ref": "#/components/schemas/CopyTradingConfig"
+              },
+              {
+                "$ref": "#/components/schemas/BreakoutConfig"
+              },
+              {
+                "$ref": "#/components/schemas/MomentumConfig"
+              }
             ]
           }
         },
-        "required": ["strategy_type", "config"]
+        "required": [
+          "strategy_type",
+          "config"
+        ]
       },
       "MeanReversionConfig": {
         "type": "object",
         "properties": {
-          "lookback_window": { "type": "integer", "minimum": 2, "default": 20 },
+          "lookback_window": {
+            "type": "integer",
+            "minimum": 2,
+            "default": 20
+          },
           "entry_z_score": {
             "type": "number",
             "exclusiveMinimum": 0,
             "default": 2.0
           },
-          "exit_z_score": { "type": "number", "minimum": 0, "default": 0.5 },
+          "exit_z_score": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.5
+          },
           "stop_loss_z_score": {
             "type": "number",
             "minimum": 0,
             "default": 3.5
           },
-          "min_std_dev": { "type": "number", "minimum": 0, "default": 0.0005 },
+          "min_std_dev": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0005
+          },
           "max_position_size": {
             "type": "number",
             "exclusiveMinimum": 0,
@@ -937,7 +1391,11 @@
         "properties": {
           "signal_source": {
             "type": "string",
-            "enum": ["price", "ytm", "spread"],
+            "enum": [
+              "price",
+              "ytm",
+              "spread"
+            ],
             "default": "price",
             "description": "Series the MA crossover runs on. `spread` requires `tenor`."
           },
@@ -1044,7 +1502,10 @@
           },
           "disallowed_bonds": {
             "type": "array",
-            "items": { "type": "string", "format": "uuid" },
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
             "description": "Bond UUIDs to exclude from copying. If absent or empty, all bonds are eligible."
           },
           "initial_balance": {
@@ -1054,22 +1515,47 @@
             "description": "Starting cash for backtests. Omit or set to 0 to use the package default (10000). Omitted for live runs — obtained from DORA positions."
           }
         },
-        "required": ["followed_trader", "percentage_of_available", "leverage"]
+        "required": [
+          "followed_trader",
+          "percentage_of_available",
+          "leverage"
+        ]
       },
       "BacktestSummary": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "format": "uuid" },
-          "dora_user_id": { "type": "string" },
-          "strategy_type": { "type": "string" },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "dora_user_id": {
+            "type": "string"
+          },
+          "strategy_type": {
+            "type": "string"
+          },
           "status": {
             "type": "string",
-            "enum": ["running", "completed", "failed", "cancelled"]
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
           },
-          "config": { "description": "Normalised strategy config JSON" },
-          "asset_name": { "type": "string" },
-          "asset_symbol": { "type": "string" },
-          "created_at": { "type": "string", "format": "date-time" },
+          "config": {
+            "description": "Normalised strategy config JSON"
+          },
+          "asset_name": {
+            "type": "string"
+          },
+          "asset_symbol": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
           "completed_at": {
             "type": "string",
             "format": "date-time",
@@ -1090,16 +1576,31 @@
       },
       "BacktestDetail": {
         "allOf": [
-          { "$ref": "#/components/schemas/BacktestSummary" },
+          {
+            "$ref": "#/components/schemas/BacktestSummary"
+          },
           {
             "type": "object",
             "properties": {
-              "start": { "type": "string", "format": "date-time" },
-              "end": { "type": "string", "format": "date-time" },
-              "result": { "$ref": "#/components/schemas/BacktestResult" },
-              "error": { "type": "string" }
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "result": {
+                "$ref": "#/components/schemas/BacktestResult"
+              },
+              "error": {
+                "type": "string"
+              }
             },
-            "required": ["start", "end"]
+            "required": [
+              "start",
+              "end"
+            ]
           }
         ]
       },
@@ -1111,41 +1612,79 @@
             "type": "string",
             "description": "Total realised P&L"
           },
-          "win_count": { "type": "integer" },
-          "loss_count": { "type": "integer" },
-          "max_drawdown": { "type": "string" },
-          "sharpe_ratio": { "type": "string" },
-          "strategy_type": { "type": "string" },
+          "win_count": {
+            "type": "integer"
+          },
+          "loss_count": {
+            "type": "integer"
+          },
+          "max_drawdown": {
+            "type": "string"
+          },
+          "sharpe_ratio": {
+            "type": "string"
+          },
+          "strategy_type": {
+            "type": "string"
+          },
           "status": {
             "type": "string",
-            "enum": ["running", "completed", "failed", "cancelled"]
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
           },
-          "config": { "description": "Normalised strategy config JSON" },
-          "asset_name": { "type": "string" },
-          "asset_symbol": { "type": "string" },
+          "config": {
+            "description": "Normalised strategy config JSON"
+          },
+          "asset_name": {
+            "type": "string"
+          },
+          "asset_symbol": {
+            "type": "string"
+          },
           "error": {
             "type": "string",
             "description": "Error message if the backtest failed"
           }
         },
-        "required": ["strategy_type", "status"]
+        "required": [
+          "strategy_type",
+          "status"
+        ]
       },
       "BacktestResult": {
         "type": "object",
         "properties": {
           "closed_trades": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/ClosedTrade" }
+            "items": {
+              "$ref": "#/components/schemas/ClosedTrade"
+            }
           },
           "trade_records": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/TradeRecord" }
+            "items": {
+              "$ref": "#/components/schemas/TradeRecord"
+            }
           },
-          "total_pnl": { "type": "string" },
-          "win_count": { "type": "integer" },
-          "loss_count": { "type": "integer" },
-          "max_drawdown": { "type": "string" },
-          "sharpe_ratio": { "type": "string" }
+          "total_pnl": {
+            "type": "string"
+          },
+          "win_count": {
+            "type": "integer"
+          },
+          "loss_count": {
+            "type": "integer"
+          },
+          "max_drawdown": {
+            "type": "string"
+          },
+          "sharpe_ratio": {
+            "type": "string"
+          }
         },
         "required": [
           "closed_trades",
@@ -1160,22 +1699,66 @@
       "ClosedTrade": {
         "type": "object",
         "properties": {
-          "bond_id": { "type": "string" },
-          "open_time": { "type": "string", "format": "date-time" },
-          "close_time": { "type": "string", "format": "date-time" },
-          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
-          "exit_signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
-          "entry_spread": { "type": "string" },
-          "exit_spread": { "type": "string" },
-          "entry_zscore": { "type": "string" },
-          "exit_zscore": { "type": "string" },
-          "position_size": { "type": "string" },
-          "pnl": { "type": "string" },
-          "exit_reason": { "type": "string" },
-          "entry_price": { "type": "string" },
-          "exit_price": { "type": "string" },
-          "quantity": { "type": "string" },
-          "entry_balance": { "type": "string" }
+          "bond_id": {
+            "type": "string"
+          },
+          "open_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "close_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "exit_signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "entry_spread": {
+            "type": "string"
+          },
+          "exit_spread": {
+            "type": "string"
+          },
+          "entry_zscore": {
+            "type": "string"
+          },
+          "exit_zscore": {
+            "type": "string"
+          },
+          "position_size": {
+            "type": "string"
+          },
+          "pnl": {
+            "type": "string"
+          },
+          "exit_reason": {
+            "type": "string"
+          },
+          "entry_price": {
+            "type": "string"
+          },
+          "exit_price": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "entry_balance": {
+            "type": "string"
+          }
         },
         "required": [
           "bond_id",
@@ -1191,99 +1774,296 @@
       "TradeRecord": {
         "type": "object",
         "properties": {
-          "time": { "type": "string", "format": "date-time" },
-          "bond_id": { "type": "string" },
-          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
-          "spread": { "type": "string" },
-          "position_size": { "type": "string" },
-          "zscore": { "type": "string" },
-          "price": { "type": "string" },
-          "quantity": { "type": "string" },
-          "entry_balance": { "type": "string" }
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "bond_id": {
+            "type": "string"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "spread": {
+            "type": "string"
+          },
+          "position_size": {
+            "type": "string"
+          },
+          "zscore": {
+            "type": "string"
+          },
+          "price": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "entry_balance": {
+            "type": "string"
+          }
         },
-        "required": ["time", "bond_id", "signal", "price"]
+        "required": [
+          "time",
+          "bond_id",
+          "signal",
+          "price"
+        ]
       },
       "MomentumTradeRecord": {
         "type": "object",
         "description": "Momentum trade row emitted by GET /v1/backtests/{id}/trades for momentum backtests.",
         "properties": {
-          "time": { "type": "string", "format": "date-time" },
-          "bond_id": { "type": "string" },
-          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
-          "price": { "type": "string" },
-          "quantity": { "type": "string" },
-          "position_size": { "type": "string" },
-          "fast_ma": { "type": "string", "description": "Fast MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint." },
-          "slow_ma": { "type": "string", "description": "Slow MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint." },
-          "entry_atr": { "type": "string", "description": "ATR captured on the opening row; mirrored onto the matching exit row." }
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "bond_id": {
+            "type": "string"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "price": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "position_size": {
+            "type": "string"
+          },
+          "fast_ma": {
+            "type": "string",
+            "description": "Fast MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint."
+          },
+          "slow_ma": {
+            "type": "string",
+            "description": "Slow MA at the decision. Not persisted (no backing column); always empty on rows read back from this endpoint."
+          },
+          "entry_atr": {
+            "type": "string",
+            "description": "ATR captured on the opening row; mirrored onto the matching exit row."
+          }
         },
-        "required": ["time", "bond_id", "signal", "price"]
+        "required": [
+          "time",
+          "bond_id",
+          "signal",
+          "price"
+        ]
       },
       "MomentumClosedTrade": {
         "type": "object",
         "description": "Momentum closed-trade row emitted by GET /v1/backtests/{id}/closed-trades for momentum backtests.",
         "properties": {
-          "bond_id": { "type": "string" },
-          "open_time": { "type": "string", "format": "date-time" },
-          "close_time": { "type": "string", "format": "date-time" },
-          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
-          "exit_signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
-          "entry_price": { "type": "string" },
-          "exit_price": { "type": "string" },
-          "quantity": { "type": "string" },
-          "position_size": { "type": "string" },
-          "pnl": { "type": "string", "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction." },
-          "exit_reason": { "type": "string", "description": "One of stop_loss, take_profit, reversal, strategy_exit." }
+          "bond_id": {
+            "type": "string"
+          },
+          "open_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "close_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "exit_signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "entry_price": {
+            "type": "string"
+          },
+          "exit_price": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "position_size": {
+            "type": "string"
+          },
+          "pnl": {
+            "type": "string",
+            "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction."
+          },
+          "exit_reason": {
+            "type": "string",
+            "description": "One of stop_loss, take_profit, reversal, strategy_exit."
+          }
         },
-        "required": ["bond_id", "open_time", "close_time", "signal", "pnl"]
+        "required": [
+          "bond_id",
+          "open_time",
+          "close_time",
+          "signal",
+          "pnl"
+        ]
       },
       "BreakoutTradeRecord": {
         "type": "object",
         "description": "Breakout trade row emitted by GET /v1/backtests/{id}/trades for breakout backtests.",
         "properties": {
-          "time": { "type": "string", "format": "date-time" },
-          "bond_id": { "type": "string" },
-          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
-          "price": { "type": "string" },
-          "quantity": { "type": "string" },
-          "position_size": { "type": "string" },
-          "compression_ratio": { "type": "string", "description": "Short-window / long-window volatility ratio at the tick that armed the breakout (armed ratio on entry rows)." },
-          "entry_atr": { "type": "string", "description": "ATR captured on the opening row; mirrored onto the matching exit row." }
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "bond_id": {
+            "type": "string"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "price": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "position_size": {
+            "type": "string"
+          },
+          "compression_ratio": {
+            "type": "string",
+            "description": "Short-window / long-window volatility ratio at the tick that armed the breakout (armed ratio on entry rows)."
+          },
+          "entry_atr": {
+            "type": "string",
+            "description": "ATR captured on the opening row; mirrored onto the matching exit row."
+          }
         },
-        "required": ["time", "bond_id", "signal", "price"]
+        "required": [
+          "time",
+          "bond_id",
+          "signal",
+          "price"
+        ]
       },
       "BreakoutClosedTrade": {
         "type": "object",
         "description": "Breakout closed-trade row emitted by GET /v1/backtests/{id}/closed-trades for breakout backtests.",
         "properties": {
-          "bond_id": { "type": "string" },
-          "open_time": { "type": "string", "format": "date-time" },
-          "close_time": { "type": "string", "format": "date-time" },
-          "signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
-          "exit_signal": { "type": "string", "enum": ["BUY", "SELL", "HOLD"] },
-          "entry_price": { "type": "string" },
-          "exit_price": { "type": "string" },
-          "quantity": { "type": "string" },
-          "position_size": { "type": "string" },
-          "pnl": { "type": "string", "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction." },
-          "exit_reason": { "type": "string", "description": "One of stop_loss, take_profit, reversal, strategy_exit." },
-          "entry_compression_ratio": { "type": "string", "description": "Compression ratio at the entry tick (short/long window volatility)." },
-          "exit_compression_ratio": { "type": "string", "description": "Compression ratio at the exit tick." }
+          "bond_id": {
+            "type": "string"
+          },
+          "open_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "close_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "exit_signal": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL",
+              "HOLD"
+            ]
+          },
+          "entry_price": {
+            "type": "string"
+          },
+          "exit_price": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "position_size": {
+            "type": "string"
+          },
+          "pnl": {
+            "type": "string",
+            "description": "Profit/loss in price terms: quantity x (exit_price - entry_price), signed by direction."
+          },
+          "exit_reason": {
+            "type": "string",
+            "description": "One of stop_loss, take_profit, reversal, strategy_exit."
+          },
+          "entry_compression_ratio": {
+            "type": "string",
+            "description": "Compression ratio at the entry tick (short/long window volatility)."
+          },
+          "exit_compression_ratio": {
+            "type": "string",
+            "description": "Compression ratio at the exit tick."
+          }
         },
-        "required": ["bond_id", "open_time", "close_time", "signal", "pnl"]
+        "required": [
+          "bond_id",
+          "open_time",
+          "close_time",
+          "signal",
+          "pnl"
+        ]
       },
       "RunSummary": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "format": "uuid" },
-          "dora_user_id": { "type": "string" },
-          "strategy_type": { "type": "string" },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "dora_user_id": {
+            "type": "string"
+          },
+          "strategy_type": {
+            "type": "string"
+          },
           "status": {
             "type": "string",
-            "enum": ["running", "paused", "stopped"]
+            "enum": [
+              "running",
+              "paused",
+              "stopped"
+            ]
           },
-          "created_at": { "type": "string", "format": "date-time" },
-          "updated_at": { "type": "string", "format": "date-time" },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
           "stopped_at": {
             "type": "string",
             "format": "date-time",
@@ -1301,21 +2081,35 @@
       },
       "RunDetail": {
         "allOf": [
-          { "$ref": "#/components/schemas/RunSummary" },
+          {
+            "$ref": "#/components/schemas/RunSummary"
+          },
           {
             "type": "object",
             "properties": {
               "config": {
                 "anyOf": [
-                  { "$ref": "#/components/schemas/MeanReversionConfig" },
-                  { "$ref": "#/components/schemas/BreakoutConfig" },
-                  { "$ref": "#/components/schemas/MomentumConfig" },
-                  { "$ref": "#/components/schemas/CopyTradingConfig" }
+                  {
+                    "$ref": "#/components/schemas/MeanReversionConfig"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BreakoutConfig"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MomentumConfig"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CopyTradingConfig"
+                  }
                 ]
               },
-              "error": { "type": "string" }
+              "error": {
+                "type": "string"
+              }
             },
-            "required": ["config"]
+            "required": [
+              "config"
+            ]
           }
         ]
       },
@@ -1336,52 +2130,76 @@
       "BacktestStartedPayload": {
         "type": "object",
         "properties": {
-          "strategy_type": { "type": "string" }
+          "strategy_type": {
+            "type": "string"
+          }
         }
       },
       "BacktestCompletedPayload": {
         "type": "object",
         "properties": {
-          "strategy_type": { "type": "string" }
+          "strategy_type": {
+            "type": "string"
+          }
         }
       },
       "BacktestFailedPayload": {
         "type": "object",
         "properties": {
-          "error": { "type": "string" }
+          "error": {
+            "type": "string"
+          }
         },
-        "required": ["error"]
+        "required": [
+          "error"
+        ]
       },
       "RunStartedPayload": {
         "type": "object",
         "properties": {
-          "strategy_type": { "type": "string" }
+          "strategy_type": {
+            "type": "string"
+          }
         }
       },
       "RunStoppedPayload": {
         "type": "object",
         "properties": {
-          "reason": { "type": "string" }
+          "reason": {
+            "type": "string"
+          }
         }
       },
       "RunStopLossPayload": {
         "type": "object",
         "properties": {
-          "z_score": { "type": "string" },
-          "pnl": { "type": "string" }
+          "z_score": {
+            "type": "string"
+          },
+          "pnl": {
+            "type": "string"
+          }
         }
       },
       "Event": {
         "type": "object",
         "description": "A single notification event delivered over the WebSocket. New event types (notably dora.*) may appear without a spec change — clients MUST tolerate unknown values of `type`.",
-        "required": ["id", "type", "user_id", "timestamp", "payload"],
+        "required": [
+          "id",
+          "type",
+          "user_id",
+          "timestamp",
+          "payload"
+        ],
         "properties": {
           "id": {
             "type": "string",
             "format": "uuid",
             "description": "UUIDv7. Monotonic; used as the Last-Event-ID replay cursor."
           },
-          "type": { "$ref": "#/components/schemas/EventType" },
+          "type": {
+            "$ref": "#/components/schemas/EventType"
+          },
           "user_id": {
             "type": "string",
             "description": "DORA user id the event belongs to."
@@ -1405,12 +2223,24 @@
             "type": "object",
             "description": "Type-specific JSON object.",
             "oneOf": [
-              { "$ref": "#/components/schemas/BacktestStartedPayload" },
-              { "$ref": "#/components/schemas/BacktestCompletedPayload" },
-              { "$ref": "#/components/schemas/BacktestFailedPayload" },
-              { "$ref": "#/components/schemas/RunStartedPayload" },
-              { "$ref": "#/components/schemas/RunStoppedPayload" },
-              { "$ref": "#/components/schemas/RunStopLossPayload" }
+              {
+                "$ref": "#/components/schemas/BacktestStartedPayload"
+              },
+              {
+                "$ref": "#/components/schemas/BacktestCompletedPayload"
+              },
+              {
+                "$ref": "#/components/schemas/BacktestFailedPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RunStartedPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RunStoppedPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RunStopLossPayload"
+              }
             ]
           }
         }
@@ -1419,50 +2249,121 @@
         "type": "object",
         "description": "Internal. Persisted copy of an Event used for Last-Event-ID replay. Not exposed via the REST API.",
         "properties": {
-          "id": { "type": "string", "format": "uuid" },
-          "user_id": { "type": "string" },
-          "type": { "$ref": "#/components/schemas/EventType" },
-          "run_id": { "type": "string", "format": "uuid", "nullable": true },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/EventType"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
           "backtest_id": {
             "type": "string",
             "format": "uuid",
             "nullable": true
           },
-          "created_at": { "type": "string", "format": "date-time" },
-          "payload": { "type": "object" }
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "payload": {
+            "type": "object"
+          }
         }
       },
       "ErrorResponse": {
         "type": "object",
         "properties": {
-          "error": { "type": "string" }
+          "error": {
+            "type": "string"
+          }
         },
-        "required": ["error"]
+        "required": [
+          "error"
+        ]
       },
       "Decision": {
         "type": "object",
         "description": "One trading decision recorded during a live strategy run. The row is the source of truth for the inputs that produced a single market order; clients should treat all fields as immutable audit data.",
         "properties": {
-          "run_id": { "type": "string", "format": "uuid" },
-          "seq": { "type": "integer", "format": "int64" },
-          "strategy_type": { "type": "string" },
-          "order_book_id": { "type": "string", "format": "uuid" },
-          "asset": { "type": "string", "format": "uuid" },
-          "side": { "type": "string", "enum": ["BUY", "SELL"] },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "strategy_type": {
+            "type": "string"
+          },
+          "order_book_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "asset": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL"
+            ]
+          },
           "signal": {
             "type": "string",
-            "enum": ["buy", "sell", "BUY", "SELL"]
+            "enum": [
+              "buy",
+              "sell",
+              "BUY",
+              "SELL"
+            ]
           },
-          "kind": { "type": "string", "enum": ["open", "close", "extend"] },
-          "quantity": { "type": "string" },
-          "price": { "type": "string" },
-          "leverage": { "type": "string" },
-          "inverse_leverage": { "type": "string" },
-          "from_global_position": { "type": "boolean" },
-          "reason": { "type": "string" },
-          "reason_detail": { "type": "string" },
-          "client_order_id": { "type": "string" },
-          "created_at": { "type": "string", "format": "date-time" }
+          "kind": {
+            "type": "string",
+            "enum": [
+              "open",
+              "close",
+              "extend"
+            ]
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "price": {
+            "type": "string"
+          },
+          "leverage": {
+            "type": "string"
+          },
+          "inverse_leverage": {
+            "type": "string"
+          },
+          "from_global_position": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "reason_detail": {
+            "type": "string"
+          },
+          "client_order_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         },
         "required": [
           "run_id",
@@ -1490,14 +2391,18 @@
         "properties": {
           "items": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/Decision" }
+            "items": {
+              "$ref": "#/components/schemas/Decision"
+            }
           },
           "next_cursor": {
             "type": "string",
             "description": "Opaque continuation token. Pass back as the cursor query parameter to fetch the next page. Clients MUST NOT parse this value."
           }
         },
-        "required": ["items"]
+        "required": [
+          "items"
+        ]
       }
     }
   }
