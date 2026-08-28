@@ -24,6 +24,22 @@ type FakeCandleStore struct {
 		result1 *time.Time
 		result2 error
 	}
+	LoadCandlesStub        func(context.Context, string, time.Time, time.Time) ([]candles.Candle, error)
+	loadCandlesMutex       sync.RWMutex
+	loadCandlesArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+		arg3 time.Time
+		arg4 time.Time
+	}
+	loadCandlesReturns struct {
+		result1 []candles.Candle
+		result2 error
+	}
+	loadCandlesReturnsOnCall map[int]struct {
+		result1 []candles.Candle
+		result2 error
+	}
 	SaveCandlesStub        func(context.Context, []candles.StreamCandlesEntry) error
 	saveCandlesMutex       sync.RWMutex
 	saveCandlesArgsForCall []struct {
@@ -101,6 +117,73 @@ func (fake *FakeCandleStore) GetLastTimestampReturnsOnCall(i int, result1 *time.
 	}
 	fake.getLastTimestampReturnsOnCall[i] = struct {
 		result1 *time.Time
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCandleStore) LoadCandles(arg1 context.Context, arg2 string, arg3 time.Time, arg4 time.Time) ([]candles.Candle, error) {
+	fake.loadCandlesMutex.Lock()
+	ret, specificReturn := fake.loadCandlesReturnsOnCall[len(fake.loadCandlesArgsForCall)]
+	fake.loadCandlesArgsForCall = append(fake.loadCandlesArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+		arg3 time.Time
+		arg4 time.Time
+	}{arg1, arg2, arg3, arg4})
+	stub := fake.LoadCandlesStub
+	fakeReturns := fake.loadCandlesReturns
+	fake.recordInvocation("LoadCandles", []interface{}{arg1, arg2, arg3, arg4})
+	fake.loadCandlesMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCandleStore) LoadCandlesCallCount() int {
+	fake.loadCandlesMutex.RLock()
+	defer fake.loadCandlesMutex.RUnlock()
+	return len(fake.loadCandlesArgsForCall)
+}
+
+func (fake *FakeCandleStore) LoadCandlesCalls(stub func(context.Context, string, time.Time, time.Time) ([]candles.Candle, error)) {
+	fake.loadCandlesMutex.Lock()
+	defer fake.loadCandlesMutex.Unlock()
+	fake.LoadCandlesStub = stub
+}
+
+func (fake *FakeCandleStore) LoadCandlesArgsForCall(i int) (context.Context, string, time.Time, time.Time) {
+	fake.loadCandlesMutex.RLock()
+	defer fake.loadCandlesMutex.RUnlock()
+	argsForCall := fake.loadCandlesArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
+}
+
+func (fake *FakeCandleStore) LoadCandlesReturns(result1 []candles.Candle, result2 error) {
+	fake.loadCandlesMutex.Lock()
+	defer fake.loadCandlesMutex.Unlock()
+	fake.LoadCandlesStub = nil
+	fake.loadCandlesReturns = struct {
+		result1 []candles.Candle
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCandleStore) LoadCandlesReturnsOnCall(i int, result1 []candles.Candle, result2 error) {
+	fake.loadCandlesMutex.Lock()
+	defer fake.loadCandlesMutex.Unlock()
+	fake.LoadCandlesStub = nil
+	if fake.loadCandlesReturnsOnCall == nil {
+		fake.loadCandlesReturnsOnCall = make(map[int]struct {
+			result1 []candles.Candle
+			result2 error
+		})
+	}
+	fake.loadCandlesReturnsOnCall[i] = struct {
+		result1 []candles.Candle
 		result2 error
 	}{result1, result2}
 }

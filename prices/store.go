@@ -25,6 +25,9 @@ func NewPGStore(pool *pgxpool.Pool) *PGStore {
 
 // SavePrices batch-inserts all prices from a single message into price_history.
 func (s *PGStore) SavePrices(ctx context.Context, prices map[uuid.UUID]AssetPrice) error {
+	if len(prices) == 0 {
+		return nil
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -37,11 +40,21 @@ func (s *PGStore) SavePrices(ctx context.Context, prices map[uuid.UUID]AssetPric
 		}
 	}()
 
-	const q = `INSERT INTO price_history (asset_id, price, ytm, timestamp) VALUES ($1, $2, $3, $4)`
+	// On reconnect the price stream re-sends the snapshot it already
+	// sent at startup. Without ON CONFLICT the second pass errors
+	// out the whole batch (duplicate key on the PK) and silently
+	// drops the write for every asset. Match SaveCandles' shape.
+	const q = `
+		INSERT INTO price_history (asset_id, price, ytm, timestamp)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (asset_id, timestamp) DO UPDATE SET
+			price = EXCLUDED.price,
+			ytm = EXCLUDED.ytm
+	`
 
 	for _, p := range prices {
 		if _, err := tx.Exec(ctx, q, p.AssetID, p.Price, p.YTM, p.Time); err != nil {
-			return fmt.Errorf("insert asset %s: %w", p.AssetID, err)
+			return fmt.Errorf("upsert asset %s: %w", p.AssetID, err)
 		}
 	}
 
