@@ -1308,7 +1308,10 @@ func TestHandlerRestoreRuns(t *testing.T) {
 	var detail strategyhttp.RunDetail
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
 	assert.Equal(t, "running", detail.Status)
-	assert.Equal(t, "running", store.runs[pausedID].Status)
+	persisted, err := store.LookupRunByID(context.Background(), pausedID)
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	assert.Equal(t, "running", persisted.Status)
 }
 
 func TestHandlerRestoreBacktests(t *testing.T) {
@@ -2142,6 +2145,7 @@ func tickClock(start time.Time) func() time.Time {
 }
 
 type memoryRunStore struct {
+	mu   sync.Mutex
 	runs map[uuid.UUID]*strategyhttp.RunDetail
 }
 
@@ -2181,6 +2185,8 @@ func (f doraClientFunc) ListCopyTraders(ctx context.Context) ([]strategyhttp.Cop
 }
 
 func (s *memoryRunStore) LoadRuns(ctx context.Context) ([]*strategyhttp.RunDetail, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]*strategyhttp.RunDetail, 0, len(s.runs))
 	for _, run := range s.runs {
 		copyRun := *run
@@ -2191,6 +2197,8 @@ func (s *memoryRunStore) LoadRuns(ctx context.Context) ([]*strategyhttp.RunDetai
 }
 
 func (s *memoryRunStore) SaveRun(ctx context.Context, detail *strategyhttp.RunDetail) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.runs == nil {
 		s.runs = make(map[uuid.UUID]*strategyhttp.RunDetail)
 	}
@@ -2205,12 +2213,16 @@ func (s *memoryRunStore) SaveRun(ctx context.Context, detail *strategyhttp.RunDe
 // user is reported as not existing, mirroring the 404-collapse semantic
 // of the real PGRunStore.
 func (s *memoryRunStore) CheckRunExists(_ context.Context, id uuid.UUID, doraUserID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	run, ok := s.runs[id]
 	return ok && run.DORAUserID == doraUserID, nil
 }
 
 // LookupRunByID satisfies RunStore.LookupRunByID for tests.
 func (s *memoryRunStore) LookupRunByID(_ context.Context, id uuid.UUID) (*strategyhttp.RunDetail, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	run, ok := s.runs[id]
 	if !ok {
 		return nil, nil
