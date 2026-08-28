@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
-	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dora-network/bond-trading-strategies/authctx"
 )
 
 var _ doraClient = (*liveDORAClient)(nil)
@@ -24,6 +27,7 @@ func TestLiveDORAClientGetUserIDIgnoresUnknownUserFields(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/user/self", r.URL.Path)
 		assert.Equal(t, "ApiKey test-key", r.Header.Get("Authorization"))
+		assert.Equal(t, "tenant-A", r.Header.Get("tenant-id"))
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -37,7 +41,7 @@ func TestLiveDORAClientGetUserIDIgnoresUnknownUserFields(t *testing.T) {
 				"roles":                                  []string{"TRADER"},
 				"show_tutorial_cards":                    false,
 				"notifications_enabled":                  true,
-				"tenant_id":                              "tenant-123",
+				"tenant_id":                              "tenant-A",
 				"allow_email_notifications":              true,
 				"allow_liquidations_notifications":       true,
 				"allow_deposit_withdrawal_notifications": true,
@@ -63,14 +67,100 @@ func TestLiveDORAClientGetUserIDIgnoresUnknownUserFields(t *testing.T) {
 		httpClient: srv.Client(),
 	}
 
-	got, err := client.GetUserID(authctx.WithAPIKey(context.Background(), "test-key"))
+	got, err := client.GetUserID(authctx.WithAuthInfo(context.Background(), authctx.AuthInfo{
+		APIKey:   "test-key",
+		TenantID: "tenant-A",
+	}))
 	require.NoError(t, err)
 	assert.Equal(t, "user-123", got)
 }
 
-func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
+func TestLiveDORAClient_SDKCallForwardsTenantID(t *testing.T) {
 	t.Parallel()
 
+	var seenTenant string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenTenant = r.Header.Get("tenant-id")
+		if r.URL.Path != "/v1/user/copy_traders" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp := doraclient.GetCopyTradersResponse{
+			Data: []doraclient.CopyTrader{},
+			Metadata: doraclient.Metadata{
+				StatusCode: 200,
+				TraceId:    "t",
+				RequestId:  "r",
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	cfg := doraclient.NewConfiguration()
+	cfg.Servers = doraclient.ServerConfigurations{
+		{URL: srv.URL, Description: "test"},
+	}
+	// Wire the SDK with the same tenantTransport wrapper as production.
+	cfg.HTTPClient = &http.Client{Transport: &tenantTransport{base: http.DefaultTransport}}
+	client := &liveDORAClient{
+		client:     doraclient.NewAPIClient(cfg),
+		baseURL:    srv.URL,
+		httpClient: cfg.HTTPClient,
+	}
+
+	ctx := authctx.WithAuthInfo(context.Background(), authctx.AuthInfo{
+		APIKey:   "test-key",
+		TenantID: "tenant-SDK",
+	})
+	_, err := client.ListCopyTraders(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-SDK", seenTenant)
+}
+
+func TestTenantTransport_OmitsHeaderWhenTenantEmpty(t *testing.T) {
+	t.Parallel()
+
+	var seenHasHeader bool
+	rt := &tenantTransport{base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		_, seenHasHeader = r.Header[http.CanonicalHeaderKey(TenantIDHeader)]
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	// AuthInfo present, TenantID empty — header must NOT be set.
+	ctx := authctx.WithAuthInfo(context.Background(), authctx.AuthInfo{APIKey: "k1"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com/", nil)
+	require.NoError(t, err)
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.False(t, seenHasHeader, "tenant-id header must be omitted when TenantID is empty")
+}
+
+func TestTenantTransport_SetsHeaderWhenTenantPresent(t *testing.T) {
+	t.Parallel()
+
+	var seenValue string
+	rt := &tenantTransport{base: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		seenValue = r.Header.Get(TenantIDHeader)
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+
+	ctx := authctx.WithAuthInfo(context.Background(), authctx.AuthInfo{APIKey: "k1", TenantID: "tenant-Z"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com/", nil)
+	require.NoError(t, err)
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, "tenant-Z", seenValue)
+}
+
+// roundTripperFunc adapts a function value to http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestLiveDORAClient_ListCopyTraders(t *testing.T) {
 	fullPageTraders := func(prefix string) []doraclient.CopyTrader {
 		traders := make([]doraclient.CopyTrader, 0, int(copyTraderPageSize))
 		for i := range int(copyTraderPageSize) {

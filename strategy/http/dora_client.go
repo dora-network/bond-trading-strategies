@@ -10,8 +10,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/dora-client-go/doraclient"
+
+	"github.com/dora-network/bond-trading-strategies/authctx"
 )
 
 type doraClient interface {
@@ -35,6 +36,27 @@ const (
 	copyTraderPageSize   int32 = 100
 	responsePreviewBytes       = 4096
 )
+
+// tenantTransport is an http.RoundTripper that injects the tenant-id
+// header onto every outbound request. The tenant is read from the
+// authctx.AuthInfo on the request's context (populated by requireAuth or
+// the WS router). When no tenant is present the header is omitted — the
+// caller is responsible for ensuring the middleware always sets one for
+// authed traffic.
+type tenantTransport struct {
+	base http.RoundTripper
+}
+
+func (t *tenantTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if info, ok := authctx.AuthInfoFromContext(req.Context()); ok && info.TenantID != "" {
+		req.Header.Set(TenantIDHeader, info.TenantID)
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
+}
 
 type liveDORAClient struct {
 	client     *doraclient.APIClient
@@ -61,14 +83,18 @@ func NewDORAClient() *liveDORAClient {
 	if len(cfg.Servers) > 0 {
 		baseURL = cfg.Servers[0].URL
 	}
-	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = http.DefaultClient
-	}
+
+	// Wrap the SDK HTTP client with a tenantTransport so that every
+	// outbound DORA call carries the tenant-id header from the request
+	// context. The middleware is the single source of truth for the
+	// tenant; the SDK has no per-request header hook.
+	client := &http.Client{Transport: &tenantTransport{base: http.DefaultTransport}}
+	cfg.HTTPClient = client
 
 	return &liveDORAClient{
 		client:     doraclient.NewAPIClient(cfg),
 		baseURL:    strings.TrimRight(baseURL, "/"),
-		httpClient: cfg.HTTPClient,
+		httpClient: client,
 	}
 }
 
@@ -130,7 +156,12 @@ func (c *liveDORAClient) GetUserID(ctx context.Context) (string, error) {
 		return "", errors.New("DORA client is not configured")
 	}
 
-	authHeader, err := authHeader(ctx)
+	info, err := authInfo(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	authHdr, err := authHeader(info)
 	if err != nil {
 		return "", err
 	}
@@ -141,7 +172,10 @@ func (c *liveDORAClient) GetUserID(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("create get user self request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Authorization", authHdr)
+	if info.TenantID != "" {
+		req.Header.Set(TenantIDHeader, info.TenantID)
+	}
 
 	//nolint:gosec // Request URL is built from trusted DORA_BASE_URL service config above.
 	rawResp, err := c.httpClient.Do(req)
@@ -241,12 +275,10 @@ func (c *liveDORAClient) authContext(ctx context.Context) (context.Context, erro
 	}
 }
 
-func authHeader(ctx context.Context) (string, error) {
-	info, err := authInfo(ctx)
-	if err != nil {
-		return "", err
-	}
-
+// authHeader renders the inbound Authorization header value that DORA expects
+// (either "ApiKey <key>" or "Bearer <token>"). The tenant header is forwarded
+// separately by the tenantTransport wrapper, not here.
+func authHeader(info *authctx.AuthInfo) (string, error) {
 	switch {
 	case info.APIKey != "":
 		return apiKeyPrefix + " " + info.APIKey, nil

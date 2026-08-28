@@ -15,6 +15,10 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	flag "github.com/spf13/pflag"
+
 	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/bond-trading-strategies/cors"
 	"github.com/dora-network/bond-trading-strategies/notifications"
@@ -30,9 +34,6 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/twap"
 	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	flag "github.com/spf13/pflag"
 )
 
 // newBreakoutHistoricalStore wires a Postgres-backed
@@ -393,33 +394,45 @@ func (r notificationsRouter) ServeHTTP(w http.ResponseWriter, req *http.Request)
 	// authctx.AuthInfoFromContext. The Authorization header takes
 	// precedence; the x-api-key query parameter is a fallback for
 	// clients that cannot set request headers on the WS handshake.
+	// tenant-id is optional: it's forwarded to DORA when present on
+	// the request header, otherwise omitted. DORA decides downstream
+	// whether a call without a tenant succeeds.
 	ctx := req.Context()
-	if newCtx, ok := authContextFromHeader(ctx, req.Header.Get("Authorization")); ok {
+	if newCtx, ok := authContextFromHeader(ctx, req.Header.Get("Authorization"), tenantIDFromRequest(req)); ok {
 		ctx = newCtx
 	} else if key := req.URL.Query().Get("x-api-key"); key != "" {
-		ctx = authctx.WithAPIKey(ctx, key)
+		ctx = authctx.WithAuthInfo(ctx, authctx.AuthInfo{APIKey: key, TenantID: tenantIDFromRequest(req)})
 	}
 	r.sub.ServeHTTP(w, req.WithContext(ctx))
+}
+
+// tenantIDFromRequest returns the tenant-id header value (trimmed) when set,
+// or "" when absent. The WS router treats an empty header as "no tenant
+// configured for this call".
+func tenantIDFromRequest(req *http.Request) string {
+	return strings.TrimSpace(req.Header.Get(strategyhttp.TenantIDHeader))
 }
 
 // authContextFromHeader returns a context that carries the credentials
 // extracted from the supplied Authorization header, using the same
 // ApiKey/Bearer scheme recognition as strategy/http.requireAuth. The
-// second return value is false when the header is absent or unrecognised.
-func authContextFromHeader(ctx context.Context, authHeader string) (context.Context, bool) {
+// tenant id is optional — when empty it is simply omitted from the
+// downstream AuthInfo. The second return value is false when the
+// Authorization scheme is unrecognised or the credential is empty.
+func authContextFromHeader(ctx context.Context, authHeader, tenantID string) (context.Context, bool) {
 	switch {
 	case strings.HasPrefix(authHeader, "ApiKey "):
 		key := strings.TrimPrefix(authHeader, "ApiKey ")
 		if key == "" {
 			return ctx, false
 		}
-		return authctx.WithAPIKey(ctx, key), true
+		return authctx.WithAuthInfo(ctx, authctx.AuthInfo{APIKey: key, TenantID: tenantID}), true
 	case strings.HasPrefix(authHeader, "Bearer "):
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		if token == "" {
 			return ctx, false
 		}
-		return authctx.WithBearerToken(ctx, token), true
+		return authctx.WithAuthInfo(ctx, authctx.AuthInfo{BearerToken: token, TenantID: tenantID}), true
 	}
 	return ctx, false
 }
