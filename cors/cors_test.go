@@ -159,7 +159,7 @@ func TestNew_AllowedHeaders_IncludeWebSocketHeaders(t *testing.T) {
 		t.Fatal("expected next handler to be called")
 	}
 	got := rr.Header().Get("Access-Control-Allow-Headers")
-	for _, want := range []string{"Authorization", "Content-Type", "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"} {
+	for _, want := range []string{"Authorization", "Content-Type", "tenant-id", "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Allow-Headers = %q, want it to contain %q", got, want)
 		}

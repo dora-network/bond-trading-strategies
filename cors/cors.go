@@ -61,7 +61,7 @@ func New(origins string) func(http.Handler) http.Handler {
 			}
 
 			headers.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			headers.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Sec-WebSocket-Protocol, Sec-WebSocket-Extensions")
+			headers.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, tenant-id, Sec-WebSocket-Protocol, Sec-WebSocket-Extensions")
 			headers.Set("Access-Control-Allow-Credentials", "true")
 			headers.Set("Access-Control-Max-Age", "86400")
 
