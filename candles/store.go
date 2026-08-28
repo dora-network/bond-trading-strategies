@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -118,6 +119,9 @@ func scanDecimalInto(d *decimal.Decimal, raw string) error {
 }
 
 func (s *PGStore) SaveCandles(ctx context.Context, entries []StreamCandlesEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -130,6 +134,10 @@ func (s *PGStore) SaveCandles(ctx context.Context, entries []StreamCandlesEntry)
 		}
 	}()
 
+	// One round-trip per batch via pgx.Batch. Reconnect replays
+	// (since=<last saved>) can include dozens of candles — sending
+	// them as N separate Exec calls blew past the consumer push
+	// timeout (5s) on every reconnect.
 	const q = `
 		INSERT INTO candles_history
 			(order_book_id, start_timestamp, open, high, low, close, volume,
@@ -148,16 +156,26 @@ func (s *PGStore) SaveCandles(ctx context.Context, entries []StreamCandlesEntry)
 			close_ytm = EXCLUDED.close_ytm
 	`
 
+	batch := &pgx.Batch{}
 	for _, entry := range entries {
 		c := entry.Val
-		if _, err := tx.Exec(
-			ctx, q,
+		batch.Queue(
+			q,
 			c.OrderBookID, c.StartTimestamp,
 			c.Open, c.High, c.Low, c.Close, c.Volume,
 			c.OpenYTM, c.HighYTM, c.LowYTM, c.CloseYTM,
-		); err != nil {
-			return fmt.Errorf("upsert candle for %s at %s: %w", c.OrderBookID, c.StartTimestamp, err)
+		)
+	}
+
+	br := tx.SendBatch(ctx, batch)
+	for range entries {
+		if _, err := br.Exec(); err != nil {
+			_ = br.Close()
+			return fmt.Errorf("upsert candle batch: %w", err)
 		}
+	}
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("close batch: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -168,10 +186,20 @@ func (s *PGStore) SaveCandles(ctx context.Context, entries []StreamCandlesEntry)
 }
 
 type Subscriber struct {
-	requestID uuid.UUID
-	store     CandleStore
-	start     func(requestID uuid.UUID) (chan []StreamCandlesEntry, error)
-	onWrite   func()
+	requestID   uuid.UUID
+	requestIDMu sync.RWMutex
+	store       CandleStore
+	start       func(requestID uuid.UUID) (chan []StreamCandlesEntry, error)
+	onWrite     func()
+}
+
+// RequestID returns the UUID minted for this subscriber's upstream
+// subscription. Exported for tests that need to identify which
+// Handler.subscribers entry the subscriber is consuming.
+func (s *Subscriber) RequestID() uuid.UUID {
+	s.requestIDMu.RLock()
+	defer s.requestIDMu.RUnlock()
+	return s.requestID
 }
 
 func NewStoreSubscriber(store CandleStore,
@@ -195,8 +223,11 @@ func WithWriteHook(onWrite func()) func(*Subscriber) {
 }
 
 func (s *Subscriber) Start(ctx context.Context) error {
-	s.requestID = uuid.Must(uuid.NewV7())
-	updates, err := s.start(s.requestID)
+	newID := uuid.Must(uuid.NewV7())
+	s.requestIDMu.Lock()
+	s.requestID = newID
+	s.requestIDMu.Unlock()
+	updates, err := s.start(newID)
 	if err != nil {
 		return fmt.Errorf("candle update subscription failed: %w", err)
 	}

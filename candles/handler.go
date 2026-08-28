@@ -102,12 +102,14 @@ func (h *Handler) Subscribe(requestID uuid.UUID) (chan []StreamCandlesEntry, err
 		return nil, fmt.Errorf("already subscribed")
 	}
 
-	ch := make(chan []StreamCandlesEntry)
+	// ponytail: 16 absorbs short bursts; on sustained rate-mismatch
+	// the push in processMessage times out and the batch is dropped.
+	const subscriberBuffer = 16
+	ch := make(chan []StreamCandlesEntry, subscriberBuffer)
 	h.subscribers[requestID] = ch
 	return ch, nil
 }
 
-// Unsubscribe removes the subscription channel for the given request ID.
 func (h *Handler) Unsubscribe(requestID uuid.UUID) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -183,14 +185,17 @@ func (h *Handler) streamSingle(ctx context.Context, orderBookID string) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", orderBookID, err)
 		}
-
 		if err := h.processMessage(ctx, orderBookID, data); err != nil {
 			slog.Warn("failed to process candle message", "order_book_id", orderBookID, "err", err)
 		}
 	}
 }
 
-// processMessage parses and saves the candle stream data.
+// processMessage parses a candle batch and fans it out to every
+// registered subscriber (persistence subscriber in the price-daemon
+// plus any strategy-server subscribers). With SaveCandles batched
+// via pgx.Batch, the push rarely blocks; the timeout is the safety
+// valve for genuine stalls, not the daily driver.
 func (h *Handler) processMessage(ctx context.Context, orderBookID string, data []byte) error {
 	var entries []StreamCandlesEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
@@ -202,17 +207,25 @@ func (h *Handler) processMessage(ctx context.Context, orderBookID string, data [
 	}
 
 	h.mu.RLock()
-	slog.Debug("sending candle updates", "order_book_id", orderBookID, "updates", len(entries), "subscribers", len(h.subscribers))
+	count := len(h.subscribers)
+	subs := make([]chan []StreamCandlesEntry, 0, count)
+	for _, subCh := range h.subscribers {
+		subs = append(subs, subCh)
+	}
 	h.mu.RUnlock()
 
-	for subscriber, subCh := range h.subscribers {
-		timeout := 50 * time.Millisecond
-		pushCtx, cancel := context.WithTimeout(ctx, timeout)
+	slog.Debug("sending candle updates", "order_book_id", orderBookID, "updates", len(entries), "subscribers", count)
+
+	// Bounded push so a single slow subscriber can't hold the WS
+	const pushTimeout = 5 * time.Second
+	for i, subCh := range subs {
+		pushCtx, cancel := context.WithTimeout(ctx, pushTimeout)
 		select {
 		case <-pushCtx.Done():
-			slog.Warn("subscriber timed out", "subscriber", subscriber, "order_book_id", orderBookID, "timeout", timeout)
+			slog.Warn("subscriber push timed out",
+				"subscriber_index", i, "order_book_id", orderBookID,
+				"updates", len(entries), "timeout", pushTimeout)
 			cancel()
-			continue
 		case subCh <- entries:
 			cancel()
 		}

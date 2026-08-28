@@ -82,7 +82,10 @@ func (h *Handler) Subscribe(requestID uuid.UUID) (chan map[uuid.UUID]AssetPrice,
 	if _, ok := h.subscribers[requestID]; ok {
 		return nil, fmt.Errorf("already subscribed")
 	}
-	ch := make(chan map[uuid.UUID]AssetPrice)
+	// ponytail: 16 absorbs short bursts; on sustained rate-mismatch
+	// the push in processMessage times out and the batch is dropped.
+	const subscriberBuffer = 16
+	ch := make(chan map[uuid.UUID]AssetPrice, subscriberBuffer)
 	h.subscribers[requestID] = ch
 	return ch, nil
 }
@@ -153,17 +156,25 @@ func (h *Handler) processMessage(ctx context.Context, data []byte) error {
 		price.Time = price.Time.UTC()
 		prices[id] = price
 	}
-
 	h.mu.RLock()
 	slog.Debug("sending price updates", "updates", len(prices), "subscribers", len(h.subscribers))
+	subs := make([]chan map[uuid.UUID]AssetPrice, 0, len(h.subscribers))
+	for _, subCh := range h.subscribers {
+		subs = append(subs, subCh)
+	}
 	h.mu.RUnlock()
 
-	for subscriber, subCh := range h.subscribers {
-		timeout := time.Millisecond * 50
-		pushCtx, cancel := context.WithTimeout(ctx, timeout)
+	for i, subCh := range subs {
+		// Same shape as candles: buffered push with a 5s safety
+		// timeout. Single global persistence subscriber; on reconnect
+		// since= replays from upstream.
+		const pushTimeout = 5 * time.Second
+		pushCtx, cancel := context.WithTimeout(ctx, pushTimeout)
 		select {
 		case <-pushCtx.Done():
-			slog.Warn("subscriber timed out", "subscriber", subscriber, "timeout", timeout)
+			slog.Warn("subscriber push timed out",
+				"subscriber_index", i, "updates", len(prices),
+				"timeout", pushTimeout)
 			cancel()
 			continue
 		case subCh <- prices:

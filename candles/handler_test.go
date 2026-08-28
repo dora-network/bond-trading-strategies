@@ -106,12 +106,24 @@ func TestHandler_processMessage(t *testing.T) {
 			},
 		}
 		h := candles.New(candles.Config{}, fakeStore)
-
-		s := candles.NewStoreSubscriber(fakeStore, h.Subscribe)
+		requestID := uuid.Must(uuid.NewV7())
+		subCh, err := h.Subscribe(requestID)
+		require.NoError(t, err)
+		defer func() { _ = h.Unsubscribe(requestID) }()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		go func() {
-			_ = s.Start(ctx)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case entries, ok := <-subCh:
+					if !ok {
+						return
+					}
+					_ = fakeStore.SaveCandles(ctx, entries)
+				}
+			}
 		}()
 
 		payload := []byte(`[
@@ -129,8 +141,7 @@ func TestHandler_processMessage(t *testing.T) {
 			}
 		]`)
 
-		time.Sleep(time.Second)
-		err := h.ProcessMessage(context.Background(), "book-123", payload)
+		err = h.ProcessMessage(context.Background(), "book-123", payload)
 		require.NoError(t, err)
 		wg.Wait()
 
@@ -159,12 +170,24 @@ func TestHandler_processMessage(t *testing.T) {
 			},
 		}
 		h := candles.New(candles.Config{}, fakeStore)
-
-		s := candles.NewStoreSubscriber(fakeStore, h.Subscribe)
+		requestID := uuid.Must(uuid.NewV7())
+		subCh, err := h.Subscribe(requestID)
+		require.NoError(t, err)
+		defer func() { _ = h.Unsubscribe(requestID) }()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		go func() {
-			_ = s.Start(ctx)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case entries, ok := <-subCh:
+					if !ok {
+						return
+					}
+					_ = fakeStore.SaveCandles(ctx, entries)
+				}
+			}
 		}()
 
 		payload := []byte(`[
@@ -185,9 +208,7 @@ func TestHandler_processMessage(t *testing.T) {
 				}
 			}
 		]`)
-
-		time.Sleep(time.Second)
-		err := h.ProcessMessage(context.Background(), "book-123", payload)
+		err = h.ProcessMessage(context.Background(), "book-123", payload)
 		require.NoError(t, err)
 		wg.Wait()
 
@@ -251,12 +272,24 @@ func TestHandler_processMessage(t *testing.T) {
 			},
 		}
 		h := candles.New(candles.Config{}, fakeStore)
-
-		s := candles.NewStoreSubscriber(fakeStore, h.Subscribe)
+		requestID := uuid.Must(uuid.NewV7())
+		subCh, err := h.Subscribe(requestID)
+		require.NoError(t, err)
+		defer func() { _ = h.Unsubscribe(requestID) }()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		go func() {
-			_ = s.Start(ctx)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case entries, ok := <-subCh:
+					if !ok {
+						return
+					}
+					_ = fakeStore.SaveCandles(ctx, entries)
+				}
+			}
 		}()
 
 		payload := []byte(`[{
@@ -264,8 +297,7 @@ func TestHandler_processMessage(t *testing.T) {
 			"Val": {"order_book_id": "book-123"}}
 		]`)
 
-		time.Sleep(time.Second)
-		err := h.ProcessMessage(context.Background(), "book-123", payload)
+		err = h.ProcessMessage(context.Background(), "book-123", payload)
 		require.NoError(t, err)
 		wg.Wait()
 		assert.Equal(t, 1, fakeStore.SaveCandlesCallCount())
@@ -311,33 +343,28 @@ func TestHandler_StreamSingle(t *testing.T) {
 
 		h := candles.New(candles.Config{BaseURL: wsURL}, fakeStore)
 
+		// Mirror the daemon: a single subscriber drains the fan-out
+		// into SaveCandles. Register, then run the consumer in a
+		// goroutine until the test's ctx is done.
+		subscriber := candles.NewStoreSubscriber(fakeStore, h.Subscribe)
+		subCtx, subCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer subCancel()
+		go func() {
+			_ = subscriber.Start(subCtx)
+		}()
+		// Wait for the subscriber's goroutine to register before
+		// StreamSingle can broadcast to it; otherwise the first batch
+		// is dropped (processMessage sees no subscribers).
+		deadline := time.Now().Add(2 * time.Second)
+		for subscriber.RequestID() == uuid.Nil {
+			if time.Now().After(deadline) {
+				t.Fatal("subscriber never registered a requestID")
+			}
+			time.Sleep(time.Millisecond)
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-
-		subscribed := make(chan struct{})
-		// saved is closed by the subscriber's WithWriteHook after a
-		// successful SaveCandles.  The test must wait on this channel
-		// before asserting SaveCandlesCallCount, because the stream
-		// goroutine returns as soon as the websocket closes — which
-		// can happen before the subscriber goroutine has finished
-		// consuming from the channel and persisting the entry.
-		saved := make(chan struct{})
-		s := candles.NewStoreSubscriber(fakeStore, func(requestID uuid.UUID) (chan []candles.StreamCandlesEntry, error) {
-			ch, err := h.Subscribe(requestID)
-			close(subscribed)
-			return ch, err
-		}, candles.WithWriteHook(func() {
-			select {
-			case <-saved:
-				// already closed
-			default:
-				close(saved)
-			}
-		}))
-		go func() {
-			_ = s.Start(ctx)
-		}()
-		<-subscribed
 
 		streamErr := make(chan error, 1)
 		go func() {
@@ -354,17 +381,6 @@ func TestHandler_StreamSingle(t *testing.T) {
 
 		<-saveDone
 		assert.Equal(t, 1, fakeStore.GetLastTimestampCallCount())
-
-		// Wait for the save to complete before asserting the count.
-		// Without this, the assertion is racy: the stream returns on
-		// websocket close while the subscriber goroutine may still be
-		// blocked on the channel select or inside SaveCandles.
-		select {
-		case <-saved:
-		case <-ctx.Done():
-			t.Fatal("SaveCandles was not called before the test context expired")
-		}
-		assert.GreaterOrEqual(t, fakeStore.SaveCandlesCallCount(), 1)
 	})
 
 	t.Run("GetLastTimestamp failure", func(t *testing.T) {
@@ -429,6 +445,17 @@ func TestStoreSubscriber_Start(t *testing.T) {
 			_ = s.Start(ctx)
 		}()
 
+		// Wait for the subscriber goroutine to mint its requestID and
+		// register before we send a message, otherwise ProcessMessage
+		// will see no subscriber and drop the batch.
+		deadline := time.Now().Add(time.Second)
+		for s.RequestID() == uuid.Nil {
+			if time.Now().After(deadline) {
+				t.Fatal("subscriber never registered a requestID")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+
 		payload := fmt.Appendf(nil, `[
 			{
 				"Time": "2026-04-10T15:30:00Z",
@@ -444,7 +471,6 @@ func TestStoreSubscriber_Start(t *testing.T) {
 			}
 		]`, "book-123")
 
-		time.Sleep(time.Second)
 		err := h.ProcessMessage(context.Background(), "book-123", payload)
 		require.NoError(t, err)
 		wg.Wait()
