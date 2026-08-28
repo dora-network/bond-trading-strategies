@@ -14,6 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/govalues/decimal"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/notifications/notificationsfakes"
 	"github.com/dora-network/bond-trading-strategies/prices"
@@ -25,10 +30,6 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
-	"github.com/google/uuid"
-	"github.com/govalues/decimal"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestHandlerListsCopyTraders(t *testing.T) {
@@ -54,6 +55,7 @@ func TestHandlerListsCopyTraders(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -98,6 +100,7 @@ func TestHandlerListsCopyTradersEmpty(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -127,6 +130,7 @@ func TestHandlerListsCopyTradersDORAError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/copy-traders", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -143,6 +147,7 @@ func TestHandlerListsStrategies(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -273,6 +278,7 @@ func TestHandlerListsTenors(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/tenors", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -291,6 +297,7 @@ func TestHandlerListsTenors(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/tenors", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
@@ -317,6 +324,7 @@ func TestHandlerListsDORAOrderBooks(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dora/orderbooks", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -334,6 +342,7 @@ func TestHandlerListsDORAOrderBooks(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/dora/orderbooks", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
@@ -354,6 +363,7 @@ func TestHandlerReturnsDORAOrderBookError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dora/orderbooks", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -376,6 +386,7 @@ func TestHandlerGetsDORAUser(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dora/user", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -386,6 +397,7 @@ func TestHandlerGetsDORAUser(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/dora/user", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
@@ -406,6 +418,7 @@ func TestHandlerReturnsDORAUserError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/dora/user", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -485,6 +498,7 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 		rec = httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/metadata", nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			return false
@@ -552,6 +566,7 @@ func TestHandlerMomentumBacktestCompletes(t *testing.T) {
 		rec = httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			return false
@@ -608,6 +623,7 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 		rec = httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			return false
@@ -623,6 +639,7 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/metadata", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var summary strategyhttp.BacktestSummary
@@ -634,6 +651,7 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var listResp struct {
@@ -734,6 +752,7 @@ func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			return false
@@ -758,6 +777,7 @@ func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/trades?limit=10", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var tradesResp struct {
@@ -773,6 +793,7 @@ func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/closed-trades?limit=10", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var closedResp struct {
@@ -848,6 +869,7 @@ func TestHandlerCancelBacktest(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/backtests/"+backtestID.String(), nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -905,6 +927,7 @@ func TestHandlerListBacktests(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -967,6 +990,7 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/pause", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, 1, svc.PauseStrategyCallCount())
@@ -974,6 +998,7 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/resume", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, 1, svc.ResumeStrategyCallCount())
@@ -981,6 +1006,7 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/runs/"+runID.String(), nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, 1, svc.StopStrategyCallCount())
@@ -1046,6 +1072,7 @@ func TestHandlerListRuns(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -1197,6 +1224,7 @@ func TestHandlerAllowsRunAfterPreviousStopped(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/runs/"+runID.String(), nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -1255,6 +1283,7 @@ func TestHandlerRestoreRuns(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -1272,6 +1301,7 @@ func TestHandlerRestoreRuns(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+pausedID.String()+"/resume", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -1361,6 +1391,7 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -1450,6 +1481,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?status=completed", nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1467,6 +1499,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?status=completed,failed", nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1482,6 +1515,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		from := now.Add(-12 * time.Hour).Format(time.RFC3339)
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?from="+from, nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1498,6 +1532,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		to := now.Add(-12 * time.Hour).Format(time.RFC3339)
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?to="+to, nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1514,6 +1549,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		to := now.Add(-12 * time.Hour).Format(time.RFC3339)
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?from="+from+"&to="+to, nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1530,6 +1566,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		from := now.Add(-12 * time.Hour).Format(time.RFC3339)
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?status=completed&from="+from, nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1545,6 +1582,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?page=1&limit=1", nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1564,6 +1602,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?page=2&limit=1", nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1583,6 +1622,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?page=10&limit=1", nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1597,6 +1637,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?limit=100", nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1614,6 +1655,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		from := now.Format("2006-01-02")
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?from="+from, nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1631,6 +1673,7 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		to := now.Add(-24 * time.Hour).Format("2006-01-02")
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests?to="+to, nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -1687,12 +1730,14 @@ func TestHandlerBacktestOwnership(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+btID.String(), nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/backtests/"+btID.String(), nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code)
 
@@ -1700,6 +1745,7 @@ func TestHandlerBacktestOwnership(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+btID.String()+"/metadata", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 }
@@ -1722,6 +1768,7 @@ func TestHandlerValidationErrors(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs/not-a-uuid", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 
@@ -1749,6 +1796,7 @@ func TestHandlerValidationErrors(t *testing.T) {
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/backtests", bytes.NewReader(backtestPayload))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "config.initial_balance must be greater than 0 for backtests")
@@ -2075,6 +2123,7 @@ func performJSONRequest(t *testing.T, handler http.Handler, path string, body an
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	return rec
 }
@@ -2487,6 +2536,7 @@ func TestHandlerRunOwnership(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs/"+runID.String(), nil)
 	req.Header.Set("Authorization", "ApiKey bob-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
@@ -2494,6 +2544,7 @@ func TestHandlerRunOwnership(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs", nil)
 	req.Header.Set("Authorization", "ApiKey bob-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var listResp struct {
@@ -2506,6 +2557,7 @@ func TestHandlerRunOwnership(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/runs/"+runID.String(), nil)
 	req.Header.Set("Authorization", "ApiKey bob-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code)
 
@@ -2513,6 +2565,7 @@ func TestHandlerRunOwnership(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/pause", nil)
 	req.Header.Set("Authorization", "ApiKey bob-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code)
 
@@ -2520,6 +2573,7 @@ func TestHandlerRunOwnership(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/resume", nil)
 	req.Header.Set("Authorization", "ApiKey bob-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handlerAny.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
@@ -2571,6 +2625,7 @@ func TestHandlerBacktestSummary(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String(), nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -2591,6 +2646,7 @@ func TestHandlerBacktestSummary(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/backtests/"+backtestID.String()+"/metadata", nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -2642,6 +2698,7 @@ func TestHandlerRequiresAuth(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequestWithContext(context.Background(), ep.method, ep.path, nil)
 			req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+			req.Header.Set("tenant-id", "tenant-A")
 			handler.ServeHTTP(rec, req)
 			require.Equal(t, http.StatusUnauthorized, rec.Code)
 			assert.Contains(t, rec.Body.String(), "unsupported scheme")
@@ -2655,18 +2712,26 @@ func TestHandlerRequiresAuth(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code)
 	})
-
-	// /v1/openapi must not require authentication.
-	t.Run("openapi no auth", func(t *testing.T) {
+	// Bearer scheme is accepted.
+	t.Run("Bearer scheme accepted", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/openapi", nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
+		req.Header.Set("Authorization", "Bearer eyJhbGciOiJSUzI1NiJ9.test.sig")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-		assert.Contains(t, rec.Body.String(), `"openapi"`)
 	})
-
-	// /v1/openapi must reject non-GET methods.
+	// Authorization header present, tenant-id header absent → still OK.
+	// Tenant-id is forwarded to DORA only when supplied; DORA itself
+	// decides whether the call requires it. ponytail: previously the
+	// middleware 401'd here; relaxed to align with the DORA-side rule.
+	t.Run("tenant-id header optional", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
+		req.Header.Set("Authorization", "ApiKey test-key")
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
 	t.Run("openapi method not allowed", func(t *testing.T) {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
 			rec := httptest.NewRecorder()
@@ -2674,15 +2739,6 @@ func TestHandlerRequiresAuth(t *testing.T) {
 			handler.ServeHTTP(rec, req)
 			require.Equalf(t, http.StatusMethodNotAllowed, rec.Code, "method %s should return 405", method)
 		}
-	})
-
-	// Bearer scheme is accepted.
-	t.Run("Bearer scheme accepted", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/strategies", nil)
-		req.Header.Set("Authorization", "Bearer eyJhbGciOiJSUzI1NiJ9.test.sig")
-		handler.ServeHTTP(rec, req)
-		require.Equal(t, http.StatusOK, rec.Code)
 	})
 }
 
@@ -2743,6 +2799,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("/v1/backtests/%s/trades?page=1&limit=10", backtestID), nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -2759,6 +2816,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("/v1/backtests/%s/trades?page=2&limit=10", backtestID), nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -2775,6 +2833,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("/v1/backtests/%s/closed-trades?limit=100", backtestID), nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -2790,6 +2849,7 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("/v1/backtests/%s/trades", uuid.New()), nil)
 		req.Header.Set("Authorization", "ApiKey test-key")
+		req.Header.Set("tenant-id", "tenant-A")
 		handler.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusNotFound, rec.Code)
@@ -3042,6 +3102,7 @@ func doDecisionsReq(t *testing.T, h http.Handler, path string) *httptest.Respons
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
 	req.Header.Set("Authorization", "ApiKey test-key")
+	req.Header.Set("tenant-id", "tenant-A")
 	h.ServeHTTP(rec, req)
 	return rec
 }

@@ -8,17 +8,27 @@ import (
 	"github.com/dora-network/bond-trading-strategies/authctx"
 )
 
+// TenantIDHeader is the request header that carries the DORA tenant
+// identifier. When present on an authed request, the value is forwarded
+// to DORA on every outbound call. When absent, no tenant-id header is
+// attached — DORA decides whether the call requires one. The middleware
+// does not 401 on a missing tenant-id; the Authorization header alone is
+// enough to authenticate the inbound request.
+const TenantIDHeader = "tenant-id"
+
 type doraUserIDContextKey struct{}
 
 // requireAuth is an HTTP middleware that:
 //  1. Validates the Authorization header (returns 401 if absent or unrecognised).
-//  2. Calls resolveUserID — which contacts DORA — to confirm the credentials
+//  2. Reads the tenant-id header if present and forwards it on outbound
+//     DORA calls via authctx. A missing tenant-id is not an auth failure.
+//  3. Calls resolveUserID — which contacts DORA — to confirm the credentials
 //     belong to a real user (returns 401 if DORA rejects them).
-//  3. Stores the parsed credentials in the request context via authctx
+//  4. Stores the parsed credentials in the request context via authctx
 //     so that downstream handlers and the liveDORAClient can read them
 //     using the same key, regardless of whether the request was
 //     authenticated here or upstream (e.g. the WS router).
-//  4. Stores the verified DORA user ID in the request context so that
+//  5. Stores the verified DORA user ID in the request context so that
 //     downstream handlers can retrieve it without making additional DORA
 //     calls.
 //
@@ -34,7 +44,9 @@ func requireAuth(resolveUserID func(context.Context) (string, error), next http.
 			return
 		}
 
-		var ctx context.Context
+		authInfo := authctx.AuthInfo{
+			TenantID: strings.TrimSpace(r.Header.Get(TenantIDHeader)),
+		}
 		switch {
 		case strings.HasPrefix(authHeader, "ApiKey "):
 			key := strings.TrimPrefix(authHeader, "ApiKey ")
@@ -42,18 +54,20 @@ func requireAuth(resolveUserID func(context.Context) (string, error), next http.
 				writeError(w, http.StatusUnauthorized, "invalid Authorization header: empty API key")
 				return
 			}
-			ctx = authctx.WithAPIKey(r.Context(), key)
+			authInfo.APIKey = key
 		case strings.HasPrefix(authHeader, "Bearer "):
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 			if token == "" {
 				writeError(w, http.StatusUnauthorized, "invalid Authorization header: empty bearer token")
 				return
 			}
-			ctx = authctx.WithBearerToken(r.Context(), token)
+			authInfo.BearerToken = token
 		default:
 			writeError(w, http.StatusUnauthorized, "invalid Authorization header: unsupported scheme")
 			return
 		}
+
+		ctx := authctx.WithAuthInfo(r.Context(), authInfo)
 
 		userID, err := resolveUserID(ctx)
 		if err != nil {
