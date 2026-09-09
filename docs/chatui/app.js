@@ -155,7 +155,7 @@ async function api(method, path, body) {
 
 async function refreshSessions() {
   try {
-    state.sessions = await api('GET', '/v1/sessions') || [];
+    state.sessions = await api('GET', '/v1/agent/sessions') || [];
   } catch (e) {
     flashError('refreshSessions', e);
     state.sessions = [];
@@ -194,7 +194,7 @@ async function selectSession(id) {
 async function newSession(provider, model, title) {
   const body = { provider, model };
   if (title) body.title = title;
-  const resp = await api('POST', '/v1/sessions', body);
+  const resp = await api('POST', '/v1/agent/sessions', body);
   state.activeSessionId = resp.session_id;
   // Invalidate any in-flight deployment responses from the prior session
   // and blank the old strategy panel before the async session load renders.
@@ -207,7 +207,7 @@ async function newSession(provider, model, title) {
 async function deleteSession() {
   if (!state.activeSessionId) return;
   if (!confirm('Delete this session?')) return;
-  await api('DELETE', '/v1/sessions/' + state.activeSessionId);
+  await api('DELETE', '/v1/agent/sessions/' + state.activeSessionId);
   state.activeSessionId = null;
   $('#messages').innerHTML = '';
   $('#chatTitle').textContent = 'no session';
@@ -299,8 +299,8 @@ async function loadDeploymentPanel(strategies) {
   renderDeploymentPanel();
   try {
     const [versionsResp, deploymentsResp] = await Promise.all([
-      api('GET', '/v1/strategies/' + state.activeStrategyId + '/versions'),
-      api('GET', '/v1/strategies/' + state.activeStrategyId + '/deployments'),
+      api('GET', '/v1/agent/strategies/' + state.activeStrategyId + '/versions'),
+      api('GET', '/v1/agent/strategies/' + state.activeStrategyId + '/deployments'),
     ]);
     if (!isCurrentDeploymentRequest(requestVersion)) return;
     state.strategyVersions = (versionsResp.versions || []).filter(isDeployableVersion);
@@ -323,7 +323,7 @@ async function loadDeploymentPanel(strategies) {
 // it into the deployments array so the detail view shows fresh status.
 async function loadDeploymentDetail(id, requestVersion) {
   try {
-    const detail = await api('GET', '/v1/strategies/' + state.activeStrategyId + '/deployments/' + id);
+    const detail = await api('GET', '/v1/agent/strategies/' + state.activeStrategyId + '/deployments/' + id);
     if (!isCurrentDeploymentRequest(requestVersion)) return;
     const index = state.deployments.findIndex((d) => d.deployment_id === id);
     if (index >= 0) state.deployments[index] = detail;
@@ -337,7 +337,7 @@ async function loadDeploymentDetail(id, requestVersion) {
 // file content to the manifest renderer.
 async function loadRevisionManifest(revisionId, requestVersion) {
   try {
-    const detail = await api('GET', '/v1/strategies/' + state.activeStrategyId + '/versions/' + revisionId);
+    const detail = await api('GET', '/v1/agent/strategies/' + state.activeStrategyId + '/versions/' + revisionId);
     if (!isCurrentDeploymentRequest(requestVersion)) return;
     renderDeploymentManifest(detail.files && detail.files['manifest.json']);
   } catch (e) {
@@ -599,7 +599,7 @@ async function submitDeployment(event) {
   state.deploymentBusy = true;
   renderDeploymentPanel();
   try {
-    const response = await api('POST', '/v1/strategies/' + state.activeStrategyId + '/versions/' + state.selectedRevisionId + '/deploy', {
+    const response = await api('POST', '/v1/agent/strategies/' + state.activeStrategyId + '/versions/' + state.selectedRevisionId + '/deploy', {
       order_book_id: orderBook,
       resolution,
       params,
@@ -648,7 +648,7 @@ async function runDeploymentAction(action) {
   renderDeploymentPanel();
   try {
     const suffix = action === 'stop' ? '/stop' : '/resume';
-    await api('POST', '/v1/strategies/' + state.activeStrategyId + '/deployments/' + state.activeDeploymentId + suffix);
+    await api('POST', '/v1/agent/strategies/' + state.activeStrategyId + '/deployments/' + state.activeDeploymentId + suffix);
     // If the session switched while the action was in flight, do not
     // reload — the new session owns the panel now.
     if (!isCurrentDeploymentRequest(requestVersion)) return;
@@ -678,7 +678,7 @@ async function runDeploymentAction(action) {
 async function loadMessages() {
   if (!state.activeSessionId) return;
   const sessionID = state.activeSessionId;
-  const resp = await api('GET', '/v1/sessions/' + sessionID);
+  const resp = await api('GET', '/v1/agent/sessions/' + sessionID);
   if (state.activeSessionId !== sessionID) return;
   const meta = state.sessions.find((s) => s.id === state.activeSessionId);
   $('#chatTitle').textContent = meta
@@ -795,7 +795,7 @@ async function sendMessage(prompt) {
 
   let resp;
   try {
-    resp = await fetch(state.baseUrl + '/v1/sessions/' + state.activeSessionId + '/messages', {
+    resp = await fetch(state.baseUrl + '/v1/agent/sessions/' + state.activeSessionId + '/messages', {
       method: 'POST',
       headers: {
         'Authorization': 'ApiKey ' + state.apiKey,
@@ -888,7 +888,7 @@ function handleEvent(name, payload, assistantBody) {
 
 // renderStrategyFiles renders a collapsible "view generated source"
 // panel. The outer <details> collapses by default; expanding it
-// triggers a lazy fetch of GET /v1/strategies/{id}/versions/{rev}
+// triggers a lazy fetch of GET /v1/agent/strategies/{id}/versions/{rev}
 // and renders each path in its own nested <details><pre><code>
 // block. The fetch runs once per panel so toggling doesn't refetch.
 // assistantBody is optional: pass the streaming bubble to attach
@@ -930,7 +930,7 @@ function renderStrategyFiles(strategyId, revision, moduleName, summary, assistan
     if (!outer.open || fetched) return;
     fetched = true;
     try {
-      const v = await api('GET', '/v1/strategies/' + strategyId + '/versions/' + revision);
+      const v = await api('GET', '/v1/agent/strategies/' + strategyId + '/versions/' + revision);
       body.textContent = '';
       const files = v && v.files ? v.files : {};
       const paths = Object.keys(files).sort();
@@ -985,13 +985,13 @@ async function setProvider(form) {
   };
   const base = fd.get('base_url');
   if (base) body.base_url = base;
-  await api('POST', '/v1/provider-config', body);
+  await api('POST', '/v1/agent/provider-config', body);
   flash('provider config saved');
 }
 
 async function listProviders() {
   try {
-    const out = await api('GET', '/v1/provider-config');
+    const out = await api('GET', '/v1/agent/provider-config');
     $('#providerOut').textContent = JSON.stringify(out, null, 2);
   } catch (e) {
     $('#providerOut').textContent = 'error: ' + e.message;
@@ -1002,7 +1002,7 @@ async function listProviders() {
 async function deleteCurrentProvider() {
   const sel = $('#setProviderForm select[name=provider]').value;
   if (!confirm(`Delete provider config for "${sel}"?`)) return;
-  await api('DELETE', '/v1/provider-config/' + sel);
+  await api('DELETE', '/v1/agent/provider-config/' + sel);
   flash('provider config deleted');
 }
 
