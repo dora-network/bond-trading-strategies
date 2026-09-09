@@ -21,7 +21,7 @@ func TestIntegration_AgentRoutesReturnExpectedResponsesWhenAuthed(t *testing.T) 
 		// requireAuth has already parsed and validated the Authorization
 		// header; a fixed user ID keeps the agent's PG queries scoped.
 		return "00000000-0000-0000-0000-000000000051", nil
-	})
+	}, nil)
 	defer ts.Close(t.Context())
 
 	cases := []struct {

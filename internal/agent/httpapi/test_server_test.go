@@ -91,10 +91,12 @@ func newTestServer(t *testing.T) *testServer {
 // newTestServerWithAuthResolver is the same as newTestServer but lets the
 // test inject a custom Dora user resolver, so successful-auth requests can
 // be driven through the host's requireAuth gate without hitting the real
-// Dora API.
+// Dora API. override (nil = defaults) mutates the agent config before
+// wiring; the mount-order test uses it to shrink the per-user bucket.
 func newTestServerWithAuthResolver(
 	t *testing.T,
 	resolveUserID func(context.Context) (string, error),
+	override func(*config.Config),
 ) *testServer {
 	t.Helper()
 	pool := agenttest.StartPostgres(t)
@@ -111,6 +113,9 @@ func newTestServerWithAuthResolver(
 		CapturePendingRetention:     24 * time.Hour,
 		RateLimitPerMin:             1000, // effectively disabled for tests
 		LLMTimeout:                  30 * time.Second,
+	}
+	if override != nil {
+		override(&cfg)
 	}
 	encryptionKey := make([]byte, 32)
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
