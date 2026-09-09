@@ -122,6 +122,10 @@ func Wire(
 		return nil, fmt.Errorf("agent wiring: %w", err)
 	}
 
+	// Real history fetcher: the pool-backed *HistoryStore. Flows into the
+	// live orchestrator (Config.History) and the backtest WasmStarter below.
+	// NopHistoryFetcher (store/history.go) is a test stub — it is never wired
+	// here and is not on the runtime path.
 	historyStore := agentstore.NewHistoryStore(pool)
 	kernel, err := safety.NewKernel(pool)
 	if err != nil {
