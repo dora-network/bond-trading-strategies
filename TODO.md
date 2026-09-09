@@ -488,3 +488,10 @@ resolved in the 2026-08-26 session):
 - [x] **meanreversion per-instance pgxpool leak** — RESOLVED (2026-08-26
       session): shared process-lifetime pool (sharedPriceHistoryPool,
       sync.Once) ported from momentum.
+
+## dora-agent integration follow-ups
+
+### Deferred from Task 4.1
+- `internal/agent/safety/caps_test.go` is parked in `.staged-tests/safety_caps_test.go.disabled` (gitignored).
+  It depends on `internal/agent/strategies/servertest`, which is added in Task 4.3.
+  Restore after Task 4.3 lands by moving the file back and removing `.staged-tests/` from `.gitignore`.

@@ -42,3 +42,4 @@ opencode.json*
 db-bastion.sh
 scripts/sync-dora-trades.sh
 scripts/trades_history*.sql
+.staged-tests/

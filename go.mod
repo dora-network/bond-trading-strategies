@@ -8,7 +8,9 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/govalues/decimal v0.1.36
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/joho/godotenv v1.5.1
 	github.com/mark3labs/mcp-go v0.49.0
+	github.com/mozilla-ai/any-llm-go v0.9.0
 	github.com/pashagolub/pgxmock/v3 v3.4.0
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
