@@ -491,31 +491,31 @@ resolved in the 2026-08-26 session):
 
 ## dora-agent integration follow-ups
 
-### Landed on tan/feat-integrate-dora-agent (8 prep commits)
+**DONE (2026-09-09, commit 9050fce).** Plan 1 (binary verification + history_store
+DB test) shipped 11 tasks across 10 commits on `tan/feat-integrate-dora-agent`:
 
-(8 commits listed in commit history: 947641e through e76c53c — Phases 0-3 + Phase 4 leaf + llm + config.)
+| Task | Commit | Subject |
+| --- | --- | --- |
+| Plan | `2b52422` | docs(plan): add dora-agent binary verification + history_store DB test plan |
+| L3-L8 | `ed9acc6` | feat(agent): complete dora-agent integration via L3-L8 layer plan |
+| 1 | `2c9e44e` | test(agent): add test_server_test.go for HTTP integration tests |
+| 2 | `b088f6b` | test(agent): add original-spec integration test #1 (routes require auth) |
+| 3 + fix | `c576dc0` | fix(agent): correct RoutesAt wire path; add successful-auth test |
+| 4 + refill | `a000355` | test(agent): add rate-limit refill subtest (closes coverage gap) |
+| 5 | `2232449` | test(agent): add original-spec integration test #4 (mount order) |
+| 6 | `73bbc3d` | test(agent): add history_store real-DB round-trip test (original-spec #6) |
+| 7 | `15bb4ca` | docs(agent): document L7 history-store wire-up in wiring.go |
+| 8 + fix | `1211b1b` | test(agent): add real backtest end-to-end smoke (gated on AGENT_E2E) |
+| 9 | `8427b5b` | docs(agent): add binary launch smoke commands |
+| 10 | `9050fce` | feat(agent): merge dora-agent openapi into strategy-server spec |
 
-### Landed in the L3-L8 re-plan commit (this commit)
+What was proven: binary boot, original-spec integration tests 1-4 + 6 pass;
+history_store round-trips against the host's public schema; L7
+history-store is wired into the backtest WasmStarter (L4 indirection
+review); full backtest end-to-end (gated on AGENT_E2E) seeds a
+strategy + version, runs a tinygo-compiled noop WASM, and persists a
+result in 1.32s; OpenAPI spec is merged (43 paths, 26 under
+/v1/agent/*).
 
-L3 stores (users, session, providerconfig), L4 orchestration stores (strategies,
-backtest, deployment, store/history.go + HistoryStore), L5 live + WASM
-(wasmruntime/{registry,hostimpl,store}, wsbroker, orchestrator), L6 tools +
-servertest + migration, L7 httpapi (with RoutesAt) + history_store real impl,
-L8 wiring + main.go mount + config env-var wiring + .env updates. Build green;
-pre-commit green; tests pass; ~31K insertions.
-
-### Deferred to the follow-up commit
-
-- OpenAPI spec merge (agent's openapi.json paths get joined into the host's).
-- `cmd/strategy-server` binary launch verification against a testcontainers
-  Postgres (`/v1/agent/sessions` returns 401 unauthed, `/healthz` returns 200,
-  `/v1/openapi` lists `/v1/agent/*` paths).
-- New tests surfaced by the live verification (smoke, e2e).
-- Final closeout of this follow-up section.
-
-### Deferred out of this repo (dora-agent repo deletions)
-
-- `cmd/agent-cli`, `internal/auth`, `internal/secrets/{secrets,env,aesgcm,kms}.go`,
-  `internal/store`, `internal/serveradmin` — deleted in a separate commit on
-  the dora-agent repo, not in this one.
-- `internal/migration` is ported (not deleted) — see L6.
+This entry will be removed in the next TODO.md cleanup pass. The
+dora-agent repo stays untouched per the operator's directive.
