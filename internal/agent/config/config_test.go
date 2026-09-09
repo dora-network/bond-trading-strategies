@@ -13,7 +13,7 @@ func clearEnv(t *testing.T) {
 	for _, k := range []string{
 		"DORA_BASE_URL", "LOG_LEVEL", "CORS_ALLOWED_ORIGINS", "DORA_AUTH_CACHE_TTL",
 		"AGENT_RATE_LIMIT_PER_MIN", "AGENT_LLM_TIMEOUT", "AGENT_LLM_MAX_ITERS",
-		"AGENT_MAX_PROMPT_BYTES", "AGENT_GENERATE_BASE_IMAGE", "AGENT_DORA_TOOLS_ENABLED",
+		"AGENT_MAX_PROMPT_BYTES", "AGENT_DORA_TOOLS_ENABLED",
 		"AGENT_MODEL_CAPS_PATH",
 	} {
 		t.Setenv(k, "")
@@ -23,7 +23,6 @@ func clearEnv(t *testing.T) {
 func TestLoad_Success(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("DORA_BASE_URL", "https://staging.dora.co")
-	t.Setenv("AGENT_GENERATE_BASE_IMAGE", "agent-validator:dev")
 
 	c, err := Load()
 	if err != nil {
@@ -74,7 +73,6 @@ func TestLoad_Overrides(t *testing.T) {
 	t.Setenv("AGENT_LLM_TIMEOUT", "3m")
 	t.Setenv("AGENT_RATE_LIMIT_PER_MIN", "5")
 	t.Setenv("AGENT_LLM_MAX_ITERS", "25")
-	t.Setenv("AGENT_GENERATE_BASE_IMAGE", "agent-validator:dev")
 
 	c, err := Load()
 	if err != nil {

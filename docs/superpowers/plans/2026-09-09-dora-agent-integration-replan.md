@@ -436,7 +436,7 @@ Expected: clean. L5 is complete.
 Source packages: `dora-agent/development/internal/tools/{dora,strategies,backtest,deployment,generate}` and `internal/strategies/servertest`.
 
 Seam rewrites applied in this layer:
-- Drop `internal/migration` references in `tools/generate` and `strategies/servertest`; the consolidated migration in `migrations/015_agent_consolidated_schema.sql` is the only DDL path.
+- Port `internal/migration` as `internal/agent/migration` — it is a runtime gate (Migrator/ErrStaleFramework/Reserve/Release) used by `run_backtest` and `deploy_strategy` to force-regenerate rows whose Docker pipeline was removed, NOT a DDL migrator. Drop the on-demand schema-apply path (`servertest/store.MigrateConn`); tern handles the consolidated migration.
 - Pool + `agent.` schema on every SQL.
 
 ### Task L6.1: Copy `tools/dora` + `tools/strategies`
@@ -490,9 +490,8 @@ cp -r /home/tanq/code/dora/repos/dora-services/dora-agent/development/internal/t
 
 In `tools/generate`:
 
-- Delete every function that opens a fresh migration runner to apply the agent's schema. The host's tern migrator (already in `cmd/strategy-server/main.go`) handles it.
-- Delete the `internal/migration` import.
-- If the file had a "first-run applies schema" hook, replace it with a no-op or an Info-level log line that explains the host handles it.
+- In `tools/generate`, find every function that opens a fresh `internal/store.MigrateConn` schema-apply and delete it. The host's tern migrator (already in `cmd/strategy-server/main.go`) handles it. Keep the `internal/agent/migration` Migrator calls — those are runtime gates, not DDL.
+- If a "first-run applies schema" hook remains, replace it with a no-op or an Info-level log line that explains the host handles it.
 
 ### Task L6.4: Copy `strategies/servertest` (the test helper)
 
@@ -835,11 +834,6 @@ AGENT_LLM_MAX_ITERS=10
 AGENT_MAX_PROMPT_BYTES=65536
 AGENT_MODEL_CAPS_PATH=configs/model_caps.json
 AGENT_DORA_TOOLS_ENABLED=true
-AGENT_GENERATE_BASE_IMAGE=...
-AGENT_GENERATE_CPU=1
-AGENT_GENERATE_MEMORY=512
-AGENT_GENERATE_TIMEOUT=120
-AGENT_GENERATE_START_TIMEOUT=60
 AGENT_GENERATE_MAX_REPAIRS=2
 AGENT_GENERATE_MAX_FILES=50
 AGENT_GENERATE_MAX_BYTES=1048576
@@ -896,8 +890,7 @@ config env-var wiring + .env updates. Build green; pre-commit green; tests pass.
 ### Deferred out of this repo (dora-agent repo deletions)
 
 - `cmd/agent-cli`, `internal/auth`, `internal/secrets/{secrets,env,aesgcm,kms}.go`,
-  `internal/store`, `internal/migration`, `internal/serveradmin` — deleted
-  in a separate commit on the dora-agent repo, not in this one.
+  `internal/store`, `internal/serveradmin` — deleted in a separate commit on the dora-agent repo, not in this one.
 ```
 
 ### Task L8.5: Trim the original 2465-line plan
@@ -947,9 +940,7 @@ wiring, .env updates, TODO.md refresh, plan trim
 
 Seam rewrites: shared pgxpool, internal/agent/secrets.Sealer replaces
 envelope encryption, agent. schema prefix on every SQL, tern migration
-replaces internal/migration, RoutesAt("/v1/agent") mount.
-
-Tests: copied alongside production code; e2e + cmd/agent-cli references
+replaces servertest/store.MigrateConn (internal/migration itself ports as a runtime gate), RoutesAt("/v1/agent") mount.
 excluded.
 
 Deferred to follow-up commit: OpenAPI merge, cmd/strategy-server binary

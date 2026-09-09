@@ -74,7 +74,7 @@ func (k *Kernel) CapsFor(ctx context.Context, userID string) (Caps, error) {
 		       max_notional_per_order,
 		       max_total_notional,
 		       max_orders_per_minute
-		from user_caps where user_id = $1
+		from agent.user_caps where user_id = $1
 	`, userID).Scan(&c.MaxOpenOrders, &c.MaxNotionalPerOrder, &c.MaxTotalNotional, &c.MaxOrdersPerMinute)
 	if err != nil {
 		// No row → defaults.
@@ -86,7 +86,7 @@ func (k *Kernel) CapsFor(ctx context.Context, userID string) (Caps, error) {
 // SetCaps upserts the cap set for a user.
 func (k *Kernel) SetCaps(ctx context.Context, userID string, c Caps) error {
 	_, err := k.pool.Exec(ctx, `
-		insert into user_caps (user_id, max_open_orders, max_notional_per_order,
+		insert into agent.user_caps (user_id, max_open_orders, max_notional_per_order,
 		                       max_total_notional, max_orders_per_minute, updated_at)
 		values ($1, $2, $3, $4, $5, now())
 		on conflict (user_id) do update set
@@ -104,7 +104,7 @@ func (k *Kernel) IsHalted(ctx context.Context, userID string) (bool, string, err
 	var halted bool
 	var reason *string
 	err := k.pool.QueryRow(ctx, `
-		select halted, halted_reason from user_kill_switches where user_id = $1
+		select halted, halted_reason from agent.user_kill_switches where user_id = $1
 	`, userID).Scan(&halted, &reason)
 	if err != nil {
 		return false, "", nil
@@ -119,7 +119,7 @@ func (k *Kernel) IsHalted(ctx context.Context, userID string) (bool, string, err
 // Halt sets the kill switch.
 func (k *Kernel) Halt(ctx context.Context, userID, reason string) error {
 	_, err := k.pool.Exec(ctx, `
-		insert into user_kill_switches (user_id, halted, halted_at, halted_reason)
+		insert into agent.user_kill_switches (user_id, halted, halted_at, halted_reason)
 		values ($1, true, now(), $2)
 		on conflict (user_id) do update set
 			halted = true, halted_at = now(), halted_reason = excluded.halted_reason
@@ -130,7 +130,7 @@ func (k *Kernel) Halt(ctx context.Context, userID, reason string) error {
 // Resume clears the kill switch.
 func (k *Kernel) Resume(ctx context.Context, userID string) error {
 	_, err := k.pool.Exec(ctx, `
-		update user_kill_switches
+		update agent.user_kill_switches
 		set halted = false, halted_at = null, halted_reason = null
 		where user_id = $1
 	`, userID)
@@ -182,7 +182,7 @@ func (k *Kernel) CheckOrder(ctx context.Context, userID string, oc OrderCheck) (
 func (k *Kernel) OrdersInLastMinute(ctx context.Context, userID string) (int, error) {
 	var n int
 	err := k.pool.QueryRow(ctx, `
-		select coalesce(sum(cnt), 0)::int from safety_order_counter
+		select coalesce(sum(cnt), 0)::int from agent.safety_order_counter
 		where user_id = $1 and window_start > now() - interval '60 seconds'
 	`, userID).Scan(&n)
 	if err != nil {
@@ -197,7 +197,7 @@ func (k *Kernel) OrdersInLastMinute(ctx context.Context, userID string) (int, er
 // specific value. Used by tests; never call in production.
 func (k *Kernel) SetOrderCountForTest(ctx context.Context, userID string, count int, at time.Time) error {
 	_, err := k.pool.Exec(ctx, `
-		insert into safety_order_counter (user_id, window_start, cnt)
+		insert into agent.safety_order_counter (user_id, window_start, cnt)
 		values ($1, $2, $3)
 	`, userID, at, count)
 	return err

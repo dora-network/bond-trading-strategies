@@ -491,43 +491,31 @@ resolved in the 2026-08-26 session):
 
 ## dora-agent integration follow-ups
 
-### Deferred from Task 4.1
-- `internal/agent/safety/caps_test.go` is parked in `.staged-tests/safety_caps_test.go.disabled` (gitignored).
-  It depends on `internal/agent/strategies/servertest`, which is added in Task 4.3.
-  Restore after Task 4.3 lands by moving the file back and removing `.staged-tests/` from `.gitignore`.
+### Landed on tan/feat-integrate-dora-agent (8 prep commits)
 
-### Phase 4 — remaining tasks (deferred — requires multi-session effort)
+(8 commits listed in commit history: 947641e through e76c53c — Phases 0-3 + Phase 4 leaf + llm + config.)
 
-Tasks 4.2, 4.3, 4.5, 4.6, 4.7, 4.8 from the integration plan are blocked on
-interdependent seam rewrites that don't decompose cleanly into one-task-at-a-time
-moves. The agent's dep tree has these tangles:
+### Landed in the L3-L8 re-plan commit (this commit)
 
-1. **providerconfig** uses the old `internal/secrets.KMS/Seal/Unseal` envelope
-   encryption API. Needs rewrite to use the new `internal/agent/secrets.Sealer`
-   struct from Task 2.2.
+L3 stores (users, session, providerconfig), L4 orchestration stores (strategies,
+backtest, deployment, store/history.go + HistoryStore), L5 live + WASM
+(wasmruntime/{registry,hostimpl,store}, wsbroker, orchestrator), L6 tools +
+servertest + migration, L7 httpapi (with RoutesAt) + history_store real impl,
+L8 wiring + main.go mount + config env-var wiring + .env updates. Build green;
+pre-commit green; tests pass; ~31K insertions.
 
-2. **wasmruntime/registry** needs the `dora-strategy-wasm` and `wazero` modules
-   promoted from indirect to direct deps (currently only indirect because no
-   code imported them yet — the agent code that does is now in place).
+### Deferred to the follow-up commit
 
-3. **tools/generate** and **strategies/servertest** reference `internal/migration`
-   which is deleted per spec (replaced by tern). Both need rewriting to apply
-   tern migrations directly via the consolidated schema.
+- OpenAPI spec merge (agent's openapi.json paths get joined into the host's).
+- `cmd/strategy-server` binary launch verification against a testcontainers
+  Postgres (`/v1/agent/sessions` returns 401 unauthed, `/healthz` returns 200,
+  `/v1/openapi` lists `/v1/agent/*` paths).
+- New tests surfaced by the live verification (smoke, e2e).
+- Final closeout of this follow-up section.
 
-4. **history_store** rewrite (Task 4.7) — fetch functions need to operate on
-   the shared `*pgxpool.Pool` instead of the agent's standalone `*sql.DB`.
+### Deferred out of this repo (dora-agent repo deletions)
 
-5. **httpapi** copy (Task 4.8) — drop the agent's `AuthMiddleware`, add
-   `RoutesAt(basePath)`, rewrite secrets + auth references.
-
-6. **wiring** (Task 5.1, 5.2) — assemble the runtime after all packages compile.
-
-7. **All agent SQL** must be schema-qualified with `agent.` prefix (every
-   INSERT/SELECT/ALTER/etc. that touches the agent tables).
-
-The plan's task-by-task ordering assumed these could land independently; in
-practice they touch shared seams and need to land together.
-
-Recommended path: do Tasks 4.2 + 4.3 + 4.5 + 4.6 + 4.7 + 4.8 + 5.1 + 5.2 as one
-big semantic commit. The build will be red between intermediate states; do not
-attempt a per-task green-build.
+- `cmd/agent-cli`, `internal/auth`, `internal/secrets/{secrets,env,aesgcm,kms}.go`,
+  `internal/store`, `internal/serveradmin` — deleted in a separate commit on
+  the dora-agent repo, not in this one.
+- `internal/migration` is ported (not deleted) — see L6.

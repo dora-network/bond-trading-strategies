@@ -45,7 +45,7 @@ const (
 // so callers can decide whether to fail the request or log-and-continue.
 func Insert(ctx context.Context, pool *pgxpool.Pool, doraUserID, action string, detail []byte) error {
 	_, err := pool.Exec(ctx, `
-		insert into audit_log (dora_user_id, action, detail)
+		insert into agent.audit_log (dora_user_id, action, detail)
 		values ($1, $2, $3)`,
 		doraUserID, action, detail,
 	)

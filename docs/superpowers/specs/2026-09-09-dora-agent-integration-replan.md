@@ -16,8 +16,8 @@ and binary boot verification.
 ## Background
 
 The original plan
-([`docs/superpowers/plans/2026-09-08-dora-agent-integration.md`](../plans/2026-09-08-dora-agent-integration.md),
-2465 lines) described Tasks 0.1 through 10.1 as if they were independent
+(`docs/superpowers/plans/2026-09-08-dora-agent-integration.md`, since deleted —
+git history preserves it, 2465 lines) described Tasks 0.1 through 10.1 as if they were independent
 commits. They are not. The deferred Tasks 4.2 / 4.3 / 4.5 / 4.6 / 4.7 / 4.8 /
 5.1 / 5.2 share seams (envelope → AES-GCM, own `*sql.DB` → shared pool, tern
 migration, route prefix, `agent.` schema qualification) and cannot land
@@ -79,14 +79,13 @@ tests surfaced by the live verification.
 **Dora-agent repo is not touched.** This commit only writes to
 bond-trading-strategies. The deletions of `cmd/agent-cli`, `internal/auth`,
 `internal/secrets/{secrets,env,aesgcm,kms}.go`, `internal/store`,
-`internal/migration`, `internal/serveradmin` happen in dora-agent's own repo
+`internal/serveradmin` happen in dora-agent's own repo
 separately.
 
 ## Scope
 
 In scope (this commit, single user-driven commit):
-
-- Copy from `dora-agent/development/internal/{users,session,providerconfig,strategies,backtest,deployment,history,wasmruntime,wsbroker,orchestrator,tools,httpapi}` to `bond-trading-strategies/development/internal/agent/...`.
+- Copy from `dora-agent/development/internal/{users,session,providerconfig,strategies,backtest,deployment,history,wasmruntime,wsbroker,orchestrator,tools,httpapi,migration}` to `bond-trading-strategies/development/internal/agent/...`. `internal/migration` is a runtime gate, not a DDL migrator, and ports verbatim.
 - Copy `internal/agent/wiring` (new package).
 - Rewrite seams per the per-layer table below.
 - Add `cmd/strategy-server/main.go` agent runtime mount.
@@ -116,7 +115,7 @@ single semantic commit aggregates every layer.
 | **L3** | `internal/agent/{users,session,providerconfig}` | `*sql.DB` → `*pgxpool.Pool`; `internal/secrets.KMS/Seal/Unseal` → `internal/agent/secrets.Sealer`; `agent.` schema prefix on every SQL. | L0–L2 (already landed). |
 | **L4** | `internal/agent/{strategies,backtest,deployment}` | Pool + `agent.` schema. If they reach into `internal/history`, redirect to a thin indirection under `internal/agent/store` that L7 fills in; otherwise leave stubs and fix at L7. | L3 + `agent.audit` (landed). |
 | **L5** | `internal/agent/wasmruntime/{registry,hostimpl,store}` + `internal/agent/wsbroker` + `internal/agent/orchestrator` | Promote `dora-strategy-wasm` + `wazero` to direct deps in `go.mod`. Pool + `agent.` schema. `wasmruntime/store` pool rewrite. | L4 + `agent.orderbroker` (landed). |
-| **L6** | `internal/agent/tools/{dora,strategies,backtest,deployment,generate}` + `internal/agent/strategies/servertest` (rewrite, no `internal/migration`) | Drop `internal/migration` references; rewrite to use tern directly. Pool + `agent.` schema. | L5 + `agent.llm` (landed). |
+| **L6** | `internal/agent/tools/{dora,strategies,backtest,deployment,generate}` + `internal/agent/strategies/servertest` (rewrite, no `store.MigrateConn`) + `internal/agent/migration` (port verbatim) | Remove the on-demand schema-apply path (`servertest/store.MigrateConn`); port `internal/migration` as a runtime gate package (not a DDL migrator). Pool + `agent.` schema. | L5 + `agent.llm` (landed). |
 | **L7** | `internal/agent/httpapi` (with `RoutesAt(basePath)`) + `internal/agent/store/history_store.go` | `httpapi`: drop `internal/auth.AuthMiddleware`, add `RoutesAt(basePath string)` parameter, register every pattern under the prefix. `history_store`: rewrite `New(ctx, dsn)` → `New(pool *pgxpool.Pool)`, `database/sql.QueryContext` → `pgxpool.Query`. | L6 + `agent.audit` (landed). |
 | **L8** | `internal/agent/wiring` + `cmd/strategy-server/main.go` mount + `internal/agent/config` env-var wiring + `.env`/`.env.example` updates + `TODO.md` refresh | `wiring.Wire(ctx, pool, encryptionKey, cfg, log) (*Runtime, error)`. `Runtime.Server.Routes()` mounted at `/v1/agent/*` in `cmd/strategy-server/main.go` after `strategyhttp.NewHandler(...)`. Config reads renamed + kept env vars per the spec. | L7 + L1 (config, landed). |
 
@@ -152,8 +151,8 @@ Already-landed (no work in this commit; verified at L8):
 - `tools/strategies`: list/get strategies. Reference L4's strategies store.
 - `tools/backtest`: run + get + cancel backtest. Reference L4's backtest store. This is where the `run_backtest` LLM tool lives; it calls into the dora-strategy-wasm framework's backtest runner via the framework's Go API and persists results to the L4 `backtest` store.
 - `tools/deployment`: deploy / stop / resume / restart / hotswap. Reference L4's deployment store + L5's orchestrator.
-- `tools/generate`: LLM-side strategy generator. The post-rewrite site for the `internal/migration` deletion. Currently the agent's `tools/generate` opens a fresh migration runner to apply the agent's schema; that goes away because the consolidated migration in `migrations/015_agent_consolidated_schema.sql` is the only DDL path. Remove the migration-related code; tern handles it.
-- `strategies/servertest`: test helper used by `tools/strategies` and `tools/backtest`. Same migration deletion as `tools/generate`.
+- `tools/generate`: LLM-side strategy generator. The on-demand schema-apply path (the agent's `servertest/store.MigrateConn`) is removed because the consolidated migration in `migrations/015_agent_consolidated_schema.sql` is the only DDL path; tern handles it. **The `internal/migration` package itself is ported verbatim as `internal/agent/migration`** — it is not a schema migrator but a stale-framework rebuild gate (`Migrator`/`ErrStaleFramework`/`Reserve`/`Release`) used by `run_backtest` and `deploy_strategy` to detect rows whose Docker pipeline was removed on 2026-09-04 and force a regenerate. Deleting it would break those rebuild flows.
+- `strategies/servertest`: test helper used by `tools/strategies` and `tools/backtest`. The on-demand schema-apply path (`store.MigrateConn`) is removed; the helper delegates to `agenttest.StartPostgres(t)`, which applies the consolidated migration under an advisory lock.
 
 **L7 — httpapi + history_store.** Two packages, the headline seam changes:
 
@@ -308,17 +307,17 @@ The follow-up commit (separate session) closes out:
   `internal/agent/secrets` (already landed) + `internal/secrets/crypto.go`
   (already landed). The host's existing `strategy/http/crypto.go` was
   already moved out to `internal/secrets/crypto.go` in commit `f42f144`.
-- The agent's `internal/store`, `internal/store/migrations`,
-  `internal/migration` are not copied; the consolidated migration
-  `migrations/015_agent_consolidated_schema.sql` is the only DDL path.
-- The agent's `internal/serveradmin` and `cmd/agent-cli` are not copied;
-  the admin listener and CLI are gone per the spec.
+- The agent's `internal/store` and `internal/store/migrations` are not
+  copied; the consolidated migration
+  `migrations/015_agent_consolidated_schema.sql` is the only DDL path. The
+  agent's `internal/serveradmin` and `cmd/agent-cli` are not copied; the
+  admin listener and CLI are gone per the spec.
 - The agent's `internal/history` is not copied as-is; it is replaced by
   `internal/agent/store/history_store.go` at L7.
 - The dora-agent repo's own deletions (`cmd/agent-cli`, `internal/auth`,
-  `internal/secrets/...`, `internal/store`, `internal/migration`,
-  `internal/serveradmin`) happen in a separate commit on the dora-agent
-  repo, not in this commit.
+  `internal/secrets/...`, `internal/store`, `internal/serveradmin`) happen
+  in a separate commit on the dora-agent repo, not in this commit. Note:
+  `internal/migration` is ported (not deleted) — see L6 in the layer table.
 - The pre-commit hook's `go-test-repo-mod` runs the entire repo's tests.
   Intermediate layer states are designed to be green, but a layer that
   imports a not-yet-landed package will fail to compile. The layer order

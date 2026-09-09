@@ -86,3 +86,22 @@ func doraUserIDFromContext(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(doraUserIDContextKey{}).(string)
 	return id, ok && id != ""
 }
+
+// RequireAuth is the exported form of requireAuth for sub-routers mounted
+// outside this package's own handler (e.g. the dora-agent runtime under
+// /v1/agent in cmd/strategy-server). It resolves the caller via the shared
+// DORAClient, so it performs exactly the same authentication as the
+// strategy routes: Authorization header validation plus a Dora user lookup.
+func RequireAuth(next http.Handler) http.Handler {
+	return requireAuth(func(ctx context.Context) (string, error) {
+		return NewDORAClient().GetUserID(ctx)
+	}, next)
+}
+
+// DoraUserIDFromContext retrieves the Dora user ID stored in ctx by
+// RequireAuth. Exported so external mounts (the agent's principal bridge
+// in cmd/strategy-server) can read the verified identity requireAuth
+// resolved.
+func DoraUserIDFromContext(ctx context.Context) (string, bool) {
+	return doraUserIDFromContext(ctx)
+}
