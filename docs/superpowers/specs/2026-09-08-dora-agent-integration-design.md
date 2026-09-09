@@ -32,7 +32,7 @@ Not chosen: rewriting the agent's HTTP layer against bond-trading-strategies pri
 In scope:
 
 - `internal/agent/*` package tree — copy of every agent package the agent needs at runtime, renamed to live under `internal/agent/`.
-- `migrations/012_agent_consolidated_schema.sql` — single consolidated migration that creates the agent's final schema in this repo's existing tern migrator.
+- `migrations/015_agent_consolidated_schema.sql` — single consolidated migration that creates the agent's final schema in a dedicated `agent` Postgres schema (not `public`), applied via the existing tern migrator.
 - `internal/agent/wiring/wiring.go` — constructs the agent runtime from the shared pgxpool + encryption key + agent config + logger, returns a `*Runtime` whose `Server.Routes()` is the `/v1/agent/*` handler.
 - `internal/agent/secrets/seal.go` — `Seal`/`Open` thin wrappers around `strategy/http/crypto.go`.
 - `internal/agent/store/history_store.go` — candle/trade/price fetchers operating on the shared pgxpool (replaces agent's `internal/history`).
@@ -65,7 +65,7 @@ Out of scope:
 - `internal/secrets/{secrets.go,env.go,aesgcm.go,kms.go}` are deleted.
 - New `internal/agent/secrets/seal.go` exposes `Seal(plaintext []byte) ([]byte, error)` and `Open(sealed []byte) ([]byte, error)`, both thin wrappers around `strategy/http.EncryptAPIKey` / `DecryptAPIKey`.
 - `strategy/http/crypto.go` is moved up to a leaf `internal/secrets/crypto.go` so both `strategy/http` and `internal/agent/secrets` call into it. Existing callers (`strategy/http/run_store.go`'s encrypted_dora_api_key write path) keep working with a re-import.
-- `server_dora_credentials.api_key` and `provider_configs.api_key` columns keep their names. The `*_dek` columns are dropped from the consolidated schema.
+- `agent.server_dora_credentials.api_key` and `agent.provider_configs.api_key` columns keep their names. The `*_dek` columns are dropped from the consolidated schema; the table-level schema prefix changes from `public` (in the agent's standalone repo) to `agent`.
 
 **No data migration.** The agent has not been deployed. No rows exist; the consolidated migration creates tables fresh.
 
@@ -75,13 +75,13 @@ Out of scope:
 
 **Pool sharing.** strategy-server's existing `*pgxpool.Pool` constructed at `cmd/strategy-server/main.go:138` is passed to `internal/agent/wiring.Wire(ctx, pool, encryptionKey, cfg, log)`. No second pool.
 
-**Migrations.** The agent's 15 incremental migration files are **collapsed into one consolidated migration** named `migrations/012_agent_consolidated_schema.sql`. Built by reading the agent's `internal/store/migrations/*.sql` files in order and synthesizing a single DDL that creates the same final schema. Tables: `users`, `sessions`, `messages`, `provider_configs`, `strategies`, `strategy_versions`, `strategy_capture_pending`, `deployments`, `audit_log`, `server_dora_credentials`. Each audited for name collisions with the existing 11 tables; if any conflict is found, rename inline.
+**Migrations.** The agent's 15 incremental migration files are **collapsed into one consolidated migration** named `migrations/015_agent_consolidated_schema.sql` (sequence number 15 follows the host's 14 existing migrations). Built by reading the agent's `internal/store/migrations/*.sql` files in order and synthesizing a single DDL that creates the same final schema. **The migration creates the agent's tables in a dedicated `agent` schema** (not `public`) so they're isolated from strategy-server's tables — this avoids confusion between similarly-named tables like host `strategy_backtests` and agent `backtests`, and makes the agent's tables trivially enumerable, droppable, or grantable as a unit. All table / index / constraint references use the `agent.` prefix. Tables: `agent.users`, `agent.sessions`, `agent.messages`, `agent.provider_configs`, `agent.strategies`, `agent.strategy_versions`, `agent.strategy_capture_pending`, `agent.deployments`, `agent.audit_log`, `agent.server_dora_credentials`, plus the WASM/safety/support tables from agent migrations 006, 007, 008, 011–014 (e.g. `agent.wasm_artifacts`, `agent.user_caps`, `agent.deployments`). Each audited for name collisions with the host's `public` schema tables; if any conflict is found, rename inline. The migration sets `search_path` so unqualified references resolve correctly during the migration run, but every reference in the migration body is schema-qualified.
 
 - `server_dora_credentials.api_key` is a single `bytea` column — no `_dek` columns.
 - Agent's `internal/store/migrations`, `internal/store/store.go`, and `internal/migration/migrator.go` are deleted.
 - bond-trading-strategies' existing tern migrator (`migrations/tern.conf`) runs all migrations including the consolidated one. Strategy-server's existing `tern migrate --config migrations/tern.conf` invocation continues to work.
 
-**Audit table.** Agent's `audit_log` lands as its own table; bond-trading-strategies has no equivalent today. No merge.
+**Audit table.** Agent's `audit_log` lands as `agent.audit_log`; bond-trading-strategies has no equivalent today. No merge. The agent's audit log is namespaced under the `agent` schema, distinct from any future audit log in the host's `public` schema.
 
 **History DSN.** Agent's `internal/history` package is deleted. Candle/trade/price history fetches the agent's backtest runner and live orchestrator need are served by `internal/agent/store/history_store.go` operating on the shared pool. Same SQL, same `*Cursor` type, same return shapes.
 
@@ -307,7 +307,7 @@ framework WASM host fn → on_preamble / on_trade / on_price
 5. **Thin crypto wrapper round-trip.** `internal/agent/secrets.Seal`/`Open` over plaintext of empty / 32 bytes / 1 MiB. Confirms the wrapper works end-to-end and that the underlying AES-GCM is exercised.
 6. **`history_store` fetches against the shared pool.** Spin up a testcontainers Postgres, run the consolidated migration, insert known rows into `candles_history`/`trades_history`/`price_history`, call the agent's `history.Store.FetchCandles/Trades/Prices`. Verifies the rewritten `internal/agent/store/history_store.go` is correct against the merged schema (catches column-name drift).
 7. **Authcache TTL.** Insert a fake `/v1/user/self` resolver; assert cache hits within TTL, miss after expiry.
-8. **`provider_configs.api_key` column shape.** Insert via store, read back via store, decrypt, assert plaintext matches. Confirms the column type and seal format are right.
+8. **`agent.provider_configs.api_key` column shape.** Insert via store, read back via store, decrypt, assert plaintext matches. Confirms the column type, schema location, and seal format are right.
 
 **Mutation discipline.** For each new test, mutate the production code in a known-bad way, re-run, confirm the test fails. Restore. Document mutations in `TODO.md` follow-up section. Money paths (encryption, `/v1/user/self` cache, agent's per-user rate limiter) get the strongest mutation checks.
 
@@ -315,7 +315,7 @@ framework WASM host fn → on_preamble / on_trade / on_price
 
 ## Risks
 
-- **Consolidated migration drift.** The 15→1 migration collapse could miss a constraint, index, or default that the agent relies on. Mitigation: copy each agent migration file into a scratch directory during implementation, run all 15 against a fresh testcontainers Postgres, then `pg_dump --schema-only` the final schema and use that as the consolidated migration source.
+- **Consolidated migration drift.** The 15→1 migration collapse could miss a constraint, index, or default that the agent relies on. Mitigation: keep the agent's incremental migration files as a reference during implementation; the consolidated DDL is hand-written with each agent migration traced and verified, then applied to a fresh testcontainers Postgres and compared against the host's other tables for collisions. Schema-namespace everything under `agent` so the host's `public` tables remain untouched.
 - **Auth-cache consistency.** Two callers sharing `internal/agent/authcache.go` might race on the underlying map. Mitigation: store uses `sync.Map` or a mutex; test with concurrent reads.
 - **Secret encryption format mismatch.** Anything the agent sealed under envelope encryption must not exist (no production data), but if a dev row sneaks in, the open call panics. Mitigation: panic-recover in the Open path with a clear "rotation required" error message; document in the spec.
 - **Janitor leak.** A wedged janitor goroutine in `Wire` would prevent the strategy-server from shutting down cleanly. Mitigation: `Runtime.Close` cancels the janitor ctx first; the existing pattern from agent's `main.go` carries over.
@@ -348,6 +348,6 @@ The change is complete when:
 
 - `strategy/http/crypto.go` → move to `internal/secrets/crypto.go`; update both call sites.
 - `internal/agent/wiring.Wire` should construct every store eagerly and return the first error — no silent fallbacks (the existing agent's main.go construction order is the template).
-- The consolidated migration must run after `011_add_breakout_trade_columns.sql` (sequence number `012_*`); verify the migrator is purely ordered and not lexicographic.
+- The consolidated migration runs as `015_agent_consolidated_schema.sql` (sequence number 15, after the host's 14 migrations); tern orders migrations by numeric prefix on the filename.
 - The agent's `internal/config/dotenv.go` becomes part of `internal/agent/config/config.go`; it does not load `.env` (strategy-server's main already handles that).
 - Operator rotation of `DORA_ADMIN_API_KEY`: drop the row, redeploy with the new env var. No application code path.

@@ -182,7 +182,9 @@ comm -12 /tmp/host_tables.txt /tmp/agent_tables.txt
 
 Expected: empty output. If anything collides, edit `/tmp/agent_schema_dump.sql` to rename the agent-side table (e.g. `agent_users`) and update the dump accordingly.
 
-- [ ] **Step 1.1.4: Verify schema_version is included in the dump if not in the listed tables**
+- [ ] **Step 1.1.4: Schema-qualify every reference under the `agent` schema**
+
+The agent's tables are created in a dedicated `agent` schema (not `public`). All CREATE TABLE / ALTER TABLE / CREATE INDEX / FK targets in the consolidated migration use the `agent.` prefix. The migration begins with `create schema if not exists agent;` and `set search_path to agent, public;` so unqualified references resolve correctly during the migration run, but every reference in the file body is schema-qualified.
 
 The agent's `server_dora_credentials.api_key` column must be a single `bytea` column — no `_dek` columns. Edit the dump to remove any `api_key_dek` columns or related DEK artifacts from the agent's `009_server_admin_dora_key.sql`-derived DDL:
 
@@ -234,7 +236,7 @@ docker stop bts-tern
 
 - [ ] **Step 1.2.3: Prompt user to commit the migration**
 
-Stage `migrations/015_agent_consolidated_schema.sql`. Prompt the user to commit with message `feat(db): add consolidated agent schema (sessions, messages, strategies, deployments, audit, server_dora_credentials)`.
+Stage `migrations/015_agent_consolidated_schema.sql`. Prompt the user to commit with message `feat(db): add consolidated agent schema under agent schema (sessions, messages, strategies, deployments, audit, server_dora_credentials, wasm, deployments, etc.)`.
 
 ---
 
