@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/internal/agent/agenttest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -394,4 +395,144 @@ func TestFetchPrices_DeadlineHangsFetch(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("FetchPrices err: got %v, want errors.Is(...,context.Canceled)", err)
 	}
+}
+
+// fullScale pads a decimal string to numeric(42,18) text form
+// ("5" -> "5.000000000000000000", "100.5" -> "100.500000000000000000").
+func fullScale(s string) string {
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		return s + strings.Repeat("0", 18-len(s)+i+1)
+	}
+	return s + "." + strings.Repeat("0", 18)
+}
+
+// TestHistoryStore_RoundTripAgainstPublicSchema is the real-DB
+// counterpart to the unit tests above. It boots a Postgres, runs the
+// host's tern migrations 001-014 plus the agent's 015 consolidated
+// migration, inserts known rows into candles_history / trades_history
+// / price_history, and asserts that HistoryStore.FetchCandles /
+// FetchTrades / FetchPrices return them. Catches column-name drift
+// between history_store's SQL and the merged schema.
+func TestHistoryStore_RoundTripAgainstPublicSchema(t *testing.T) {
+	pool := agenttest.StartPostgresWithHostMigrations(t)
+	defer pool.Close()
+
+	ctx := t.Context()
+	hs := NewHistoryStore(pool)
+
+	obID := uuid.New()
+	assetID := uuid.New()
+	userID := uuid.New()
+
+	candleStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// Three consecutive 1m candles so the bucketed query has real data.
+	for i := range 3 {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO candles_history
+				(order_book_id, start_timestamp, open, high, low, close, volume, open_ytm, high_ytm, low_ytm, close_ytm)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			obID, candleStart.Add(time.Duration(i)*time.Minute),
+			"100", "110", "95", "105", "1000",
+			"0.05", "0.055", "0.045", "0.05",
+		); err != nil {
+			t.Fatalf("insert candle %d: %v", i, err)
+		}
+	}
+
+	txID := uuid.New()
+	tradeAt := time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trades_history
+			(transaction_id, order_id, order_seq, orderbook_id, user_id, asset, quantity, price, side, aggressor_indicator, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		txID, uuid.New(), 1, obID, userID, assetID, "5", "100.5", "B", true, tradeAt,
+	); err != nil {
+		t.Fatalf("insert trade: %v", err)
+	}
+
+	priceAt := time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO price_history (asset_id, price, ytm, timestamp)
+		VALUES ($1, $2, $3, $4)`,
+		assetID, "100.5", "0.05", priceAt,
+	); err != nil {
+		t.Fatalf("insert price: %v", err)
+	}
+
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("candles", func(t *testing.T) {
+		candles, next, err := hs.FetchCandles(t.Context(), obID.String(), start, end, "1m", "", 10)
+		if err != nil {
+			t.Fatalf("FetchCandles: %v", err)
+		}
+		if len(candles) != 3 {
+			t.Fatalf("FetchCandles returned %d rows, want 3", len(candles))
+		}
+		first := candles[0]
+		if first.OrderBookID != obID.String() || !first.StartTimestamp.Equal(candleStart) {
+			t.Errorf("first candle = (%s, %v), want (%s, %v)", first.OrderBookID, first.StartTimestamp, obID, candleStart)
+		}
+		// numeric(42,18) round-trips as full-scale text.
+		if first.Open != fullScale("100") || first.Close != fullScale("105") || first.Volume != fullScale("1000") {
+			t.Errorf("first candle OHLCV = %s/%s/%s/%s vol %s",
+				first.Open, first.High, first.Low, first.Close, first.Volume)
+		}
+		// The store always encodes a cursor when rows were returned
+		// (short-page handling); just assert it's usable.
+		if next == "" {
+			t.Error("next cursor empty despite rows returned")
+		}
+	})
+
+	t.Run("trades", func(t *testing.T) {
+		trades, next, err := hs.FetchTrades(t.Context(), obID.String(), start, end, "", 10)
+		if err != nil {
+			t.Fatalf("FetchTrades: %v", err)
+		}
+		if len(trades) != 1 {
+			t.Fatalf("FetchTrades returned %d rows, want 1", len(trades))
+		}
+		tr := trades[0]
+		if tr.TransactionID != txID.String() {
+			t.Errorf("trade transaction_id = %s, want %s", tr.TransactionID, txID)
+		}
+		if tr.OrderBookID != obID.String() || tr.Asset0 != assetID.String() {
+			t.Errorf("trade order_book_id/asset = %s/%s, want %s/%s", tr.OrderBookID, tr.Asset0, obID, assetID)
+		}
+		if tr.Quantity0 != fullScale("5") || tr.Price != fullScale("100.5") || tr.Side != "B" || !tr.AggressorIndicator {
+			t.Errorf("trade qty/price/side/aggressor = %s/%s/%s/%v",
+				tr.Quantity0, tr.Price, tr.Side, tr.AggressorIndicator)
+		}
+		if !tr.CreatedAt.Equal(tradeAt) {
+			t.Errorf("trade created_at = %v, want %v", tr.CreatedAt, tradeAt)
+		}
+		if next == "" {
+			t.Error("next cursor empty despite rows returned")
+		}
+	})
+
+	t.Run("prices", func(t *testing.T) {
+		prices, next, err := hs.FetchPrices(t.Context(), assetID.String(), start, end, "", 10)
+		if err != nil {
+			t.Fatalf("FetchPrices: %v", err)
+		}
+		if len(prices) != 1 {
+			t.Fatalf("FetchPrices returned %d rows, want 1", len(prices))
+		}
+		p := prices[0]
+		if p.AssetID != assetID.String() {
+			t.Errorf("price asset_id = %s, want %s", p.AssetID, assetID)
+		}
+		if p.Price != fullScale("100.5") || p.YTM != fullScale("0.05") {
+			t.Errorf("price/ytm = %s/%s", p.Price, p.YTM)
+		}
+		if !p.Timestamp.Equal(priceAt) {
+			t.Errorf("price timestamp = %v, want %v", p.Timestamp, priceAt)
+		}
+		if next == "" {
+			t.Error("next cursor empty despite rows returned")
+		}
+	})
 }

@@ -4,11 +4,11 @@
 package agenttest
 
 import (
-	"context"
 	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/tern/v2/migrate"
 )
 
 func readMigration(t *testing.T) string {
@@ -40,7 +40,7 @@ func StartPostgres(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("DATABASE_URL not set; skipping agent PG test")
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("pgxpool.New: %v", err)
@@ -71,6 +71,52 @@ func StartPostgres(t *testing.T) *pgxpool.Pool {
 
 	if _, err := conn.Exec(ctx, readMigration(t)); err != nil {
 		t.Fatalf("apply migration: %v", err)
+	}
+	return pool
+}
+
+// StartPostgresWithHostMigrations returns a pool with the host's tern
+// migrations 001-014 applied in addition to the agent's 015
+// consolidated migration. Use for tests that need the public-schema
+// tables (candles_history / trades_history / price_history) the
+// agent's history_store queries. Idempotent: tern records applied
+// versions in public.schema_version, so repeat calls no-op.
+func StartPostgresWithHostMigrations(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool := StartPostgres(t)
+
+	// Resolve the migrations dir from test binaries at different
+	// package depths (mirrors readMigration above).
+	var dir string
+	for _, p := range []string{"../../../migrations", "../../../../migrations"} {
+		if _, err := os.Stat(p); err == nil {
+			dir = p
+			break
+		}
+	}
+	if dir == "" {
+		t.Fatal("host migrations dir not found")
+	}
+
+	ctx := t.Context()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer conn.Release()
+
+	m, err := migrate.NewMigrator(ctx, conn.Conn(), "public.schema_version")
+	if err != nil {
+		t.Fatalf("tern migrator: %v", err)
+	}
+	if err := m.LoadMigrations(os.DirFS(dir)); err != nil {
+		t.Fatalf("tern load: %v", err)
+	}
+	// 015 (agent schema) is already applied by StartPostgres; stop
+	// just before it.
+	const lastHostMigration = 14
+	if err := m.MigrateTo(ctx, lastHostMigration); err != nil {
+		t.Fatalf("tern migrate: %v", err)
 	}
 	return pool
 }
