@@ -88,6 +88,51 @@ func newTestServer(t *testing.T) *testServer {
 	return &testServer{srv: srv, runtime: rt, pool: pool, cancel: cancel}
 }
 
+// newTestServerWithAuthResolver is the same as newTestServer but lets the
+// test inject a custom Dora user resolver, so successful-auth requests can
+// be driven through the host's requireAuth gate without hitting the real
+// Dora API.
+func newTestServerWithAuthResolver(
+	t *testing.T,
+	resolveUserID func(context.Context) (string, error),
+) *testServer {
+	t.Helper()
+	pool := agenttest.StartPostgres(t)
+	if pool == nil {
+		t.Skip("DATABASE_URL not set; skipping agent PG test")
+	}
+
+	t.Setenv("AGENT_WASM_ARTIFACT_ROOT", t.TempDir())
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	cfg := config.Config{
+		CapturePendingSweepInterval: 5 * time.Minute,
+		CapturePendingRetention:     24 * time.Hour,
+		RateLimitPerMin:             1000, // effectively disabled for tests
+		LLMTimeout:                  30 * time.Second,
+	}
+	encryptionKey := make([]byte, 32)
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	rt, err := wiring.Wire(ctx, pool, encryptionKey, cfg, log)
+	if err != nil {
+		cancel()
+		pool.Close()
+		t.Fatalf("agent wiring: %v", err)
+	}
+
+	handler := strategyhttp.RequireAuthWithResolver(resolveUserID, agentPrincipalBridge(rt))
+	srv := httptest.NewServer(handler)
+	t.Cleanup(func() {
+		srv.Close()
+		_ = rt.Close(t.Context())
+		cancel()
+	})
+
+	return &testServer{srv: srv, runtime: rt, pool: pool, cancel: cancel}
+}
+
 // agentPrincipalBridge mirrors cmd/strategy-server/main.go's bridge from
 // authctx.AuthInfo to PrincipalMiddleware: after RequireAuth succeeds, the
 // request context carries the verified Dora user ID and parsed credentials;

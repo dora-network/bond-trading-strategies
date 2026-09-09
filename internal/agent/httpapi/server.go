@@ -244,14 +244,31 @@ func (s *Server) registerRoutes(mux *http.ServeMux, basePath string) {
 	authed := http.NewServeMux()
 	for _, rt := range routes {
 		method, path, _ := strings.Cut(rt.pattern, " ")
-		authed.HandleFunc(method+" "+basePath+path, rt.h)
+		// The internal route table uses paths like "GET /v1/sessions".
+		// Routes() (basePath="") keeps the path as-is so the legacy
+		// unit tests that hit bare /v1/... continue to work.
+		// RoutesAt("/v1/agent") replaces the leading "/v1" with the
+		// basePath, producing the spec's wire path "/v1/agent/sessions"
+		// (not "/v1/agent/v1/sessions" as a naive concat would).
+		wire := path
+		if basePath != "" {
+			wire = basePath + strings.TrimPrefix(path, "/v1")
+		}
+		authed.HandleFunc(method+" "+wire, rt.h)
 	}
 
 	// Chain: request-ID+logging outer, per-user rate-limit inner, on the
 	// authed subtree.
 	limiter := newRateLimiter(s.rateLimitPerMin, time.Minute/time.Duration(s.rateLimitPerMin))
 	authedRL := RateLimitMiddleware(limiter)(authed)
-	mux.Handle(basePath+"/v1/", RequestIDMiddleware(authedRL))
+	// Same prefix-stripping rule as the per-route registration above:
+	// when basePath is "/v1/agent", the catch-all is "/v1/agent/" not
+	// "/v1/agent/v1/".
+	catchAll := basePath + "/v1/"
+	if basePath != "" {
+		catchAll = basePath + "/"
+	}
+	mux.Handle(catchAll, RequestIDMiddleware(authedRL))
 }
 
 // corsMiddleware sets CORS headers per the server's allow-list. Empty

@@ -98,6 +98,19 @@ func RequireAuth(next http.Handler) http.Handler {
 	}, next)
 }
 
+// RequireAuthWithResolver is the test-friendly form of RequireAuth: it
+// accepts a custom Dora user resolver instead of always calling
+// NewDORAClient().GetUserID. Production mounts should use RequireAuth;
+// tests use this to inject a fake resolver that returns a known user ID
+// for a known API key, so the agent's handlers can be driven end-to-end
+// without hitting Dora.
+func RequireAuthWithResolver(
+	resolveUserID func(context.Context) (string, error),
+	next http.Handler,
+) http.Handler {
+	return requireAuth(resolveUserID, next)
+}
+
 // DoraUserIDFromContext retrieves the Dora user ID stored in ctx by
 // RequireAuth. Exported so external mounts (the agent's principal bridge
 // in cmd/strategy-server) can read the verified identity requireAuth
