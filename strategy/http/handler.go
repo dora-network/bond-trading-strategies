@@ -13,8 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/govalues/decimal"
+
 	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/bond-trading-strategies/fred"
+	"github.com/dora-network/bond-trading-strategies/internal/secrets"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
@@ -28,8 +32,6 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
-	"github.com/google/uuid"
-	"github.com/govalues/decimal"
 )
 
 const (
@@ -1605,7 +1607,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 
 	var encryptedAPIKey []byte
 	if info != nil && info.APIKey != "" && len(h.encryptionKey) > 0 {
-		encryptedAPIKey, err = encryptAPIKey([]byte(info.APIKey), h.encryptionKey)
+		encryptedAPIKey, err = secrets.Encrypt([]byte(info.APIKey), h.encryptionKey)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("encrypt api key: %v", err))
 			return
@@ -1948,7 +1950,7 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 	var apiKeyDecrypted []byte
 	if len(detail.EncryptedAPIKey) > 0 && len(h.encryptionKey) > 0 {
 		var err2 error
-		apiKeyDecrypted, err2 = decryptAPIKey(detail.EncryptedAPIKey, h.encryptionKey)
+		apiKeyDecrypted, err2 = secrets.Decrypt(detail.EncryptedAPIKey, h.encryptionKey)
 		if err2 != nil {
 			return fmt.Errorf("decrypt api key for run %s: %w", detail.ID, err2)
 		}
