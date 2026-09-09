@@ -322,6 +322,30 @@ framework WASM host fn → on_preamble / on_trade / on_price
 - **WASM runtime + pgxpool lifetime.** The WASM runtime holds a reference to its host module functions; if a strategy captures a `*pgxpool.Pool` reference via the host callback and the pool closes, use-after-free. Mitigation: strategies don't get direct DB access; they call back into `history_store` which uses a fresh context.
 - **Doubled rate-limiting may surprise operators.** Document explicitly in `cmd/strategy-server/main.go` flag help text and in `README.md`.
 
+## Implementation status (as of 2026-09-09)
+
+Phases 0-3 + Phase 4 leaf packages + llm + config are landed and committed on `tan/feat-integrate-dora-agent`:
+
+- Phase 0: preflight, pgx/v5 bump to v5.10.0, agent deps.
+- Phase 1: consolidated migration `015_agent_consolidated_schema.sql` (creates the agent's tables in a dedicated `agent` schema).
+- Phase 2: `internal/secrets/crypto.go` (renamed from `strategy/http/crypto.go`) + `internal/agent/secrets/seal.go` (Sealer struct).
+- Phase 3: `internal/agent/authcache.go` (TTL cache for /v1/user/self).
+- Phase 4 partial: `internal/agent/{audit,config,llm,llm/anyllm,llm/prompts,orderbroker,sanitize,scan}` + `secrets` + `authcache`. Production code builds, tests pass.
+
+**Deferred - out of this branch.** Tasks 4.2 / 4.3 / 4.5 / 4.6 / 4.7 / 4.8 / 5.1 / 5.2 / 6.x / 7.1 / 9.1 / 10.1 are blocked on interdependent seam rewrites that don't decompose cleanly into per-task green builds. The plan's task-by-task ordering was optimistic; in practice these touch shared seams (envelope encryption removal, pgxpool sharing, schema-qualifying every SQL statement, `internal/migration` removal in favor of tern, `internal/agent/secrets.Sealer` replacement of `secrets.KMS`, httpapi `RoutesAt(basePath)` prefix support). Recommended path: do the rest as one big semantic commit in a follow-up session. See `TODO.md` for the full breakdown.
+
+**Acceptance criteria (revised).** The original acceptance criteria assume the deferred work has landed. As of 2026-09-09, only these are met:
+
+- [x] `cmd/strategy-server` boots without the agent runtime (WASM runtime, wsbroker, history store, LLM driver, janitor are not wired).
+- [x] `go test ./...` passes for the bond-trading-strategies code that currently exists.
+- [x] `pre-commit run --all-files` is green.
+
+These remain on the deferred list:
+- [ ] `cmd/strategy-server` boots with all agent dependencies wired.
+- [ ] `curl -i http://localhost:8081/v1/agent/sessions` returns 401.
+- [ ] `GET /v1/openapi` returns the merged spec including `/v1/agent/*` paths.
+- [ ] `cmd/mcp-server` and `cmd/price-daemon` remain unchanged and pass their existing test suites.
+
 ## Future work (out of scope for this change)
 
 - Role gate (TRADER/ADMIN/INTEGRATOR) reintroduced service-wide if needed.

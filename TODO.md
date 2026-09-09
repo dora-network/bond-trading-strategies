@@ -495,3 +495,39 @@ resolved in the 2026-08-26 session):
 - `internal/agent/safety/caps_test.go` is parked in `.staged-tests/safety_caps_test.go.disabled` (gitignored).
   It depends on `internal/agent/strategies/servertest`, which is added in Task 4.3.
   Restore after Task 4.3 lands by moving the file back and removing `.staged-tests/` from `.gitignore`.
+
+### Phase 4 — remaining tasks (deferred — requires multi-session effort)
+
+Tasks 4.2, 4.3, 4.5, 4.6, 4.7, 4.8 from the integration plan are blocked on
+interdependent seam rewrites that don't decompose cleanly into one-task-at-a-time
+moves. The agent's dep tree has these tangles:
+
+1. **providerconfig** uses the old `internal/secrets.KMS/Seal/Unseal` envelope
+   encryption API. Needs rewrite to use the new `internal/agent/secrets.Sealer`
+   struct from Task 2.2.
+
+2. **wasmruntime/registry** needs the `dora-strategy-wasm` and `wazero` modules
+   promoted from indirect to direct deps (currently only indirect because no
+   code imported them yet — the agent code that does is now in place).
+
+3. **tools/generate** and **strategies/servertest** reference `internal/migration`
+   which is deleted per spec (replaced by tern). Both need rewriting to apply
+   tern migrations directly via the consolidated schema.
+
+4. **history_store** rewrite (Task 4.7) — fetch functions need to operate on
+   the shared `*pgxpool.Pool` instead of the agent's standalone `*sql.DB`.
+
+5. **httpapi** copy (Task 4.8) — drop the agent's `AuthMiddleware`, add
+   `RoutesAt(basePath)`, rewrite secrets + auth references.
+
+6. **wiring** (Task 5.1, 5.2) — assemble the runtime after all packages compile.
+
+7. **All agent SQL** must be schema-qualified with `agent.` prefix (every
+   INSERT/SELECT/ALTER/etc. that touches the agent tables).
+
+The plan's task-by-task ordering assumed these could land independently; in
+practice they touch shared seams and need to land together.
+
+Recommended path: do Tasks 4.2 + 4.3 + 4.5 + 4.6 + 4.7 + 4.8 + 5.1 + 5.2 as one
+big semantic commit. The build will be red between intermediate states; do not
+attempt a per-task green-build.

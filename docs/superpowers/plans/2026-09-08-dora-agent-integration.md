@@ -18,6 +18,40 @@
 
 ---
 
+## Implementation status (as of 2026-09-09)
+
+Phases 0-3 + Phase 4 leaf packages + llm + config are landed and committed.
+The remaining tasks (4.2 / 4.3 / 4.5 / 4.6 / 4.7 / 4.8 / 5.1 / 5.2 / 6.x / 7.1 / 9.1 / 10.1)
+are **deferred - do them as one big semantic commit in a follow-up session**.
+
+The plan's task-by-task ordering was optimistic: the agent packages share
+several seams (envelope encryption, pgxpool, migration, schema namespace,
+httpapi prefix) that must be rewritten simultaneously. Per-task green builds
+are not achievable without doing the rewrites in a different order.
+
+Concrete rewrites needed before the deferred tasks can land:
+
+1. **`internal/agent/providerconfig`** - replace `internal/secrets.KMS/Seal/Unseal`
+   with the new `internal/agent/secrets.Sealer` struct.
+2. **`internal/agent/wasmruntime/registry`** - promote `dora-strategy-wasm` and
+   `wazero` to direct go.mod deps (currently indirect; the importing code now
+   exists).
+3. **`internal/agent/tools/generate` and `internal/agent/strategies/servertest`** -
+   remove references to `internal/migration` (deleted per spec). Replace with
+   direct tern calls or remove the test helper entirely.
+4. **`internal/agent/history`** - rewrite `New(ctx, dsn)` to accept a
+   `*pgxpool.Pool` instead of opening its own `*sql.DB`. Replace
+   `database/sql.QueryContext` calls with `pgxpool.Query`.
+5. **`internal/agent/httpapi`** - copy the agent's httpapi package, drop its
+   `AuthMiddleware`, add `RoutesAt(basePath)` parameter, wire secrets +
+   authctx reads.
+6. **All agent SQL** - schema-qualify every `INSERT INTO users` /
+   `SELECT ... FROM users` etc. to `agent.users`. The migration places the
+   tables in the `agent` schema; the code must follow.
+7. **`internal/agent/wiring`** - construct the runtime from the shared pgxpool
+   + encryption key + agent config + logger; mount at `/v1/agent/*` in
+   `cmd/strategy-server/main.go`.
+
 ## Phase 0 — Pre-flight
 
 ### Task 0.1: Confirm both repos checked out and verify branch
