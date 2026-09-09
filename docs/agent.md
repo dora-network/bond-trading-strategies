@@ -173,6 +173,38 @@ The auth scheme is `Authorization: ApiKey <token>`. The agent's
 middleware only accepts the literal `ApiKey` prefix; the broader
 OpenAPI convention (`Bearer`) is rejected.
 
+## Verifying the install (binary smoke)
+
+After `make start-strategy-server` (or an equivalent manual launch of
+`cmd/strategy-server`) is running, verify the HTTP surface responds correctly:
+
+```sh
+# Health check — must return 200, no auth required.
+curl -i http://localhost:8081/healthz
+
+# Agent subtree auth wall — must return 401 without Authorization.
+curl -i http://localhost:8081/v1/agent/sessions
+
+# OpenAPI spec — must return 200 and list /v1/agent/* paths.
+curl -i http://localhost:8081/v1/openapi | head -50
+```
+
+Expected responses:
+
+- `GET /healthz` → `200 OK`, body `ok` (or JSON health report).
+- `GET /v1/agent/sessions` (no auth) → `401 Unauthorized`. The host's
+  `requireAuth` blocks the request before the agent's handler runs.
+- `GET /v1/openapi` → `200 OK`, body is a JSON OpenAPI 3.1 document
+  that includes paths under `/v1/agent/*` (per the merged spec,
+  `docs/openapi/strategy-server.json`). The
+  `paths./v1/agent/sessions.get.operationId` should be present.
+
+**Note on the port.** The default is `:8081` (`cmd/strategy-server/main.go`
+`-a` flag, overridable via the `ADDR` env var). If `ADDR` or `STRATEGY_ADDR`
+is set in the environment (the Makefile passes `STRATEGY_ADDR` to `-a`), the
+curl commands must use the same port. Verify with `ss -tlnp | grep strategy-server`
+or read the binary's startup log line `strategy server starting addr=...`.
+
 ## Architecture
 
 ### Repos
