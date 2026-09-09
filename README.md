@@ -360,6 +360,47 @@ go run ./cmd/mcp-server \
 > to `-strategy-base-url`. If `FRED_API_KEY` is omitted, FRED tools will
 > return errors; strategy tools still work.
 
+
+### `agent` (AI strategy builder)
+
+The agent is an AI assistant that helps users construct, back-test,
+and deploy bond strategies. It is embedded in the `strategy-server`
+binary and served at `/v1/agent/*` — the same process, the same
+Postgres pool, the same encryption key, the same auth gate.
+
+#### What it supports
+
+- **Strategy generation** from a natural-language description. The agent
+  compiles the description into a Go module implementing the
+  `dorastrategy.Strategy` interface and validates it against the
+  framework's surface.
+- **Backtests** against historic Dora candle data. The strategy is
+  compiled to a `.wasm` blob with TinyGo and run in-process via
+  wazero. Results persist to the `agent.backtests` +
+  `agent.backtest_fills` schema.
+- **Live deployments** via
+  `POST /v1/agent/strategies/{id}/versions/{rev}/deploy`. The agent
+  subscribes to the Dora multiplex websocket, drives the wazero
+  instance, and persists per-strategy decisions.
+- **Per-user LLM provider configuration** (saved encrypted in
+  `agent.provider_configs`).
+
+#### Run locally
+
+The agent runs as part of `strategy-server`; there is no separate
+binary. Required env-var additions to the host's `.env` are listed in
+[`docs/agent.md`](docs/agent.md). The agent's HTTP surface is
+documented in the merged OpenAPI spec at `GET /v1/openapi`.
+
+#### Chat UI
+
+A single-page manual-testing chat UI lives in [`docs/chatui/`](docs/chatui/).
+Open `docs/chatui/index.html` in a browser, point it at your
+strategy-server, paste your Dora API key.
+
+See [`docs/agent.md`](docs/agent.md) for the full reference (env vars,
+API surface, architecture, build/test commands).
+
 ---
 
 ## Docker
