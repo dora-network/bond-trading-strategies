@@ -8,7 +8,7 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const state = {
-  baseUrl: localStorage.getItem('dora-agent.baseUrl') || 'http://127.0.0.1:9000',
+  baseUrl: localStorage.getItem('dora-agent.baseUrl') || 'http://127.0.0.1:8081',
   apiKey: localStorage.getItem('dora-agent.apiKey') || '',
   sessions: [],
   activeSessionId: null,
