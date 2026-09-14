@@ -266,18 +266,16 @@ strategy_containers="$(
 				{name: "ENCRYPTION_KEY", valueFrom: $encryption}
 			],
 			healthCheck: {
-				command: ["CMD-SHELL", "wget -q --spider http://localhost:8081/healthz || exit 1"],
+				# `wget --spider` issues a HEAD request; the /healthz route only
+				# accepts GET (returns 405 on HEAD), so the healthcheck was
+				# always failing. Use `wget -q -O /dev/null` to issue a GET
+				# and discard the body. Returns 0 on HTTP 2xx, non-zero otherwise;
+				# `|| exit 1` covers any other failure mode.
+				command: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8081/healthz || exit 1"],
 				interval: 30,
 				timeout: 5,
 				retries: 3,
-				# Bumped from 30 to 90 to give the larger runtime image (Debian +
-				# tinygo/tinygo:0.42.0) more startup time before healthchecks start
-				# counting. First three dev deploys on this image failed with
-				# `wget --spider` timing out before the strategy-server fully bound
-				# :8081; 90s gives a full minute after startPeriod for cold-start,
-				# signal binding, and the first HTTP listener to come up. The
-				# price-daemon task was already at 120s.
-				startPeriod: 90
+				startPeriod: 30
 			},
 			logConfiguration: {
 				logDriver: "awslogs",
@@ -319,7 +317,8 @@ price_daemon_containers="$(
 				{name: "DORA_API_KEY", valueFrom: $dora}
 			],
 			healthCheck: {
-				command: ["CMD-SHELL", "wget -q --spider http://localhost:8080/healthz || exit 1"],
+				# GET request (--spider sends HEAD which 405s on GET-only routes).
+				command: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/healthz || exit 1"],
 				interval: 30,
 				timeout: 5,
 				retries: 3,
