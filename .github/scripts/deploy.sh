@@ -90,6 +90,22 @@ require_service() {
   fi
 }
 
+wait_for_service_stable() {
+  local service_name="$1"
+
+  if aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "$service_name"; then
+    return 0
+  fi
+
+  echo "ECS service ${service_name} did not become stable before the waiter timeout." >&2
+  aws ecs describe-services \
+    --cluster "$CLUSTER_NAME" \
+    --services "$service_name" \
+    --query 'services[0].{status:status,runningCount:runningCount,pendingCount:pendingCount,desiredCount:desiredCount,events:events[0:10].[createdAt,message]}' \
+    --output json >&2 || true
+  exit 1
+}
+
 register_task_definition() {
   local family="$1"
   local cpu="$2"
@@ -362,8 +378,7 @@ aws ecs update-service \
   --task-definition "$price_task_definition" \
   --desired-count 1 >/dev/null
 
-aws ecs wait services-stable \
-  --cluster "$CLUSTER_NAME" \
-  --services "$STRATEGY_SERVICE_NAME" "$PRICE_DAEMON_SERVICE_NAME"
+wait_for_service_stable "$STRATEGY_SERVICE_NAME"
+wait_for_service_stable "$PRICE_DAEMON_SERVICE_NAME"
 
 echo "Deployed ${IMAGE_URI}"
