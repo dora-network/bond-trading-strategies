@@ -80,6 +80,17 @@ RUN groupadd -r -g 65532 dora \
  && install -d -o dora -g dora -m 0750 /var/lib/dora-agent/go/pkg/mod/cache \
  && install -d -o dora -g dora -m 0750 /var/lib/dora-agent/go/pkg/sumdb
 
+# ECS healthcheck uses `wget -q --spider http://localhost:8081/healthz`.
+# tinygo/tinygo:0.42.0 inherits a stripped Debian image with libcurl
+# installed but NO curl / wget / nc CLI; the healthcheck command fails
+# with `wget: not found` (exit 127), retrying 3x and burning the
+# startPeriod window. Install wget here so deploy.sh's healthcheck
+# works as-is on the new runtime base. Alpine used BusyBox wget
+# for free; Debian needs the explicit package.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends wget ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 # Smoke probe: catches the "mkdir permission denied" class of bug at
 # BUILD time so it never reaches the request-time wasm pipeline. Runs
 # as the `dora` user and performs the exact operations `go get` /
