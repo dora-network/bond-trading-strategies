@@ -38,7 +38,7 @@ type VersionResolver func(d deployment.Deployment) (wasmRef, manifestHash string
 // the live deployment runtime (Deploy/Stop/Resume/HotSwap/
 // Recover) but optional for tests that only exercise Validate.
 type Config struct {
-	Store    *wasmstore.Store
+	Store    wasmstore.ArtifactStore
 	Registry *registry.Registry
 	Timeout  time.Duration // wall-clock budget for Validate
 

@@ -20,7 +20,7 @@ import (
 
 // tinygoDockerfile is the Dockerfile used by the wasm docker path.
 // It is retained for compatibility with the Plan 4 test surface.
-const tinygoDockerfile = `FROM tinygo/tinygo:0.35.0 AS build
+const tinygoDockerfile = `FROM tinygo/tinygo:0.42.0 AS build
 WORKDIR /src
 COPY . .
 RUN tinygo build -target=wasi -o plugin.wasm .

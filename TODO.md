@@ -519,3 +519,19 @@ result in 1.32s; OpenAPI spec is merged (43 paths, 26 under
 
 This entry will be removed in the next TODO.md cleanup pass. The
 dora-agent repo stays untouched per the operator's directive.
+
+## WASM artifact persistence
+
+The `pgstore` delegate persists compiled `.wasm` blobs in
+`agent.wasm_artifacts.bytes` (migration 016) and manifest bytes in
+`agent.wasm_manifests.manifest` (migration 017). Newly generated
+strategies land in these columns via the chatui's save flow.
+
+**Cold-start cliff:** rows that existed in `agent.wasm_artifacts`
+*before* migration 016 was applied have `bytes = NULL`. They cannot
+be rehydrated on Fargate restart; their corresponding deployment
+rows are marked crashed on the next Recover cycle and the user must
+re-deploy via the chatui. Mitigation: a one-time backfill job that
+re-runs the validate step against each pre-016 row's strategy source
+(producing a fresh `.wasm` blob) is the cleanest fix. Out of scope
+for this PR — document and defer.

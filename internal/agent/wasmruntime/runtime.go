@@ -8,33 +8,53 @@ package wasmruntime
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/dora-network/bond-trading-strategies/internal/agent/wasmruntime/registry"
 	"github.com/dora-network/bond-trading-strategies/internal/agent/wasmruntime/store"
+	"github.com/dora-network/bond-trading-strategies/internal/agent/wasmruntime/store/pgstore"
 )
 
 // Runtime is the top-level WASM runtime.
 type Runtime struct {
-	st  *store.Store
+	st  store.ArtifactStore
 	reg *registry.Registry
 }
 
-// NewRuntime constructs a Runtime. The runtime is always enabled; the
-// AGENT_WASM_RUNTIME_ENABLED feature flag that gated this construction
-// was removed when the docker pipeline was dropped on 2026-09-04.
+// NewRuntime constructs a Runtime.
 //
-// The caller's context is the parent of the Registry's lifetime
-// context. The agent passes its signal-bound context here so that
-// SIGINT propagates to in-flight wazero work.
-func NewRuntime(ctx context.Context) (*Runtime, error) {
+// The artifact store is the Postgres-backed pgstore, which fronts a
+// local on-disk CAS at AGENT_WASM_ARTIFACT_ROOT. The pgstore reads
+// durable bytes from agent.wasm_artifacts / agent.wasm_manifests on a
+// local-CAS miss (cold Fargate restart) and re-materializes to the
+// local cache; hot reads stay on disk.
+//
+// pool == nil falls back to the plain FS store. This keeps
+// hermetic tests (no DATABASE_URL) working without skipping —
+// useful for callers that exercise Registry without caring about
+// durable artifact persistence. Production wiring always passes a
+// non-nil pool (see internal/agent/wiring).
+func NewRuntime(ctx context.Context, pool *pgxpool.Pool) (*Runtime, error) {
 	root := os.Getenv("AGENT_WASM_ARTIFACT_ROOT")
 	if root == "" {
 		return nil, fmt.Errorf("wasmruntime: AGENT_WASM_ARTIFACT_ROOT is required")
 	}
-	st, err := store.New(root)
+	fs, err := store.New(root)
 	if err != nil {
-		return nil, fmt.Errorf("wasmruntime: artifact store: %w", err)
+		return nil, fmt.Errorf("wasmruntime: local CAS: %w", err)
+	}
+	var st store.ArtifactStore
+	if pool == nil {
+		// ponytail: dev convenience, not a production path. Logs at
+		// warn so accidental nil-pool production wiring is visible.
+		slog.Default().Warn("wasmruntime: nil pool — using FS-only store; " +
+			"compiled wasm artifacts will not survive process restarts")
+		st = fs
+	} else {
+		st = pgstore.New(pool, fs, slog.Default())
 	}
 	reg, err := registry.New(ctx, registry.Config{})
 	if err != nil {
@@ -43,8 +63,10 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	return &Runtime{st: st, reg: reg}, nil
 }
 
-// Store returns the artifact store.
-func (r *Runtime) Store() *store.Store {
+// Store returns the artifact store. Callers receive the interface so
+// they don't depend on the concrete pgstore type — see
+// wasmruntime/store.ArtifactStore.
+func (r *Runtime) Store() store.ArtifactStore {
 	if r == nil {
 		return nil
 	}

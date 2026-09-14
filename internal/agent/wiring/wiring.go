@@ -118,7 +118,7 @@ func Wire(
 	// Fail closed: a broken WASM runtime is a deployment error, not a
 	// silent skip. ctx (signal-bound in main) is the registry's parent
 	// so SIGINT aborts in-flight wazero work.
-	wasmRT, err := wasmruntime.NewRuntime(ctx)
+	wasmRT, err := wasmruntime.NewRuntime(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("agent wiring: %w", err)
 	}
@@ -461,7 +461,7 @@ func newAgentRunner(
 	cfg config.Config,
 	wasmStarter *agentbacktest.WasmStarter,
 	btStore agentbacktest.Store,
-	wasmArtifactStore *wasmstore.Store,
+	wasmArtifactStore wasmstore.ArtifactStore,
 	modelCaps config.ModelCaps,
 	deployStore agentdeployment.Store,
 	liveOrch *orchestrator.Orchestrator,

@@ -75,6 +75,18 @@ Agent-specific knobs (kept under the `AGENT_` prefix; all optional):
 - `AGENT_ALLOW_HTTP_BASE_URL=1` — relax the `https://` check on provider
   `base_url` for local development.
 
+#### WASM artifact storage
+
+Compiled `.wasm` blobs are persisted in Postgres via the `pgstore`
+delegate (`internal/agent/wasmruntime/store/pgstore`). Every Put
+writes both `agent.wasm_artifacts.bytes` and the local on-disk CAS
+under `AGENT_WASM_ARTIFACT_ROOT`. Get serves from the local CAS on
+the hot path and falls back to the DB on a cold Fargate restart,
+re-materializing the local file. The local cache exists purely as
+performance; the DB is the durable layer. Production must keep
+`DATABASE_URL` set; a nil pool falls back to FS-only (log warn) and
+loses durability across restarts.
+
 Environment variables from the standalone dora-agent service that
 duplicated a host var (DSN, keys, base URL, listen address, CORS, log
 level) were consolidated into the host vars above. The standalone

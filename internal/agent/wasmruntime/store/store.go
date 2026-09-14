@@ -102,3 +102,14 @@ func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
+
+// ArtifactStore is the contract every backing store must satisfy.
+// Implemented by *Store (FS) and *pgstore.Store (Postgres + FS cache).
+// The validate path uses this interface so the storage backend can be
+// swapped without touching the validation logic.
+type ArtifactStore interface {
+	Get(wasmHash, manifestHash string) (wasm, manifest []byte, err error)
+	Put(wasm, manifest []byte) (wasmHash, manifestHash string, err error)
+	WasmPath(hash string) string
+	ManifestPath(hash string) string
+}

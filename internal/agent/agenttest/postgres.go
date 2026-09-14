@@ -13,18 +13,33 @@ import (
 
 func readMigration(t *testing.T) string {
 	t.Helper()
-	// Resolve the consolidated schema from test binaries at different
-	// package depths (internal/agent/x and internal/agent/tools/x).
-	for _, p := range []string{
-		"../../../migrations/015_agent_consolidated_schema.sql",
-		"../../../../migrations/015_agent_consolidated_schema.sql",
-	} {
-		if b, err := os.ReadFile(p); err == nil {
-			return string(b)
+	// Resolve the consolidated schema + post-consolidation migrations
+	// from test binaries at different package depths (internal/agent/x
+	// and internal/agent/tools/x). All four files execute in order;
+	// the consolidated migration creates agent.* tables, the
+	// follow-ups promote wasm_artifacts.bytes / wasm_manifests.manifest
+	// to the bytea-backed shape the pgstore delegate requires.
+	files := []string{
+		"015_agent_consolidated_schema.sql",
+		"016_wasm_artifact_bytes.sql",
+		"017_wasm_manifest_bytes.sql",
+	}
+	var all string
+	for _, f := range files {
+		var found bool
+		for _, dir := range []string{"../../../migrations", "../../../../migrations"} {
+			b, err := os.ReadFile(dir + "/" + f)
+			if err == nil {
+				all += string(b) + "\n\n"
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("read migration: %s not found", f)
 		}
 	}
-	t.Fatal("read migration: 015_agent_consolidated_schema.sql not found")
-	return ""
+	return all
 }
 
 // StartPostgres returns a pool with the agent schema applied.

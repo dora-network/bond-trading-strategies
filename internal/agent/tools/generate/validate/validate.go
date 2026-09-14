@@ -51,7 +51,7 @@ type Config struct {
 	// artifact from this store by the returned wasm_ref/manifest_hash.
 	// If nil, validateWasm keeps the artifact only in its temp store
 	// (useful for tests that do not need on-disk persistence).
-	WasmArtifactStore *wasmstore.Store
+	WasmArtifactStore wasmstore.ArtifactStore
 	// TinyGoBinary is the tinygo executable name/path. Defaults to "tinygo".
 	TinyGoBinary string
 	// WasmFrameworkVersion is the framework version the validate
