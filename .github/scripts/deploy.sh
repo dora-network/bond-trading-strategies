@@ -270,7 +270,14 @@ strategy_containers="$(
 				interval: 30,
 				timeout: 5,
 				retries: 3,
-				startPeriod: 30
+				# Bumped from 30 to 90 to give the larger runtime image (Debian +
+				# tinygo/tinygo:0.42.0) more startup time before healthchecks start
+				# counting. First three dev deploys on this image failed with
+				# `wget --spider` timing out before the strategy-server fully bound
+				# :8081; 90s gives a full minute after startPeriod for cold-start,
+				# signal binding, and the first HTTP listener to come up. The
+				# price-daemon task was already at 120s.
+				startPeriod: 90
 			},
 			logConfiguration: {
 				logDriver: "awslogs",
