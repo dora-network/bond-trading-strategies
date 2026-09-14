@@ -1,0 +1,197 @@
+{
+  "_comment": "Per-model token caps and context windows. Substring match is case-insensitive; first match wins. More-specific entries (e.g. deepseek-v4-pro) MUST precede broader ones. 'max_tokens' is the budget the agent sends as the API max_tokens param (request budget), not the model's output ceiling; 'context_window' is the model's input context. DeepSeek entries reconciled against the live OpenRouter /api/v1/models catalog (2026-09). The bogus 'deepseek-v4' and 'deepseek-v3' rows are removed — they had no live slug and would silently swallow real models by substring.",
+  "default": 32768,
+  "default_context": 200000,
+  "models": [
+    {
+      "match": "claude-fable-5",
+      "max_tokens": 128000,
+      "context_window": 1000000
+    },
+    {
+      "match": "claude-opus-5",
+      "max_tokens": 128000,
+      "context_window": 1000000
+    },
+    {
+      "match": "claude-sonnet-5",
+      "max_tokens": 128000,
+      "context_window": 1000000
+    },
+    {
+      "match": "claude-haiku-4-5",
+      "max_tokens": 64000,
+      "context_window": 200000
+    },
+    {
+      "match": "claude-opus-4-8",
+      "max_tokens": 128000,
+      "context_window": 1000000
+    },
+    {
+      "match": "claude-opus-4-7",
+      "max_tokens": 128000,
+      "context_window": 1000000
+    },
+    {
+      "match": "claude-opus-4-6",
+      "max_tokens": 128000,
+      "context_window": 1000000
+    },
+    {
+      "match": "claude-opus-4-5",
+      "max_tokens": 128000,
+      "context_window": 200000
+    },
+    {
+      "match": "claude-opus-4-1",
+      "max_tokens": 128000,
+      "context_window": 200000
+    },
+    {
+      "match": "claude-opus-4",
+      "max_tokens": 128000,
+      "context_window": 200000
+    },
+    {
+      "match": "claude-3-7-sonnet",
+      "max_tokens": 128000,
+      "context_window": 200000
+    },
+    {
+      "match": "gpt-5.6",
+      "max_tokens": 128000,
+      "context_window": 1050000
+    },
+    {
+      "match": "gpt-5.5",
+      "max_tokens": 128000,
+      "context_window": 1000000
+    },
+    {
+      "match": "gpt-5.4",
+      "max_tokens": 128000,
+      "context_window": 1000000
+    },
+    {
+      "match": "gpt-5.3",
+      "max_tokens": 128000,
+      "context_window": 400000
+    },
+    {
+      "match": "gpt-5.2",
+      "max_tokens": 128000,
+      "context_window": 400000
+    },
+    {
+      "match": "gpt-5.1",
+      "max_tokens": 128000,
+      "context_window": 400000
+    },
+    {
+      "match": "gpt-5",
+      "max_tokens": 128000,
+      "context_window": 200000
+    },
+    {
+      "match": "o1",
+      "max_tokens": 32768,
+      "context_window": 200000
+    },
+    {
+      "match": "gemini-3",
+      "max_tokens": 65536,
+      "context_window": 1000000
+    },
+    {
+      "match": "gemini-2.5",
+      "max_tokens": 65536,
+      "context_window": 1000000
+    },
+    {
+      "match": "gemini-2.0-flash",
+      "max_tokens": 8192,
+      "context_window": 1000000
+    },
+    {
+      "match": "llama-4-maverick",
+      "max_tokens": 32768,
+      "context_window": 1000000
+    },
+    {
+      "match": "llama-4-scout",
+      "max_tokens": 32768,
+      "context_window": 1000000
+    },
+    {
+      "match": "llama-3.3-70b",
+      "max_tokens": 32768,
+      "context_window": 131072
+    },
+    {
+      "match": "llama-3.1-405b",
+      "max_tokens": 32768,
+      "context_window": 131072
+    },
+    {
+      "match": "deepseek-v4-flash",
+      "max_tokens": 32768,
+      "context_window": 1048576
+    },
+    {
+      "match": "deepseek-v4-pro",
+      "max_tokens": 32768,
+      "context_window": 1048576
+    },
+    {
+      "match": "qwen-3.8",
+      "max_tokens": 131072,
+      "context_window": 1000000
+    },
+    {
+      "match": "qwen-3.7",
+      "max_tokens": 65536,
+      "context_window": 1000000
+    },
+    {
+      "match": "qwen3-coder",
+      "max_tokens": 32768,
+      "context_window": 128000
+    },
+    {
+      "match": "qwen",
+      "max_tokens": 32768,
+      "context_window": 131072
+    },
+    {
+      "match": "mistral-large",
+      "max_tokens": 32768,
+      "context_window": 256000
+    },
+    {
+      "match": "mistral-small",
+      "max_tokens": 32768,
+      "context_window": 256000
+    },
+    {
+      "match": "codestral",
+      "max_tokens": 32768,
+      "context_window": 256000
+    },
+    {
+      "match": "hunter-alpha",
+      "max_tokens": 65536,
+      "context_window": 1000000
+    },
+    {
+      "match": "fusion",
+      "max_tokens": 65536,
+      "context_window": 2000000
+    },
+    {
+      "match": "elephant-alpha",
+      "max_tokens": 32768,
+      "context_window": 256000
+    }
+  ]
+}

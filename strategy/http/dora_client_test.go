@@ -67,12 +67,13 @@ func TestLiveDORAClientGetUserIDIgnoresUnknownUserFields(t *testing.T) {
 		httpClient: srv.Client(),
 	}
 
-	got, err := client.GetUserID(authctx.WithAuthInfo(context.Background(), authctx.AuthInfo{
+	got, tenant, err := client.GetUserID(authctx.WithAuthInfo(context.Background(), authctx.AuthInfo{
 		APIKey:   "test-key",
 		TenantID: "tenant-A",
 	}))
 	require.NoError(t, err)
 	assert.Equal(t, "user-123", got)
+	assert.Equal(t, "tenant-A", tenant)
 }
 
 func TestLiveDORAClient_SDKCallForwardsTenantID(t *testing.T) {

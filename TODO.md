@@ -488,3 +488,50 @@ resolved in the 2026-08-26 session):
 - [x] **meanreversion per-instance pgxpool leak** — RESOLVED (2026-08-26
       session): shared process-lifetime pool (sharedPriceHistoryPool,
       sync.Once) ported from momentum.
+
+## dora-agent integration follow-ups
+
+**DONE (2026-09-09, commit 9050fce).** Plan 1 (binary verification + history_store
+DB test) shipped 11 tasks across 10 commits on `tan/feat-integrate-dora-agent`:
+
+| Task | Commit | Subject |
+| --- | --- | --- |
+| Plan | `2b52422` | docs(plan): add dora-agent binary verification + history_store DB test plan |
+| L3-L8 | `ed9acc6` | feat(agent): complete dora-agent integration via L3-L8 layer plan |
+| 1 | `2c9e44e` | test(agent): add test_server_test.go for HTTP integration tests |
+| 2 | `b088f6b` | test(agent): add original-spec integration test #1 (routes require auth) |
+| 3 + fix | `c576dc0` | fix(agent): correct RoutesAt wire path; add successful-auth test |
+| 4 + refill | `a000355` | test(agent): add rate-limit refill subtest (closes coverage gap) |
+| 5 | `2232449` | test(agent): add original-spec integration test #4 (mount order) |
+| 6 | `73bbc3d` | test(agent): add history_store real-DB round-trip test (original-spec #6) |
+| 7 | `15bb4ca` | docs(agent): document L7 history-store wire-up in wiring.go |
+| 8 + fix | `1211b1b` | test(agent): add real backtest end-to-end smoke (gated on AGENT_E2E) |
+| 9 | `8427b5b` | docs(agent): add binary launch smoke commands |
+| 10 | `9050fce` | feat(agent): merge dora-agent openapi into strategy-server spec |
+
+What was proven: binary boot, original-spec integration tests 1-4 + 6 pass;
+history_store round-trips against the host's public schema; L7
+history-store is wired into the backtest WasmStarter (L4 indirection
+review); full backtest end-to-end (gated on AGENT_E2E) seeds a
+strategy + version, runs a tinygo-compiled noop WASM, and persists a
+result in 1.32s; OpenAPI spec is merged (43 paths, 26 under
+/v1/agent/*).
+
+This entry will be removed in the next TODO.md cleanup pass. The
+dora-agent repo stays untouched per the operator's directive.
+
+## WASM artifact persistence
+
+The `pgstore` delegate persists compiled `.wasm` blobs in
+`agent.wasm_artifacts.bytes` (migration 016) and manifest bytes in
+`agent.wasm_manifests.manifest` (migration 017). Newly generated
+strategies land in these columns via the chatui's save flow.
+
+**Cold-start cliff:** rows that existed in `agent.wasm_artifacts`
+*before* migration 016 was applied have `bytes = NULL`. They cannot
+be rehydrated on Fargate restart; their corresponding deployment
+rows are marked crashed on the next Recover cycle and the user must
+re-deploy via the chatui. Mitigation: a one-time backfill job that
+re-runs the validate step against each pre-016 row's strategy source
+(producing a fresh `.wasm` blob) is the cleanest fix. Out of scope
+for this PR — document and defer.

@@ -1,4 +1,9 @@
-package http
+// Package secrets owns AES-256-GCM helpers used across the service to
+// seal sensitive bytes (per-user Dora API keys, the server-held admin
+// Dora key, per-user LLM provider credentials) at rest. The same key
+// (ENCRYPTION_KEY, 32 bytes hex-decoded) is used for every secret; the
+// caller is responsible for binding a key to its use site.
+package secrets
 
 import (
 	"crypto/aes"
@@ -8,10 +13,9 @@ import (
 	"io"
 )
 
-// encryptAPIKey encrypts plaintext using AES-256-GCM with the given key.
-// The key must be exactly 32 bytes. The returned ciphertext includes the nonce
-// prepended to the encrypted data.
-func encryptAPIKey(plaintext, key []byte) ([]byte, error) {
+// Encrypt seals plaintext under key using AES-256-GCM. The returned
+// ciphertext is `nonce || ct || tag`. The caller supplies a 32-byte key.
+func Encrypt(plaintext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
@@ -27,8 +31,9 @@ func encryptAPIKey(plaintext, key []byte) ([]byte, error) {
 	return gcm.Seal(nonce, nonce, plaintext, nil), nil
 }
 
-// decryptAPIKey decrypts ciphertext produced by encryptAPIKey.
-func decryptAPIKey(ciphertext, key []byte) ([]byte, error) {
+// Decrypt opens a ciphertext produced by Encrypt. Returns an error if
+// the ciphertext is shorter than the GCM nonce size.
+func Decrypt(ciphertext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)

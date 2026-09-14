@@ -3,7 +3,7 @@
   "info": {
     "title": "Strategy Service API",
     "version": "1.9.0",
-    "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require:\n- `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`\n- `tenant-id: <id>` — DORA tenant identifier required on every authed request and forwarded on outbound DORA calls. See the TenantID parameter."
+    "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require:\n- `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`\n- `tenant-id: <id>` \u2014 DORA tenant identifier required on every authed request and forwarded on outbound DORA calls. See the TenantID parameter.\n\n---\n\nBond-trading-strategy agent: HTTP surface for prompt handling, session\nstate, and strategy capture. Authentication is the user-level Dora\n`ApiKey` token (not the LLM provider key \u2014 that lives in\n`/v1/provider-config`). The agent's HTTP layer only validates the\ninbound `Authorization` header format; it does not know the upstream\nDora API's auth conventions, and per the dora-agent middleware only\naccepts the literal `ApiKey <token>` prefix (see security scheme below).\n"
   },
   "servers": [
     {
@@ -14,13 +14,40 @@
     {
       "name": "notifications",
       "description": "Real-time lifecycle notifications delivered over a WebSocket."
+    },
+    {
+      "name": "agent:health"
+    },
+    {
+      "name": "agent:provider-config"
+    },
+    {
+      "name": "agent:sessions"
+    },
+    {
+      "name": "agent:messages"
+    },
+    {
+      "name": "agent:strategies"
+    },
+    {
+      "name": "agent:deployments"
+    },
+    {
+      "name": "agent:backtests"
+    },
+    {
+      "name": "agent:discovery"
+    },
+    {
+      "name": "agent:admin"
     }
   ],
   "paths": {
     "/healthz": {
       "get": {
         "operationId": "getHealth",
-        "summary": "Health check — exempt from authentication",
+        "summary": "Health check \u2014 exempt from authentication",
         "responses": {
           "200": {
             "description": "Server is healthy",
@@ -388,7 +415,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Backtest cancelled — returns updated metadata",
+            "description": "Backtest cancelled \u2014 returns updated metadata",
             "content": {
               "application/json": {
                 "schema": {
@@ -533,7 +560,7 @@
       ],
       "get": {
         "operationId": "getBacktestMetadata",
-        "summary": "Get backtest metadata (ID, status, timestamps) — lighter than full detail",
+        "summary": "Get backtest metadata (ID, status, timestamps) \u2014 lighter than full detail",
         "security": [
           {
             "ApiKeyAuth": []
@@ -832,7 +859,7 @@
         ],
         "responses": {
           "101": {
-            "description": "Switching Protocols — WebSocket upgrade succeeded"
+            "description": "Switching Protocols \u2014 WebSocket upgrade succeeded"
           },
           "401": {
             "description": "Missing or invalid Authorization header"
@@ -897,7 +924,7 @@
       "get": {
         "operationId": "listTradingDecisions",
         "summary": "List the trading decisions recorded for a live strategy run, newest first",
-        "description": "Returns the strategy_decisions rows for a single run owned by the authenticated user. Backtest runs are not represented in this table. The user is derived from the auth token, not the URL — wrong-user and not-found both produce 404. The cursor is opaque and versioned; do not parse it.",
+        "description": "Returns the strategy_decisions rows for a single run owned by the authenticated user. Backtest runs are not represented in this table. The user is derived from the auth token, not the URL \u2014 wrong-user and not-found both produce 404. The cursor is opaque and versioned; do not parse it.",
         "security": [
           {
             "ApiKeyAuth": []
@@ -925,6 +952,1236 @@
           }
         }
       }
+    },
+    "/v1/agent/provider-config": {
+      "post": {
+        "tags": [
+          "provider-config"
+        ],
+        "summary": "Save or replace the user's provider config (LLM credentials + base_url).",
+        "description": "The api_key value is encrypted at rest with the AGENT_MASTER_KEY\nenvelope. base_url is optional; when set, it routes provider\ntraffic to a custom endpoint (OpenRouter, Together, on-prem proxy).\nFor tests against a plain http:// httptest stub, set\n`AGENT_ALLOW_HTTP_BASE_URL=1` on the binary's environment \u2014 the\nhandler relaxes the https:// check only when that flag is present.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetProviderConfigRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Stored."
+          },
+          "400": {
+            "description": "Invalid JSON, missing api_key/default_model, unsupported\nprovider, or non-https:// base_url without the bypass flag.\n"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "provider-config"
+        ],
+        "summary": "List the user's configured providers.",
+        "description": "Returns the user's configured providers with the api_key masked\n(`sk-...abcd` form). The KMS-backed decryption happens in the\nproviderconfig store; the handler just renders the masked form\nas `api_key_masked`.\n",
+        "responses": {
+          "200": {
+            "description": "The user's provider configs, masked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderConfig"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      }
+    },
+    "/v1/agent/provider-config/{provider}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Provider"
+        }
+      ],
+      "delete": {
+        "tags": [
+          "provider-config"
+        ],
+        "summary": "Delete the user's config for one provider.",
+        "responses": {
+          "204": {
+            "description": "Deleted (or already absent)."
+          },
+          "404": {
+            "description": "Provider config not found for this user.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      }
+    },
+    "/v1/agent/sessions": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Create a new session.",
+        "description": "Requires that the user has previously saved a provider config\nfor `provider`; otherwise the request fails with 409. The model\nfield is stored on the session and used as the default when the\nsubsequent message request omits it.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionIdResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON body.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Provider/model missing from body, or no saved provider config\nfor the given provider for this user.\n",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "List the user's sessions, newest first.",
+        "responses": {
+          "200": {
+            "description": "Sessions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Session"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      }
+    },
+    "/v1/agent/sessions/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get a session and its messages.",
+        "responses": {
+          "200": {
+            "description": "Session plus message history.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionWithMessages"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Delete a session (cascades to messages).",
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "404": {
+            "description": "Session not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      }
+    },
+    "/v1/agent/sessions/{id}/messages": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Post a user prompt and stream the assistant turn as Server-Sent Events.",
+        "description": "The handler validates the prompt, persists it as a\n`role=user` message, runs the four-layer sanitisation pass\n(HTTP filter \u2192 LLM classifier \u2192 system prompt \u2192 source pattern\nscan), then drives the tool loop. Events are written to the SSE\nstream as they happen. The assistant turn is persisted to the\n`messages` table when the stream completes successfully; on\ninternal failure the runner still emits its accumulated text via\npartial `delta` events and an `error` event.\n\nSSE event names (the `event:` field):\n  - `delta`: streaming assistant text (`{\"text\": \"...\"}`)\n  - `tool_call`: tool invocation (`{\"id\",\"name\",\"input\"}`)\n  - `refusal`: classifier returned off_topic (`{\"reason\": \"...\"}`)\n  - `strategy_saved`: a verified strategy version was captured\n    (`{\"strategy_id\",\"revision\",\"module_name\",\"summary\"}`)\n  - `done`: turn complete (`{\"reason\": \"...\"}`)\n  - `error`: turn failed (`{\"message\": \"...\"}`)\n\nRefusal events always precede `done`; error events may occur at\nany point and do not have a corresponding `done`. `strategy_saved`\nis emitted by the capture observer mid-turn and does not end the\nstream; a `done` still follows.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageStream"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON or empty prompt.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "503": {
+            "description": "Agent runtime unavailable (server started without one).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agent/sessions/{id}/save": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Consume the session's stashed pending strategy capture.",
+        "description": "Idempotent: a second save with no pending capture returns 404.\nThe session must already exist (otherwise 404). Strategy-store\nmust be wired (otherwise 503).\n",
+        "responses": {
+          "200": {
+            "description": "Capture recorded as a strategy version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Version"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found, or no pending strategy.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/StrategyStoreUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies": {
+      "get": {
+        "tags": [
+          "strategies"
+        ],
+        "summary": "List the user's strategies.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageCursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Strategies.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListStrategiesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/StrategyStoreUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "strategies"
+        ],
+        "summary": "Get a strategy by ID.",
+        "description": "Returns the strategy plus a best-effort head-version summary\n(revision, created_at, module_name, summary). When the head\nversion can't be resolved the `head` object is present but all\nits fields are empty strings.\n",
+        "responses": {
+          "200": {
+            "description": "Strategy with head summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetStrategyResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Strategy not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/StrategyStoreUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/versions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "strategies"
+        ],
+        "summary": "List versions for a strategy, newest first.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/PageCursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListVersionsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Strategy not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/StrategyStoreUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/versions/{revision}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        },
+        {
+          "$ref": "#/components/parameters/Revision"
+        }
+      ],
+      "get": {
+        "tags": [
+          "strategies"
+        ],
+        "summary": "Get one version (with file contents).",
+        "responses": {
+          "200": {
+            "description": "Version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Version"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Strategy or version not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/StrategyStoreUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/rollback": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "strategies"
+        ],
+        "summary": "Roll the strategy head back to a prior revision.",
+        "description": "Revision is taken from the request body (not the URL). The\ntarget revision must already exist for the strategy. After the\ncall, the strategy's `head_revision` points at `revision` and a\nnew audit row is written.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rolled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Strategy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON body, missing revision, or revision not in the strategy's history.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Strategy not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/StrategyStoreUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/halt": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "strategies"
+        ],
+        "summary": "Set the kill switch for the strategy's user.",
+        "description": "Halts every live strategy the authenticated user owns (Plan 4). The kill switch is per-user; the strategy id is path-scoped but one halt stops all of the user's running strategies.\n",
+        "responses": {
+          "204": {
+            "description": "Halt recorded."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "503": {
+            "description": "Safety kernel not wired."
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/resume": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "strategies"
+        ],
+        "summary": "Clear the kill switch.",
+        "description": "Clears the per-user kill switch so the user's strategies may resume (Plan 4).\n",
+        "responses": {
+          "204": {
+            "description": "Resume recorded."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "503": {
+            "description": "Safety kernel not wired."
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/restart": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "strategies"
+        ],
+        "summary": "Clear the strategy's restart budget.",
+        "description": "Clears the per-strategy restart budget so the orchestrator will restart the strategy on the next watcher tick (Plan 4). Returns 501 until the orchestrator is wired.\n",
+        "responses": {
+          "204": {
+            "description": "Budget cleared."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "501": {
+            "description": "Restart handler not yet wired."
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/versions/{revision}/deploy": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        },
+        {
+          "$ref": "#/components/parameters/Revision"
+        }
+      ],
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Trigger a live deployment of a strategy version.",
+        "description": "Starts the recorded image for the version in live mode and\nreturns a deployment_id. Async \u2014 poll the status endpoints.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeployRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Deployment accepted and created; strategy is starting in live mode. Poll GET /v1/strategies/{id}/deployments/{deployment_id} for status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeployResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Strategy or version not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/deployments": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "List deployments for a strategy.",
+        "responses": {
+          "200": {
+            "description": "Deployments.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListDeploymentsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Strategy not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/AgentNotImplemented"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/deployments/{deployment_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        },
+        {
+          "$ref": "#/components/parameters/DeploymentId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Get a deployment's status.",
+        "responses": {
+          "200": {
+            "description": "Deployment status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Strategy or deployment not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/AgentNotImplemented"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/deployments/{deployment_id}/stop": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        },
+        {
+          "$ref": "#/components/parameters/DeploymentId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Stop a running deployment.",
+        "responses": {
+          "204": {
+            "description": "Deployment stopped (or already stopped)."
+          },
+          "404": {
+            "description": "Strategy or deployment not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/AgentNotImplemented"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/deployments/{deployment_id}/logs": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        },
+        {
+          "$ref": "#/components/parameters/DeploymentId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Retrieve (later: stream) deployment logs.",
+        "description": "Placeholder. Slice D design will define the log contract \u2014\nlikely SSE once the runtime supports log streaming. Returns 501\nuntil then.\n",
+        "responses": {
+          "200": {
+            "description": "Logs (shape TBD)."
+          },
+          "404": {
+            "description": "Strategy or deployment not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/AgentNotImplemented"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/versions/{revision}/backtest": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        },
+        {
+          "$ref": "#/components/parameters/Revision"
+        }
+      ],
+      "post": {
+        "tags": [
+          "backtests"
+        ],
+        "summary": "Trigger a backtest of a strategy version.",
+        "description": "Runs the recorded image for the version in backtest mode\n(historic replay + simulated fills) and returns a backtest_id.\nAsync \u2014 poll GET /v1/strategies/{id}/backtests/{backtest_id}.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BacktestRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Backtest created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Strategy or version not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/AgentNotImplemented"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/backtests": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "backtests"
+        ],
+        "summary": "List backtest jobs for a strategy.",
+        "responses": {
+          "200": {
+            "description": "Backtests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "backtests"
+                  ],
+                  "properties": {
+                    "backtests": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Backtest"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Strategy not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/AgentNotImplemented"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/backtests/{backtest_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        },
+        {
+          "$ref": "#/components/parameters/BacktestId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "backtests"
+        ],
+        "summary": "Get a backtest's status/result.",
+        "responses": {
+          "200": {
+            "description": "Backtest status and results.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Backtest"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Strategy or backtest not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/AgentNotImplemented"
+          }
+        }
+      }
+    },
+    "/v1/agent/strategies/{id}/backtests/{backtest_id}/cancel": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/StrategyId"
+        },
+        {
+          "$ref": "#/components/parameters/BacktestId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "backtests"
+        ],
+        "summary": "Cancel a running backtest.",
+        "responses": {
+          "204": {
+            "description": "Backtest cancelled (or already finished)."
+          },
+          "404": {
+            "description": "Strategy or backtest not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/AgentNotImplemented"
+          }
+        }
+      }
+    },
+    "/v1/agent/admin/init": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Mint a fresh admin bearer token.",
+        "description": "Unauthenticated (the only such route). Generates a 32-byte\nrandom token, stores its SHA-256 hash in process memory, and\nreturns the plaintext token exactly once in the response body.\nThe operator persists it to ~/.config/dora-agent/admin-token via\n`agent-cli admin init`. Returns 409 when the server is already\ninitialized (either a prior /admin/init, or AGENT_ADMIN_TOKEN_HASH\nset at startup for already-deployed servers).\n",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Token minted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminInitResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Server already initialized (in-memory token or AGENT_ADMIN_TOKEN_HASH set).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      }
+    },
+    "/v1/agent/admin/rotate-key": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Rotate the server's Admin Dora API key.",
+        "description": "Seals the new plaintext key with envelope encryption\n(internal/secrets) and upserts it into\nserver_dora_credentials (the id=0 sentinel). Requires the admin\nbearer token. The old key is overwritten.\n",
+        "security": [
+          {
+            "adminBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminRotateKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Key rotated."
+          },
+          "400": {
+            "description": "Missing or empty key.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/AgentInternalError"
+          }
+        }
+      }
+    },
+    "/v1/agent/admin/whoami": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Verify the admin token authenticates.",
+        "description": "Sanity check. Returns `{\"auth\":\"admin\"}` when the bearer token\nmatches the stored hash; 401 otherwise.\n",
+        "security": [
+          {
+            "adminBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminWhoamiResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -934,6 +2191,17 @@
         "in": "header",
         "name": "Authorization",
         "description": "Format: `ApiKey <key>` or `Bearer <token>`"
+      },
+      "doraApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization",
+        "description": "User-level Dora ApiKey token. **The agent's middleware only\naccepts the literal `ApiKey <token>` prefix**; the broader\nOpenAPI convention for this header would be `Bearer <token>`.\nThe upstream Dora API may also accept Bearer (verify against\nthe dora-api skill if you need that compatibility); the agent\nitself does not.\n"
+      },
+      "adminBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Operator-only admin token (32 random bytes, base64url). The\nserver stores only its SHA-256 hash in process memory; the\nplaintext is shown once in the `POST /admin/init` response\nand then carried by the agent-cli as `Authorization: Bearer\n<token>`. Lives on a separate loopback listener\n(127.0.0.1:AGENT_ADMIN_ADDR, default :9090) \u2014 never the\npublic API port. `/admin/init` is the only unauthenticated\nroute; `/admin/rotate-key` and `/admin/whoami` require it.\n"
       }
     },
     "parameters": {
@@ -972,6 +2240,83 @@
         "in": "header",
         "required": true,
         "description": "DORA tenant identifier required on every authed request; forwarded to DORA on every outbound call.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Provider": {
+        "name": "provider",
+        "in": "path",
+        "required": true,
+        "description": "Provider identifier (e.g. `openai`, `anthropic`, `openrouter`).",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SessionId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Session UUID.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "StrategyId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Strategy UUID.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "Revision": {
+        "name": "revision",
+        "in": "path",
+        "required": true,
+        "description": "Revision identifier (a string the strategy store assigns).",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "PageLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Maximum items per page. EffectiveLimit caps the value at 100 and\ndefaults to 50 when omitted or zero.\n",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        }
+      },
+      "PageCursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Opaque keyset cursor returned as `next_cursor` by the previous\npage. Omit for the first page; pass the returned value to fetch\nthe next page.\n",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "DeploymentId": {
+        "name": "deployment_id",
+        "in": "path",
+        "required": true,
+        "description": "Deployment job identifier (assigned by the server).",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "BacktestId": {
+        "name": "backtest_id",
+        "in": "path",
+        "required": true,
+        "description": "Backtest job identifier (assigned by the server).",
         "schema": {
           "type": "string"
         }
@@ -1024,6 +2369,46 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or malformed Authorization header, or rejected by upstream.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AgentInternalError": {
+        "description": "Server-side failure.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "StrategyStoreUnavailable": {
+        "description": "Strategy version store is not wired on the server.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AgentNotImplemented": {
+        "description": "The route exists but the feature (slice D deployment or slice E\nbacktest orchestration) is not yet implemented. Returned as a\nstable placeholder; slice D/E design will replace the body.\n",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
             }
           }
         }
@@ -1285,7 +2670,7 @@
             "type": "number",
             "exclusiveMinimum": 0,
             "default": 1.0,
-            "description": "Starting capital for backtests. Omitted for live runs — obtained from DORA positions."
+            "description": "Starting capital for backtests. Omitted for live runs \u2014 obtained from DORA positions."
           },
           "leverage": {
             "type": "number",
@@ -1297,7 +2682,7 @@
       },
       "BreakoutConfig": {
         "type": "object",
-        "description": "Volatility-compression / price-breakout strategy. Enters when short-window price volatility drops below a threshold of long-window volatility, then a close breaks above (or below) a k·ATR trigger band.",
+        "description": "Volatility-compression / price-breakout strategy. Enters when short-window price volatility drops below a threshold of long-window volatility, then a close breaks above (or below) a k\u00b7ATR trigger band.",
         "properties": {
           "short_vol_window": {
             "type": "integer",
@@ -1375,7 +2760,7 @@
             "type": "number",
             "exclusiveMinimum": 0,
             "default": 1.0,
-            "description": "Starting capital for backtests. Omitted for live runs — obtained from DORA positions."
+            "description": "Starting capital for backtests. Omitted for live runs \u2014 obtained from DORA positions."
           },
           "leverage": {
             "type": "number",
@@ -1512,7 +2897,7 @@
             "type": "number",
             "minimum": 0,
             "default": 10000,
-            "description": "Starting cash for backtests. Omit or set to 0 to use the package default (10000). Omitted for live runs — obtained from DORA positions."
+            "description": "Starting cash for backtests. Omit or set to 0 to use the package default (10000). Omitted for live runs \u2014 obtained from DORA positions."
           }
         },
         "required": [
@@ -1606,7 +2991,7 @@
       },
       "BacktestResultSummary": {
         "type": "object",
-        "description": "Flattened backtest result returned by GET /v1/backtests/{id}. Mirrors the Go BacktestResultSummary struct — contains result fields at top level alongside strategy type, status, and config, but omits id, dora_user_id, and timestamps.",
+        "description": "Flattened backtest result returned by GET /v1/backtests/{id}. Mirrors the Go BacktestResultSummary struct \u2014 contains result fields at top level alongside strategy type, status, and config, but omits id, dora_user_id, and timestamps.",
         "properties": {
           "total_pnl": {
             "type": "string",
@@ -2183,7 +3568,7 @@
       },
       "Event": {
         "type": "object",
-        "description": "A single notification event delivered over the WebSocket. New event types (notably dora.*) may appear without a spec change — clients MUST tolerate unknown values of `type`.",
+        "description": "A single notification event delivered over the WebSocket. New event types (notably dora.*) may appear without a spec change \u2014 clients MUST tolerate unknown values of `type`.",
         "required": [
           "id",
           "type",
@@ -2402,6 +3787,1014 @@
         },
         "required": [
           "items"
+        ]
+      },
+      "SetProviderConfigRequest": {
+        "type": "object",
+        "required": [
+          "provider",
+          "api_key",
+          "default_model"
+        ],
+        "properties": {
+          "provider": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "description": "Provider identifier. openai/anthropic for direct API access, openrouter for unified multi-provider access."
+              }
+            ]
+          },
+          "api_key": {
+            "type": "string",
+            "description": "LLM provider secret. Encrypted at rest.",
+            "minLength": 1
+          },
+          "default_model": {
+            "type": "string",
+            "description": "Default model. See CreateSessionRequest.model for the full list.",
+            "minLength": 1
+          },
+          "base_url": {
+            "type": "string",
+            "description": "Optional custom endpoint. Must be https:// unless the\n`AGENT_ALLOW_HTTP_BASE_URL=1` bypass is set on the binary.\n",
+            "format": "uri"
+          }
+        }
+      },
+      "ProviderConfig": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "default_model": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "api_key_masked": {
+            "type": "string",
+            "description": "Masked form of the api_key (the real implementation returns this)."
+          }
+        }
+      },
+      "CreateSessionRequest": {
+        "type": "object",
+        "required": [
+          "provider",
+          "model"
+        ],
+        "properties": {
+          "provider": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "description": "LLM provider. Model names are provider-scoped (see model field)."
+              }
+            ]
+          },
+          "model": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Model"
+              },
+              {
+                "description": "Model name. Use a bare family name for provider=openai (e.g. gpt-5) or provider=anthropic (e.g. claude-opus-4); use a `provider/model` address for provider=openrouter (e.g. openai/gpt-5). For OpenRouter free-tier inference, append `:free` (e.g. `nvidia/nemotron-3-ultra-550b-a55b:free`); see OpenRouterFreeModel for the curated list."
+              }
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionIdResponse": {
+        "type": "object",
+        "required": [
+          "session_id"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "provider",
+          "model",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SessionWithMessages": {
+        "type": "object",
+        "required": [
+          "session",
+          "messages",
+          "strategies"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "strategies": {
+            "type": "array",
+            "description": "Every strategy produced by this session, newest first. Lets\nthe chat UI surface \"view code\" for historically captured\nstrategies even when the SSE `strategy_saved` event was\nmissed (binary restart, event dropped, pre-wiring capture).\n",
+            "items": {
+              "$ref": "#/components/schemas/StrategyLink"
+            }
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "required": [
+          "id",
+          "session_id",
+          "seq",
+          "role",
+          "content",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "seq": {
+            "type": "integer"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant",
+              "tool"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "tool_call_id": {
+            "type": "string"
+          },
+          "tool_calls": {
+            "description": "Raw JSON payload for tool-role messages (json.RawMessage on\nthe wire \u2014 emitted as raw JSON, typically an array of\ntool-call objects). Opaque; consumers should not\nintrospect its structure. Absent for user/assistant roles.\n"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PostMessageRequest": {
+        "type": "object",
+        "required": [
+          "prompt"
+        ],
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "User prompt to send to the agent.",
+            "minLength": 1
+          },
+          "provider": {
+            "type": "string",
+            "description": "Override the session's saved provider for this turn."
+          },
+          "model": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Model"
+              },
+              {
+                "description": "Override the session's saved model for this turn. Same form rules as CreateSessionRequest.model."
+              }
+            ]
+          }
+        }
+      },
+      "MessageStream": {
+        "description": "Server-Sent Events stream. Each event is `event: <name>\\ndata: <json>\\n\\n`.\nThe `name` is one of `delta`, `tool_call`, `refusal`, `strategy_saved`,\n`done`, `error`. The `data` payload is the corresponding JSON object below.\n",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/MessageStreamDelta"
+          },
+          {
+            "$ref": "#/components/schemas/MessageStreamToolCall"
+          },
+          {
+            "$ref": "#/components/schemas/MessageStreamRefusal"
+          },
+          {
+            "$ref": "#/components/schemas/MessageStreamStrategySaved"
+          },
+          {
+            "$ref": "#/components/schemas/MessageStreamDone"
+          },
+          {
+            "$ref": "#/components/schemas/MessageStreamError"
+          }
+        ]
+      },
+      "MessageStreamDelta": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "MessageStreamToolCall": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "input": {
+            "description": "Raw JSON object \u2014 tool-specific."
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
+      "MessageStreamRefusal": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "MessageStreamStrategySaved": {
+        "type": "object",
+        "description": "Emitted mid-turn by the capture observer when a verified strategy\nversion is recorded. Does not end the stream; `done` still follows.\n",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "module_name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "strategy_id",
+          "revision",
+          "module_name",
+          "summary"
+        ]
+      },
+      "MessageStreamDone": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "MessageStreamError": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "Strategy": {
+        "type": "object",
+        "required": [
+          "id",
+          "head_revision",
+          "source_session_id",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "head_revision": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "GetStrategyResponse": {
+        "type": "object",
+        "required": [
+          "strategy",
+          "head"
+        ],
+        "properties": {
+          "strategy": {
+            "$ref": "#/components/schemas/Strategy"
+          },
+          "head": {
+            "$ref": "#/components/schemas/HeadSummary"
+          }
+        }
+      },
+      "HeadSummary": {
+        "type": "object",
+        "description": "Best-effort summary of the strategy's head version. All fields\nare empty strings when the head version can't be resolved.\n",
+        "required": [
+          "revision",
+          "created_at",
+          "module_name",
+          "summary"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "module_name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      },
+      "StrategyLink": {
+        "type": "object",
+        "description": "Slim reference to a strategy produced by a session, used by\nGET /v1/sessions/{id} so the chat UI can fetch source files via\nGET /v1/strategies/{id}/versions/{revision}.\n",
+        "required": [
+          "id",
+          "name",
+          "head_revision",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "head_revision": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Version": {
+        "type": "object",
+        "required": [
+          "revision",
+          "created_at"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "parent_revision": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "meta": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form strategy-version metadata."
+          },
+          "files": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Map of relative path \u2192 file contents."
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "go-wasm"
+            ],
+            "description": "Strategy target. go-wasm strategies run as WASM plugins (Plan 4)."
+          },
+          "wasm_ref": {
+            "type": "string",
+            "description": "Content-addressed reference to the .wasm blob in the artifact store. Non-null iff target == go-wasm."
+          },
+          "manifest_hash": {
+            "type": "string",
+            "description": "Content-addressed reference to the manifest.json sidecar. Non-null iff target == go-wasm."
+          }
+        }
+      },
+      "VersionSummary": {
+        "type": "object",
+        "required": [
+          "revision",
+          "created_at",
+          "module_name",
+          "summary"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "parent_revision": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "module_name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "go-wasm"
+            ],
+            "description": "Strategy target. go-wasm strategies run as WASM plugins."
+          },
+          "wasm_ref": {
+            "type": "string",
+            "description": "Content-addressed reference to the .wasm blob in the artifact store. Omitted until the version is built (target == go-wasm)."
+          },
+          "manifest_hash": {
+            "type": "string",
+            "description": "Content-addressed reference to the manifest.json sidecar. Omitted until the version is built (target == go-wasm)."
+          }
+        }
+      },
+      "ListStrategiesResponse": {
+        "type": "object",
+        "required": [
+          "strategies"
+        ],
+        "properties": {
+          "strategies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Strategy"
+            }
+          },
+          "next_cursor": {
+            "type": "string"
+          }
+        }
+      },
+      "ListVersionsResponse": {
+        "type": "object",
+        "required": [
+          "versions"
+        ],
+        "properties": {
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VersionSummary"
+            }
+          },
+          "next_cursor": {
+            "type": "string"
+          }
+        }
+      },
+      "RollbackRequest": {
+        "type": "object",
+        "required": [
+          "revision"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string",
+            "description": "Revision identifier to roll back to."
+          }
+        }
+      },
+      "DeployRequest": {
+        "type": "object",
+        "description": "Live-deployment configuration for a strategy version. The\nserver starts the recorded image for the version in live mode\nagainst the given order book and resolution.\n",
+        "required": [
+          "order_book_id",
+          "resolution"
+        ],
+        "properties": {
+          "order_book_id": {
+            "type": "string",
+            "description": "Dora order book to trade against (e.g. \"usdc-usdt\")."
+          },
+          "resolution": {
+            "type": "string",
+            "description": "Candle resolution the strategy consumes (e.g. \"1m\", \"5m\", \"1h\")."
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Optional runtime parameters passed to the strategy (string key \u2192 string value)."
+          },
+          "warmup_candles": {
+            "type": "integer",
+            "description": "Preamble warmup window from the strategy manifest (resolution-spaced candles); persisted on the deployment row so resume/recover need not reload the manifest. 0 when omitted."
+          }
+        }
+      },
+      "DeployResponse": {
+        "type": "object",
+        "description": "Returned on successful deployment creation. The deployment\nstarts asynchronously; poll\nGET /v1/strategies/{id}/deployments/{deployment_id} for status.\n",
+        "required": [
+          "deployment_id",
+          "status"
+        ],
+        "properties": {
+          "deployment_id": {
+            "type": "string",
+            "description": "Server-assigned deployment identifier."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running"
+            ],
+            "description": "Initial deployment status. A freshly created deployment is running."
+          }
+        }
+      },
+      "Deployment": {
+        "type": "object",
+        "description": "A live deployment's status snapshot.",
+        "required": [
+          "deployment_id",
+          "strategy_id",
+          "revision",
+          "status",
+          "order_book_id",
+          "resolution",
+          "restart_count",
+          "params",
+          "candle_count",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "deployment_id": {
+            "type": "string",
+            "description": "Server-assigned deployment identifier."
+          },
+          "strategy_id": {
+            "type": "string",
+            "description": "Owning strategy identifier."
+          },
+          "revision": {
+            "type": "string",
+            "description": "Strategy version revision this deployment runs."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "stopped",
+              "crashed",
+              "halted"
+            ],
+            "description": "Lifecycle state of the deployment."
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "Runtime instance identifier. Omitted until the deployment has been scheduled onto a runtime."
+          },
+          "order_book_id": {
+            "type": "string",
+            "description": "Dora order book the deployment trades against."
+          },
+          "resolution": {
+            "type": "string",
+            "description": "Candle resolution the strategy consumes."
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the deployment entered the running state. Null before it starts."
+          },
+          "stopped_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the deployment was stopped or halted. Null while running."
+          },
+          "stopped_reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "Human-readable reason the deployment stopped, if any."
+          },
+          "restart_count": {
+            "type": "integer",
+            "description": "Number of times the deployment has been automatically restarted."
+          },
+          "hotswapped_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the deployment was last hot-swapped to a new revision. Null if never hot-swapped."
+          },
+          "hotswapped_from_rev": {
+            "type": "string",
+            "nullable": true,
+            "description": "Revision the deployment ran before its last hot-swap. Null if never hot-swapped."
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Runtime parameters the deployment was started with (string key \u2192 string value)."
+          },
+          "candle_count": {
+            "type": "integer",
+            "description": "Number of candles the deployment has processed."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the deployment record was created."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the deployment record was last updated."
+          }
+        }
+      },
+      "ListDeploymentsResponse": {
+        "type": "object",
+        "required": [
+          "deployments"
+        ],
+        "properties": {
+          "deployments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Deployment"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor for the next page. Omitted when there are no more results."
+          }
+        }
+      },
+      "BacktestRequest": {
+        "type": "object",
+        "required": [
+          "start",
+          "end",
+          "resolution",
+          "order_book_id"
+        ],
+        "properties": {
+          "start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "1m",
+              "5m",
+              "15m",
+              "1h",
+              "4h",
+              "1d"
+            ]
+          },
+          "order_book_id": {
+            "type": "string",
+            "description": "Dora order book ID the strategy will trade on. The framework reads this from ORDER_BOOK_ID and uses it to fetch historic candles. Required; the LLM asks the user for it if not known.\n"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "warmup_candles": {
+            "type": "integer",
+            "description": "Preamble warmup window (resolution-spaced candles) fetched before the window start so OnPreamble sees history. 0 when omitted."
+          }
+        },
+        "description": "Backtest configuration for a strategy version: the time window, candle resolution, and the order book to trade on.\n"
+      },
+      "BacktestResponse": {
+        "type": "object",
+        "required": [
+          "backtest_id"
+        ],
+        "properties": {
+          "backtest_id": {
+            "type": "string"
+          }
+        },
+        "description": "Placeholder. Identifies the created backtest; clients poll\nGET /v1/strategies/{id}/backtests/{backtest_id} for status/result.\n"
+      },
+      "Backtest": {
+        "type": "object",
+        "description": "Placeholder. A backtest job's status/result (id, revision,\nstate, results, ...). Slice E design will define the fields.\n"
+      },
+      "AdminInitResponse": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "Fresh admin bearer token (base64url 32 random bytes). Shown\nonly here; the server stores only its SHA-256 hash.\n"
+          }
+        },
+        "description": "The plaintext admin token. The operator persists it to\n~/.config/dora-agent/admin-token via `agent-cli admin init`.\n"
+      },
+      "AdminRotateKeyRequest": {
+        "type": "object",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "New Admin Dora API key (plaintext). Sealed with envelope\nencryption before persistence.\n"
+          }
+        }
+      },
+      "AdminWhoamiResponse": {
+        "type": "object",
+        "required": [
+          "auth"
+        ],
+        "properties": {
+          "auth": {
+            "type": "string",
+            "enum": [
+              "admin"
+            ]
+          }
+        },
+        "description": "Sanity-check reply confirming the bearer token authenticated.\n"
+      },
+      "Provider": {
+        "type": "string",
+        "description": "Provider identifier. openai/anthropic for direct API access, openrouter for unified multi-provider access.",
+        "enum": [
+          "openai",
+          "anthropic",
+          "openrouter"
+        ]
+      },
+      "Model": {
+        "type": "string",
+        "description": "Model name. For provider=openai, use the bare family name (e.g. gpt-5). For provider=anthropic, use the bare family name (e.g. claude-opus-4). For provider=openrouter, use the prefixed form `provider/model` (e.g. openai/gpt-5, anthropic/claude-opus-4). See the OpenAIModel, AnthropicModel, and OpenRouterModel components for the full per-provider lists.",
+        "enum": [
+          "anthropic/claude-fable-5",
+          "anthropic/claude-haiku-4.5",
+          "anthropic/claude-opus-4",
+          "anthropic/claude-opus-4.1",
+          "anthropic/claude-opus-4.5",
+          "anthropic/claude-opus-4.6",
+          "anthropic/claude-opus-4.7",
+          "anthropic/claude-opus-4.8",
+          "anthropic/claude-opus-5",
+          "anthropic/claude-sonnet-5",
+          "claude-3-7-sonnet",
+          "claude-fable-5",
+          "claude-haiku-4-5",
+          "claude-opus-4",
+          "claude-opus-4-1",
+          "claude-opus-4-5",
+          "claude-opus-4-6",
+          "claude-opus-4-7",
+          "claude-opus-4-8",
+          "claude-opus-5",
+          "claude-sonnet-5",
+          "cohere/north-mini-code:free",
+          "deepseek/deepseek-v4-flash",
+          "deepseek/deepseek-v4-pro",
+          "google/gemma-4-26b-a4b-it:free",
+          "google/gemma-4-31b-it:free",
+          "inclusionai/ling-3.0-flash-fin:free",
+          "meta-llama/llama-3.3-70b-instruct",
+          "mistralai/codestral-2508",
+          "mistralai/mistral-large",
+          "mistralai/mistral-small-2603",
+          "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+          "nvidia/nemotron-3-super-120b-a12b:free",
+          "nvidia/nemotron-3-ultra-550b-a55b:free",
+          "nvidia/nemotron-3.5-lightning:free",
+          "gpt-5",
+          "gpt-5.1",
+          "gpt-5.2",
+          "gpt-5.3",
+          "gpt-5.4",
+          "gpt-5.5",
+          "gpt-5.6",
+          "o1",
+          "openai/gpt-5",
+          "openai/gpt-5.1",
+          "openai/gpt-5.2",
+          "openai/gpt-5.3-codex",
+          "openai/gpt-5.4",
+          "openai/gpt-5.5",
+          "openai/gpt-5.6-luna",
+          "openai/o1",
+          "openrouter/fusion",
+          "poolside/laguna-s-2.1:free",
+          "poolside/laguna-xs-2.1:free",
+          "qwen/qwen3-coder"
+        ]
+      },
+      "OpenAIModel": {
+        "type": "string",
+        "description": "OpenAI model name. Bare family names accepted by provider=openai (e.g. gpt-5).",
+        "enum": [
+          "gpt-5",
+          "gpt-5.1",
+          "gpt-5.2",
+          "gpt-5.3",
+          "gpt-5.4",
+          "gpt-5.5",
+          "gpt-5.6",
+          "o1"
+        ]
+      },
+      "AnthropicModel": {
+        "type": "string",
+        "description": "Anthropic model name. Bare family names accepted by provider=anthropic (e.g. claude-opus-4).",
+        "enum": [
+          "claude-3-7-sonnet",
+          "claude-fable-5",
+          "claude-haiku-4-5",
+          "claude-opus-4",
+          "claude-opus-4-1",
+          "claude-opus-4-5",
+          "claude-opus-4-6",
+          "claude-opus-4-7",
+          "claude-opus-4-8",
+          "claude-opus-5",
+          "claude-sonnet-5"
+        ]
+      },
+      "OpenRouterModel": {
+        "type": "string",
+        "description": "OpenRouter model name in `provider/model` form (e.g. openai/gpt-5, anthropic/claude-opus-4.5, deepseek/deepseek-v4-flash, openrouter/fusion). OpenRouter-native models are now prefixed `openrouter/` (e.g. openrouter/fusion); bare forms like `fusion`, `elephant-alpha`, `hunter-alpha` no longer exist. Accepted by provider=openrouter. Reconciled against the live OpenRouter /api/v1/models catalog.",
+        "enum": [
+          "anthropic/claude-fable-5",
+          "anthropic/claude-fable-5.1",
+          "anthropic/claude-haiku-4.5",
+          "anthropic/claude-opus-4",
+          "anthropic/claude-opus-4.1",
+          "anthropic/claude-opus-4.5",
+          "anthropic/claude-opus-4.6",
+          "anthropic/claude-opus-4.7",
+          "anthropic/claude-opus-4.8",
+          "anthropic/claude-opus-5",
+          "anthropic/claude-sonnet-4",
+          "anthropic/claude-sonnet-4.5",
+          "anthropic/claude-sonnet-4.6",
+          "anthropic/claude-sonnet-5",
+          "deepseek/deepseek-v4-flash",
+          "deepseek/deepseek-v4-pro",
+          "meta-llama/llama-3.3-70b-instruct",
+          "meta-llama/llama-4-maverick",
+          "meta-llama/llama-4-scout",
+          "mistralai/codestral-2508",
+          "mistralai/mistral-large",
+          "mistralai/mistral-large-2512",
+          "mistralai/mistral-medium-3",
+          "mistralai/mistral-small-2603",
+          "mistralai/mistral-small-3.1-24b-instruct",
+          "openai/gpt-5",
+          "openai/gpt-5.1",
+          "openai/gpt-5.2",
+          "openai/gpt-5.3-codex",
+          "openai/gpt-5.4",
+          "openai/gpt-5.5",
+          "openai/gpt-5.6-luna",
+          "openai/o1",
+          "openrouter/fusion",
+          "qwen/qwen3-coder"
+        ]
+      },
+      "OpenRouterFreeModel": {
+        "type": "string",
+        "description": "OpenRouter model name in `provider/model:free` form (zero-cost tier on OpenRouter). Sourced from the OpenRouter free-models collection (openrouter.ai/collections/free-models). The `:free` suffix is OpenRouter's convention for free-tier inference; callers can use this enum to expose a \"free models\" dropdown alongside the paid OpenRouterModel enum, or to enforce free-only policy in CI / sandboxes. Accepted by provider=openrouter.",
+        "enum": [
+          "cohere/north-mini-code:free",
+          "google/gemma-4-26b-a4b-it:free",
+          "google/gemma-4-31b-it:free",
+          "inclusionai/ling-3.0-flash-fin:free",
+          "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+          "nvidia/nemotron-3-super-120b-a12b:free",
+          "nvidia/nemotron-3-ultra-550b-a55b:free",
+          "nvidia/nemotron-3.5-lightning:free",
+          "poolside/laguna-s-2.1:free",
+          "poolside/laguna-xs-2.1:free"
         ]
       }
     }
