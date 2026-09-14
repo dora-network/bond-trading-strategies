@@ -52,10 +52,19 @@ import (
 // gosec/mnd: keeps the magic number out of the condition.
 const encryptionKeyLen = 32
 
-// adminAPIKeyEnv is the host-level Admin-role Dora API key the wsbroker
-// multiplex connection authenticates with. Renamed from the agent's old
-// AGENT_DORA_API_KEY to the host's DORA_ADMIN_API_KEY.
-const adminAPIKeyEnv = "DORA_ADMIN_API_KEY"
+// doraAPIKeyEnv is the host-level Dora API key the wsbroker uses to
+// authenticate against DORA's multiplex WebSocket. DORA's multiplex
+// endpoint (/plex) requires a Server-role key (it fans out market
+// data to all per-user strategies subscribing on the single
+// connection). Per-user trading on DORA uses a different scope and
+// pulls the key from the request's Authorization header via
+// cmd/strategy-server's agentPrincipalBridge — see DoraAPIKeyFromCtx.
+//
+// Set via deploy.sh: DORA_API_KEY Secrets Manager entry. The earlier
+// DORA_ADMIN_API_KEY name was a residue from the standalone dora-agent
+// service; the merged wiring now uses the single DORA_API_KEY for
+// server-side market-data access.
+const doraAPIKeyEnv = "DORA_API_KEY"
 
 // Runtime owns every agent dependency. Close releases the background
 // workers (janitors, wsbroker, wasm runtime, in-flight backtests).
@@ -137,21 +146,21 @@ func Wire(
 	sdkCfg.Servers = []doraclient.ServerConfiguration{{URL: cfg.DoraBaseURL}}
 	doraAPIClient := doraclient.NewAPIClient(sdkCfg)
 
-	// wsbroker is optional: without DORA_ADMIN_API_KEY the broker stays
+	// wsbroker is optional: without DORA_API_KEY the broker stays
 	// nil, Recover still runs (marks orphaned rows crashed), and Deploy
 	// fails at runtime with "WsBroker not configured".
 	var broker *wsbroker.Broker
-	if adminKey := os.Getenv(adminAPIKeyEnv); adminKey != "" {
+	if apiKey := os.Getenv(doraAPIKeyEnv); apiKey != "" {
 		wsURL := cfg.WsBrokerURL
 		if wsURL == "" {
 			wsURL = strings.TrimRight(cfg.DoraBaseURL, "/") + "/plex"
 		}
-		broker, err = wsbroker.New(wsbroker.Config{URL: wsURL, APIKey: adminKey})
+		broker, err = wsbroker.New(wsbroker.Config{URL: wsURL, APIKey: apiKey})
 		if err != nil {
 			return nil, fmt.Errorf("agent wiring: wsbroker: %w", err)
 		}
 	} else {
-		log.Warn("DORA_ADMIN_API_KEY not set; live broker disabled")
+		log.Warn("DORA_API_KEY not set; live broker disabled")
 	}
 
 	deployStore := agentdeployment.NewPgStore(pool)
