@@ -52,19 +52,21 @@ import (
 // gosec/mnd: keeps the magic number out of the condition.
 const encryptionKeyLen = 32
 
-// doraAPIKeyEnv is the host-level Dora API key the wsbroker uses to
-// authenticate against DORA's multiplex WebSocket. DORA's multiplex
-// endpoint (/plex) requires a Server-role key (it fans out market
-// data to all per-user strategies subscribing on the single
-// connection). Per-user trading on DORA uses a different scope and
-// pulls the key from the request's Authorization header via
-// cmd/strategy-server's agentPrincipalBridge — see DoraAPIKeyFromCtx.
+// apiKeyEnv is the host-level Dora API key the wsbroker uses to
+// authenticate against DORA's multiplex WebSocket. The key is
+// injected by the strategy-server task definition as the `API_KEY`
+// env var (mapped from the `dora-api-key` Secrets Manager entry;
+// the same value also flows into the strategy-server's --api-key
+// flag for per-request Dora auth on the trading API).
 //
-// Set via deploy.sh: DORA_API_KEY Secrets Manager entry. The earlier
-// DORA_ADMIN_API_KEY name was a residue from the standalone dora-agent
-// service; the merged wiring now uses the single DORA_API_KEY for
-// server-side market-data access.
-const doraAPIKeyEnv = "DORA_API_KEY"
+// Renamed back from DORA_API_KEY after the deploy's task-def
+// injection pattern surfaced: deploy.sh injects the secret as
+// API_KEY, not DORA_API_KEY. A separate DORA_API_KEY env var
+// would require a second secrets[] entry on the same ARN, which
+// we want to avoid. Per-request user trading keys are sourced
+// separately from the request's Authorization header via
+// cmd/strategy-server's agentPrincipalBridge (see DoraAPIKeyFromCtx).
+const apiKeyEnv = "API_KEY"
 
 // Runtime owns every agent dependency. Close releases the background
 // workers (janitors, wsbroker, wasm runtime, in-flight backtests).
@@ -146,11 +148,11 @@ func Wire(
 	sdkCfg.Servers = []doraclient.ServerConfiguration{{URL: cfg.DoraBaseURL}}
 	doraAPIClient := doraclient.NewAPIClient(sdkCfg)
 
-	// wsbroker is optional: without DORA_API_KEY the broker stays
-	// nil, Recover still runs (marks orphaned rows crashed), and Deploy
+	// wsbroker is optional: without API_KEY the broker stays nil,
+	// Recover still runs (marks orphaned rows crashed), and Deploy
 	// fails at runtime with "WsBroker not configured".
 	var broker *wsbroker.Broker
-	if apiKey := os.Getenv(doraAPIKeyEnv); apiKey != "" {
+	if apiKey := os.Getenv(apiKeyEnv); apiKey != "" {
 		wsURL := cfg.WsBrokerURL
 		if wsURL == "" {
 			wsURL = strings.TrimRight(cfg.DoraBaseURL, "/") + "/plex"
@@ -160,7 +162,7 @@ func Wire(
 			return nil, fmt.Errorf("agent wiring: wsbroker: %w", err)
 		}
 	} else {
-		log.Warn("DORA_API_KEY not set; live broker disabled")
+		log.Warn("API_KEY not set; live broker disabled")
 	}
 
 	deployStore := agentdeployment.NewPgStore(pool)
