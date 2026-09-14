@@ -18,7 +18,7 @@ import (
 type doraClient interface {
 	ListOrderBooks(context.Context) ([]DORAOrderBookSummary, error)
 	GetAssetByID(context.Context, string) (*AssetInfo, error)
-	GetUserID(context.Context) (string, error)
+	GetUserID(context.Context) (string, string, error)
 	ListCopyTraders(context.Context) ([]CopyTrader, error)
 }
 
@@ -151,25 +151,39 @@ func (c *liveDORAClient) GetAssetByID(ctx context.Context, assetID string) (*Ass
 	}, nil
 }
 
-func (c *liveDORAClient) GetUserID(ctx context.Context) (string, error) {
+// GetUserID resolves the DORA user ID + tenant ID for the credentials
+// stored on the request context. The two values come from a single
+// /v1/user/self call; both are needed downstream:
+//
+//   - userID populates the local user mirror in agent.users (FK target
+//     for provider_configs, sessions, strategies).
+//   - tenantID populates agent.users.tenant_id so per-tenant queries
+//     work. The tenant-id *header* on inbound requests overrides this
+//     — clients that explicitly claim a tenant win (matches the host
+//     strategy-server's existing convention). When the header is
+//     absent, the tenant authoritative on the DORA user record is
+//     used; this mirrors the original dora-agent's auth.Validate
+//     path. Roles are intentionally not propagated here — that lives
+//     under the existing TODO on EnsurePrincipal's hardcoded roles.
+func (c *liveDORAClient) GetUserID(ctx context.Context) (string, string, error) {
 	if c == nil || c.httpClient == nil || c.baseURL == "" {
-		return "", errors.New("DORA client is not configured")
+		return "", "", errors.New("DORA client is not configured")
 	}
 
 	info, err := authInfo(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	authHdr, err := authHeader(info)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	//nolint:gosec // DORA_BASE_URL is trusted deployment config and is already used by the generated DORA client.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/user/self", nil)
 	if err != nil {
-		return "", fmt.Errorf("create get user self request: %w", err)
+		return "", "", fmt.Errorf("create get user self request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", authHdr)
@@ -180,31 +194,32 @@ func (c *liveDORAClient) GetUserID(ctx context.Context) (string, error) {
 	//nolint:gosec // Request URL is built from trusted DORA_BASE_URL service config above.
 	rawResp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("get user self: %w", err)
+		return "", "", fmt.Errorf("get user self: %w", err)
 	}
 	defer rawResp.Body.Close()
 
 	if rawResp.StatusCode < http.StatusOK || rawResp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(rawResp.Body, responsePreviewBytes))
-		return "", fmt.Errorf("get user self: status %d: %s", rawResp.StatusCode, strings.TrimSpace(string(body)))
+		return "", "", fmt.Errorf("get user self: status %d: %s", rawResp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var resp struct {
 		Data *struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			TenantID string `json:"tenant_id"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(rawResp.Body).Decode(&resp); err != nil {
-		return "", fmt.Errorf("get user self: decode response: %w", err)
+		return "", "", fmt.Errorf("get user self: decode response: %w", err)
 	}
 	if resp.Data == nil {
-		return "", errors.New("get user self: missing response data")
+		return "", "", errors.New("get user self: missing response data")
 	}
 	if resp.Data.ID == "" {
-		return "", errors.New("get user self: missing user ID")
+		return "", "", errors.New("get user self: missing user ID")
 	}
 
-	return resp.Data.ID, nil
+	return resp.Data.ID, resp.Data.TenantID, nil
 }
 
 // ListCopyTraders returns the DORA users who have allow_copy_trading enabled.

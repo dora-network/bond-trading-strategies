@@ -434,10 +434,10 @@ func listItems[T listable, S any](
 	w http.ResponseWriter, r *http.Request,
 	src map[uuid.UUID]T,
 	extract func(T) S,
-	resolveDORAUserID func(context.Context) (string, error),
+	resolveDORAUserID func(context.Context) (string, string, error),
 	mu *sync.RWMutex,
 ) {
-	doraUserID, err := resolveDORAUserID(r.Context())
+	doraUserID, _, err := resolveDORAUserID(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -967,7 +967,7 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	doraUserID, err := h.resolveDORAUserID(r.Context())
+	doraUserID, _, err := h.resolveDORAUserID(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1143,7 +1143,7 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 }
 
 func (h *Handler) listBacktests(w http.ResponseWriter, r *http.Request) {
-	doraUserID, err := h.resolveDORAUserID(r.Context())
+	doraUserID, _, err := h.resolveDORAUserID(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1328,7 +1328,7 @@ func (h *Handler) handleTradingDecisions(w http.ResponseWriter, r *http.Request)
 func (h *Handler) getRunDecisions(w http.ResponseWriter, r *http.Request, runID uuid.UUID) {
 	ctx := r.Context()
 
-	doraUserID, err := h.resolveDORAUserID(ctx)
+	doraUserID, _, err := h.resolveDORAUserID(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1404,7 +1404,7 @@ func getBacktestSubResource(
 	h *Handler, w http.ResponseWriter, r *http.Request, id uuid.UUID, label string,
 	fetch func(context.Context, uuid.UUID, string, int, int) (json.RawMessage, error),
 ) {
-	doraUserID, err := h.resolveDORAUserID(r.Context())
+	doraUserID, _, err := h.resolveDORAUserID(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1448,7 +1448,7 @@ func parsePagination(r *http.Request) (page, limit int) {
 }
 
 func (h *Handler) getBacktest(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
-	doraUserID, err := h.resolveDORAUserID(r.Context())
+	doraUserID, _, err := h.resolveDORAUserID(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1490,7 +1490,7 @@ func (h *Handler) getBacktest(w http.ResponseWriter, r *http.Request, id uuid.UU
 }
 
 func (h *Handler) getBacktestMetadata(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
-	doraUserID, err := h.resolveDORAUserID(r.Context())
+	doraUserID, _, err := h.resolveDORAUserID(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1514,7 +1514,7 @@ func (h *Handler) getBacktestMetadata(w http.ResponseWriter, r *http.Request, id
 }
 
 func (h *Handler) cancelBacktest(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
-	doraUserID, err := h.resolveDORAUserID(r.Context())
+	doraUserID, _, err := h.resolveDORAUserID(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1576,7 +1576,7 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	doraUserID, err := h.resolveDORAUserID(r.Context())
+	doraUserID, _, err := h.resolveDORAUserID(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1674,7 +1674,7 @@ func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getRun(w http.ResponseWriter, ctx context.Context, id uuid.UUID) {
-	doraUserID, err := h.resolveDORAUserID(ctx)
+	doraUserID, _, err := h.resolveDORAUserID(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1700,7 +1700,7 @@ func (h *Handler) stopRun(w http.ResponseWriter, ctx context.Context, id uuid.UU
 		writeError(w, http.StatusNotFound, "run not found")
 		return
 	}
-	doraUserID, err := h.resolveDORAUserID(ctx)
+	doraUserID, _, err := h.resolveDORAUserID(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1760,7 +1760,7 @@ func (h *Handler) pauseRun(w http.ResponseWriter, ctx context.Context, id uuid.U
 		writeError(w, http.StatusNotFound, "run not found")
 		return
 	}
-	doraUserID, err := h.resolveDORAUserID(ctx)
+	doraUserID, _, err := h.resolveDORAUserID(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -1814,7 +1814,7 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 		writeError(w, http.StatusNotFound, "run not found")
 		return
 	}
-	doraUserID, err := h.resolveDORAUserID(ctx)
+	doraUserID, _, err := h.resolveDORAUserID(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("resolve dora user: %v", err))
 		return
@@ -2374,10 +2374,10 @@ func (h *Handler) expireRun(ctx context.Context, detail *RunDetail) {
 	})
 }
 
-func (h *Handler) resolveDORAUserID(ctx context.Context) (string, error) {
+func (h *Handler) resolveDORAUserID(ctx context.Context) (string, string, error) {
 	// Fast path: user was already verified by the auth middleware.
 	if id, ok := doraUserIDFromContext(ctx); ok {
-		return id, nil
+		return id, "", nil
 	}
 	client := h.doraClient
 	if client == nil {

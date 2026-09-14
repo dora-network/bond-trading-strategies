@@ -17,10 +17,10 @@ import (
 // route table, so the wire path is the spec's "/v1/agent/sessions" (not
 // "/v1/agent/v1/sessions" as a naive basePath+path concat would produce).
 func TestIntegration_AgentRoutesReturnExpectedResponsesWhenAuthed(t *testing.T) {
-	ts := newTestServerWithAuthResolver(t, func(ctx context.Context) (string, error) {
+	ts := newTestServerWithAuthResolver(t, func(ctx context.Context) (string, string, error) {
 		// requireAuth has already parsed and validated the Authorization
 		// header; a fixed user ID keeps the agent's PG queries scoped.
-		return "00000000-0000-0000-0000-000000000051", nil
+		return "00000000-0000-0000-0000-000000000051", "", nil
 	}, nil)
 	defer ts.Close(t.Context())
 

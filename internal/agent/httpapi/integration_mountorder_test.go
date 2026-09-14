@@ -29,8 +29,8 @@ import (
 // agent's per-user limiter (no RateLimit-* headers), proving the agent's
 // limiter is reachable inside the mount.
 func TestIntegration_AgentMountOrderPassesBothRateLimiters(t *testing.T) {
-	resolveUserID := func(context.Context) (string, error) {
-		return "00000000-0000-0000-0000-000000000061", nil
+	resolveUserID := func(context.Context) (string, string, error) {
+		return "00000000-0000-0000-0000-000000000061", "", nil
 	}
 	ts := newTestServerWithAuthResolver(t, resolveUserID,
 		func(c *config.Config) { c.RateLimitPerMin = 2 })

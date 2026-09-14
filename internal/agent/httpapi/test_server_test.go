@@ -95,7 +95,7 @@ func newTestServer(t *testing.T) *testServer {
 // wiring; the mount-order test uses it to shrink the per-user bucket.
 func newTestServerWithAuthResolver(
 	t *testing.T,
-	resolveUserID func(context.Context) (string, error),
+	resolveUserID func(context.Context) (string, string, error),
 	override func(*config.Config),
 ) *testServer {
 	t.Helper()

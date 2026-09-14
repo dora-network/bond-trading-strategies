@@ -89,6 +89,7 @@ func (s *Server) handleSetProviderConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.configs.Set(r.Context(), p.UserID, body.Provider, body.APIKey, body.DefaultModel, body.BaseURL); err != nil {
+		slog.Error("store provider config failed", "user_id", p.UserID, "provider", body.Provider, "error", err)
 		http.Error(w, "failed to store provider config", http.StatusInternalServerError)
 		return
 	}
@@ -109,6 +110,7 @@ func (s *Server) handleListProviderConfig(w http.ResponseWriter, r *http.Request
 	p := PrincipalFromCtx(r.Context())
 	entries, err := s.configs.List(r.Context(), p.UserID)
 	if err != nil {
+		slog.Error("list provider configs failed", "user_id", p.UserID, "error", err)
 		http.Error(w, "failed to list provider configs", http.StatusInternalServerError)
 		return
 	}

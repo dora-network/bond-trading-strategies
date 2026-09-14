@@ -316,7 +316,8 @@ func main() {
 					return "", errors.New("missing auth info in context")
 				}
 				client := strategyhttp.NewDORAClient()
-				return client.GetUserID(ctx)
+				id, _, err := client.GetUserID(ctx)
+				return id, err
 			},
 			notifications.WithHandlerLogger(log),
 			notifications.WithAcceptOptions(websocket.AcceptOptions{
@@ -335,9 +336,22 @@ func main() {
 	// bridge that forwards the resolved Dora identity into the agent
 	// httpapi's Principal context; every other path falls through to the
 	// strategy handler chain.
+	// CORS: the host-wide cors.New is wrapped around the strategy handler
+	// chain above, but agentMount dispatches /v1/agent/* to a separate
+	// subtree that never sees those CORS headers. Without an OPTIONS
+	// preflight response the browser blocks every credentialed POST
+	// (provider-config, sessions, messages, etc.) with a generic
+	// "Failed to fetch" — even when the request would otherwise be
+	// allowed. Wrap the agent subtree with the same CORS middleware
+	// (when configured) so OPTIONS preflights return 204 with the
+	// right Allow-* headers before requireAuth rejects them.
+	agentHandler := strategyhttp.RequireAuth(agentPrincipalBridge(agentRuntime))
+	if *corsAllowedOrigins != "" {
+		agentHandler = cors.New(*corsAllowedOrigins)(agentHandler)
+	}
 	wrappedHandler = agentMount{
 		fallback: wrappedHandler,
-		agent:    strategyhttp.RequireAuth(agentPrincipalBridge(agentRuntime)),
+		agent:    agentHandler,
 	}
 
 	server := &http.Server{
@@ -544,6 +558,24 @@ func agentPrincipalBridge(rt *agentwiring.Runtime) http.Handler {
 			return
 		}
 		info, _ := authctx.AuthInfoFromContext(r.Context())
+		// Ensure the local user mirror exists before any per-user
+		// handler runs. The host's requireAuth resolved userID but
+		// never inserted into agent.users — every downstream table
+		// (provider_configs, sessions, strategies, etc.) FKs that
+		// row, so the first authenticated write fails with a
+		// constraint violation unless we upsert here. Mirrors the
+		// original dora-agent AuthMiddleware's Ensure step.
+		if err := rt.EnsurePrincipal(r.Context(), userID, info.TenantID); err != nil {
+			slog.Error("agent ensure principal failed", "user_id", userID, "error", err)
+			http.Error(w, "auth service unavailable", http.StatusBadGateway)
+			return
+		}
+		// Persist the sealed Dora API key for live-deployment crash
+		// recovery. Warn-only on failure — the request still works,
+		// only the recovery path degrades.
+		if err := rt.StorePrincipalKey(r.Context(), userID, info.APIKey); err != nil {
+			slog.Warn("agent store principal key failed", "user_id", userID, "error", err)
+		}
 		principal := agenthttpapi.Principal{UserID: userID, TenantID: info.TenantID}
 		agenthttpapi.PrincipalMiddleware(principal, info.APIKey)(inner).ServeHTTP(w, r)
 	})

@@ -16,6 +16,13 @@ DORA_BASE_URL ?= https://dev.dora.co
 PRICE_DAEMON_HTTP_ADDR ?= :8082
 RECONNECT_DELAY ?= 5s
 
+# CORS allow-list for the strategy-server. The Makefile passes this to
+# --cors-allowed-origins, which the cors middleware uses as an exact-match
+# list (no localhost/127.0.0.1 aliasing). The default keeps prod working
+# for the dora-awsdev vercel deployment; local chatui testing overrides
+# this via .env or the env (e.g. CORS_ALLOWED_ORIGINS=http://localhost:8080).
+CORS_ALLOWED_ORIGINS ?= https://dora-awsdev.vercel.app
+
 .PHONY: help
 help:
 	@printf "Available targets:\n"
@@ -32,7 +39,7 @@ compose-down:
 	docker compose -f ./docker-compose.yml -p dora down
 
 start-strategy-server:
-	go run ./cmd/strategy-server -a "$(STRATEGY_ADDR)" -d "$(DATABASE_URL)" -s "$(WS_URL)" -k "$(DORA_API_KEY)" -b "$(DORA_BASE_URL)" -f "$(FRED_API_KEY)" -e "$(ENCRYPTION_KEY)" --cors-allowed-origins "https://dora-awsdev.vercel.app"
+	go run ./cmd/strategy-server -a "$(STRATEGY_ADDR)" -d "$(DATABASE_URL)" -s "$(WS_URL)" -k "$(DORA_API_KEY)" -b "$(DORA_BASE_URL)" -f "$(FRED_API_KEY)" -e "$(ENCRYPTION_KEY)" --cors-allowed-origins "$(CORS_ALLOWED_ORIGINS)"
 
 start-mcp-server:
 	go run ./cmd/mcp-server -a "$(MCP_ADDR)" -b "$(MCP_BASE_URL)" -s "$(STRATEGY_BASE_URL)" -f "$(FRED_API_KEY)" -k "$(DORA_API_KEY)"

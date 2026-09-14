@@ -75,6 +75,7 @@ type Runtime struct {
 	deployStr *agentdeployment.PgStore
 	btStore   *agentbacktest.PgStore
 	kernel    *safety.Kernel
+	sealer    *secrets.Sealer
 }
 
 // Wire constructs the agent runtime. encryptionKey is the host's
@@ -269,7 +270,57 @@ func Wire(
 		deployStr:      deployStore,
 		btStore:        btStore,
 		kernel:         kernel,
+		sealer:         sealer,
 	}, nil
+}
+
+// EnsurePrincipal upserts the local user mirror — the FK target for
+// every per-user table (provider_configs, sessions, strategies, etc.).
+// Called from the host's agentPrincipalBridge on every authenticated
+// request so the mirror stays present without an explicit sync job.
+// Matches the original dora-agent AuthMiddleware: failure is fatal
+// for the request (FK would reject every downstream write) and the
+// bridge maps it to 502 "auth service unavailable".
+//
+// Roles are hardcoded to {TRADER, ADMIN} as a placeholder for the
+// role gating the original agent enforced via AllowedDoraRoles +
+// audit.ActionAuthRoleRejected. Role enforcement was intentionally
+// dropped in the merger and has not yet been restored. The host's
+// strategyhttp.AuthInfo carries no roles today; when role gating
+// returns, this constant goes away and roles flow in from the auth
+// context.
+//
+// TODO: when role gating is restored, remove the hardcoded roles
+// below and accept the principal's roles from the host auth context.
+func (r *Runtime) EnsurePrincipal(ctx context.Context, userID, tenantID string) error {
+	if r == nil || r.users == nil {
+		return errors.New("agent wiring: EnsurePrincipal called without users store")
+	}
+	if err := r.users.Ensure(ctx, userID, tenantID, []string{"TRADER", "ADMIN"}); err != nil {
+		return fmt.Errorf("ensure user: %w", err)
+	}
+	return nil
+}
+
+// StorePrincipalKey seals the raw Dora API key with the runtime's
+// Sealer and persists it in agent.users.api_key so the live
+// orchestrator can recover running deployments after a crash without
+// prompting the user to re-authenticate. Matches the original
+// dora-agent AuthMiddleware: failure is non-fatal — the request still
+// works, only crash recovery degrades. Caller logs at warn level
+// (matches the original middleware's posture).
+func (r *Runtime) StorePrincipalKey(ctx context.Context, userID, apiKey string) error {
+	if r == nil || r.sealer == nil || apiKey == "" {
+		return nil
+	}
+	sealed, err := r.sealer.Seal([]byte(apiKey))
+	if err != nil {
+		return fmt.Errorf("seal api key: %w", err)
+	}
+	if err := r.users.StoreKey(ctx, userID, sealed); err != nil {
+		return fmt.Errorf("store key: %w", err)
+	}
+	return nil
 }
 
 // Close unwinds the runtime's background workers: cancels in-flight

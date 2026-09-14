@@ -36,7 +36,7 @@ type doraUserIDContextKey struct{}
 //
 //	Authorization: ApiKey <key>
 //	Authorization: Bearer <token>
-func requireAuth(resolveUserID func(context.Context) (string, error), next http.Handler) http.Handler {
+func requireAuth(resolveUserID func(context.Context) (string, string, error), next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
@@ -44,6 +44,12 @@ func requireAuth(resolveUserID func(context.Context) (string, error), next http.
 			return
 		}
 
+		// Pre-seed TenantID from the inbound tenant-id header. Precedence
+		// is explicit: the header (when set) wins, because explicit
+		// per-request tenant claims override the authoritative tenant
+		// bound to the user's DORA record. When the header is absent
+		// the resolver fills the gap below. Mirrors the original
+		// dora-agent auth.Validate path.
 		authInfo := authctx.AuthInfo{
 			TenantID: strings.TrimSpace(r.Header.Get(TenantIDHeader)),
 		}
@@ -69,10 +75,18 @@ func requireAuth(resolveUserID func(context.Context) (string, error), next http.
 
 		ctx := authctx.WithAuthInfo(r.Context(), authInfo)
 
-		userID, err := resolveUserID(ctx)
+		userID, tenantID, err := resolveUserID(ctx)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "unauthorised")
 			return
+		}
+
+		// Fill TenantID from the DORA user record when the client did
+		// not claim one. The header (already in authInfo.TenantID
+		// above) wins; this only fires when the header was absent.
+		if authInfo.TenantID == "" && tenantID != "" {
+			authInfo.TenantID = tenantID
+			ctx = authctx.WithAuthInfo(ctx, authInfo)
 		}
 
 		ctx = context.WithValue(ctx, doraUserIDContextKey{}, userID)
@@ -93,7 +107,7 @@ func doraUserIDFromContext(ctx context.Context) (string, bool) {
 // DORAClient, so it performs exactly the same authentication as the
 // strategy routes: Authorization header validation plus a Dora user lookup.
 func RequireAuth(next http.Handler) http.Handler {
-	return requireAuth(func(ctx context.Context) (string, error) {
+	return requireAuth(func(ctx context.Context) (string, string, error) {
 		return NewDORAClient().GetUserID(ctx)
 	}, next)
 }
@@ -102,10 +116,10 @@ func RequireAuth(next http.Handler) http.Handler {
 // accepts a custom Dora user resolver instead of always calling
 // NewDORAClient().GetUserID. Production mounts should use RequireAuth;
 // tests use this to inject a fake resolver that returns a known user ID
-// for a known API key, so the agent's handlers can be driven end-to-end
-// without hitting Dora.
+// + tenant ID for a known API key, so the agent's handlers can be
+// driven end-to-end without hitting Dora.
 func RequireAuthWithResolver(
-	resolveUserID func(context.Context) (string, error),
+	resolveUserID func(context.Context) (string, string, error),
 	next http.Handler,
 ) http.Handler {
 	return requireAuth(resolveUserID, next)
