@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Strategy Service API",
-    "version": "1.9.0",
+    "version": "1.10.0",
     "description": "REST API for asynchronous strategy backtests, live strategy runs, and strategy discovery.\n\nAll endpoints except `/healthz` require:\n- `Authorization: ApiKey <key>` or `Authorization: Bearer <token>`\n- `tenant-id: <id>` \u2014 DORA tenant identifier required on every authed request and forwarded on outbound DORA calls. See the TenantID parameter.\n\n---\n\nBond-trading-strategy agent: HTTP surface for prompt handling, session\nstate, and strategy capture. Authentication is the user-level Dora\n`ApiKey` token (not the LLM provider key \u2014 that lives in\n`/v1/provider-config`). The agent's HTTP layer only validates the\ninbound `Authorization` header format; it does not know the upstream\nDora API's auth conventions, and per the dora-agent middleware only\naccepts the literal `ApiKey <token>` prefix (see security scheme below).\n"
   },
   "servers": [
@@ -2555,7 +2555,8 @@
               "copytrading",
               "breakout",
               "momentum"
-            ]
+            ],
+            "description": "Signal strategies only. Execution strategies (twap, vwap) are live-run only and cannot be backtested."
           },
           "config": {
             "oneOf": [
@@ -2598,7 +2599,9 @@
               "mean_reversion",
               "copytrading",
               "breakout",
-              "momentum"
+              "momentum",
+              "twap",
+              "vwap"
             ]
           },
           "config": {
@@ -2614,6 +2617,12 @@
               },
               {
                 "$ref": "#/components/schemas/MomentumConfig"
+              },
+              {
+                "$ref": "#/components/schemas/TWAPConfig"
+              },
+              {
+                "$ref": "#/components/schemas/VWAPConfig"
               }
             ]
           }
@@ -2855,6 +2864,104 @@
             "description": "Leverage multiplier for live orders."
           }
         }
+      },
+      "TWAPConfig": {
+        "type": "object",
+        "description": "Time-weighted average price execution strategy. Splits total_amount into equal chunks placed every interval_seconds across the execution window, reducing market impact versus a one-shot order. Live runs only.",
+        "properties": {
+          "order_book_id": {
+            "type": "string",
+            "description": "Order book UUID where orders will be placed."
+          },
+          "total_amount": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Total quantity to trade across the execution window."
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "buy",
+              "sell"
+            ],
+            "description": "Trade side."
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 start time for the execution window."
+          },
+          "end_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 end time. Must be strictly after start_time and in the future."
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "default": 300,
+            "description": "Seconds between each chunk order."
+          }
+        },
+        "required": [
+          "order_book_id",
+          "total_amount",
+          "side",
+          "start_time",
+          "end_time"
+        ]
+      },
+      "VWAPConfig": {
+        "type": "object",
+        "description": "Volume-weighted average price execution strategy. Sizes each chunk in proportion to historical trade volume in that time-of-day bucket, derived from window_days of trade history at bucket_minutes granularity. Live runs only.",
+        "properties": {
+          "order_book_id": {
+            "type": "string",
+            "description": "Order book UUID where orders will be placed."
+          },
+          "total_amount": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Total quantity to trade across the execution window."
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "buy",
+              "sell"
+            ],
+            "description": "Trade side."
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 start time for the execution window."
+          },
+          "end_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 end time. Must be strictly after start_time and in the future."
+          },
+          "window_days": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "default": 30,
+            "description": "Days of historical trade data used for the volume-bucket distribution."
+          },
+          "bucket_minutes": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "default": 5,
+            "description": "Granularity of each VWAP bucket, in minutes."
+          }
+        },
+        "required": [
+          "order_book_id",
+          "total_amount",
+          "side",
+          "start_time",
+          "end_time"
+        ]
       },
       "CopyTradingConfig": {
         "type": "object",
