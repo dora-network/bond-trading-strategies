@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bond-trading-strategies agent chat</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <div id="pageOrigin" class="page-origin"></div>
+  <header>
+    <h1>bond-trading-strategies agent</h1>
+    <input id="baseUrl" type="text" placeholder="http://127.0.0.1:8081" value="">
+    <input id="apiKey" type="password" placeholder="Dora ApiKey">
+    <button id="saveAuth">save</button>
+    <button id="healthz" title="GET /healthz">healthz</button>
+    <span id="currentBaseUrl" class="current-url"></span>
+  </header>
+
+  <div id="status" class="status"></div>
+
+  <main>
+    <aside id="sidebar">
+      <h2>sessions</h2>
+      <form id="newSessionForm">
+        <select id="newProvider">
+          <option value="openai">openai</option>
+          <option value="anthropic">anthropic</option>
+          <option value="openrouter">openrouter</option>
+        </select>
+        <select id="newModel" required></select>
+        <input id="newTitle" type="text" placeholder="title (optional)">
+        <button type="submit">create</button>
+      </form>
+      <ul id="sessions"></ul>
+      <section id="deploymentPanel" class="deployment-panel" aria-labelledby="deploymentTitle">
+        <div class="deployment-heading">
+          <h2 id="deploymentTitle">deployments</h2>
+          <button id="refreshDeployments" type="button">refresh</button>
+        </div>
+        <div id="deploymentError" class="inline-error" role="status" hidden></div>
+        <p class="deployment-meta">strategy: <span id="deploymentStrategy">—</span></p>
+        <p class="deployment-meta">head revision: <span id="deploymentHeadRevision">—</span></p>
+        <label for="deploymentSelect">deployment</label>
+        <select id="deploymentSelect"><option value="">no deployment</option></select>
+        <div id="deploymentDetails" class="deployment-details">
+          <p>status: <span id="deploymentStatus">—</span></p>
+          <p>order book: <span id="deploymentOrderBook">—</span></p>
+          <p>resolution: <span id="deploymentResolution">—</span></p>
+          <p>started: <span id="deploymentStartedAt">—</span></p>
+          <p>restart count: <span id="deploymentRestartCount">—</span></p>
+          <p>stopped reason: <span id="deploymentStoppedReason">—</span></p>
+          <div class="deployment-actions">
+            <button id="stopDeployment" type="button" disabled>stop</button>
+            <button id="startDeployment" type="button" disabled>start</button>
+          </div>
+        </div>
+        <form id="deployForm" class="deploy-form">
+          <h3>deploy</h3>
+          <label for="deployRevision">revision</label>
+          <select id="deployRevision" required></select>
+          <div id="deployOrderBookControl"></div>
+          <div id="deployResolutionControl"></div>
+          <div id="deployParams"></div>
+          <p id="manifestNotice" class="manifest-notice" hidden></p>
+          <button id="deployButton" type="submit">deploy</button>
+        </form>
+      </section>
+
+      <h2>provider config</h2>
+      <form id="setProviderForm">
+        <select name="provider" id="cfgProvider">
+          <option value="openai">openai</option>
+          <option value="anthropic">anthropic</option>
+          <option value="openrouter">openrouter</option>
+        </select>
+        <input name="api_key" type="text" placeholder="api_key" required>
+        <select name="default_model" id="cfgDefaultModel" required></select>
+        <input name="base_url" type="text" placeholder="base_url (optional)">
+        <button type="submit">save</button>
+      </form>
+      <button id="listProviders">list (returns [])</button>
+      <button id="deleteProvider">delete current</button>
+      <pre id="providerOut"></pre>
+    </aside>
+
+    <section id="chat">
+      <header id="chatHeader"><span id="chatTitle">no session</span><button id="deleteSession">delete</button></header>
+      <div id="messages"></div>
+      <form id="messageForm">
+        <textarea id="promptInput" placeholder="ask the agent..." rows="3" required></textarea>
+        <button type="submit" id="sendBtn">send</button>
+      </form>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+
+</html>

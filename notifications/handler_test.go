@@ -3,7 +3,6 @@ package notifications_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -40,41 +39,37 @@ func TestHandler_RejectsMissingAuth(t *testing.T) {
 // after the server's Accept completes, but the handler's Subscribe
 // runs immediately afterwards on the same goroutine. If we publish
 // in that window the broadcast fires before our subscriber exists
-// and the event is dropped. Retry the publish with a short read
-// timeout until either the read succeeds or the overall context
-// times out. Deterministic — no sleeps, no protocol changes.
+// and the event is dropped. Keep a single read in flight and retry
+// publishing until either the read succeeds or the overall context
+// times out; canceling a coder/websocket read context closes the
+// connection, so per-read timeouts are not safe here.
 func publishAndRead(t *testing.T, ctx context.Context, bus *notifications.Bus, conn *websocket.Conn, evt notifications.Event) notifications.Event {
 	t.Helper()
-	deadline, ok := ctx.Deadline()
-	require.True(t, ok, "publishAndRead requires a deadline-bearing context")
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	readCh := make(chan readResult, 1)
+	go func() {
+		_, data, err := conn.Read(ctx)
+		readCh <- readResult{data: data, err: err}
+	}()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		require.NoError(t, bus.Publish(ctx, evt))
-		readCtx, cancel := context.WithDeadline(ctx, minTime(deadline, time.Now().Add(500*time.Millisecond)))
-		_, data, err := conn.Read(readCtx)
-		cancel()
-		if err == nil {
-			var got notifications.Event
-			require.NoError(t, json.Unmarshal(data, &got))
-			return got
-		}
-		// Distinguish a real failure from a windowed timeout. The
-		// race manifests as context.DeadlineExceeded on the read
-		// ctx (subscribed too late); re-publish until the parent
-		// ctx also expires, which the next require.NoError catches.
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("conn.Read: %v", err)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("publishAndRead: read never succeeded before parent deadline: %v", err)
-		}
-	}
-}
 
-func minTime(a, b time.Time) time.Time {
-	if a.Before(b) {
-		return a
+		select {
+		case res := <-readCh:
+			require.NoError(t, res.err)
+			var got notifications.Event
+			require.NoError(t, json.Unmarshal(res.data, &got))
+			return got
+		case <-ctx.Done():
+			t.Fatalf("publishAndRead: read never succeeded before parent deadline: %v", ctx.Err())
+		case <-ticker.C:
+		}
 	}
-	return b
 }
 
 func TestHandler_DeliversLiveEvents(t *testing.T) {

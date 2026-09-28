@@ -376,8 +376,8 @@ func TestHandlerGetsDORAUser(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(ctx context.Context) (string, error) {
-				return "user-123", nil
+			getUserID: func(ctx context.Context) (string, string, error) {
+				return "user-123", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -408,8 +408,8 @@ func TestHandlerReturnsDORAUserError(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		&strategyfakes.FakeService{},
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(ctx context.Context) (string, error) {
-				return "", fmt.Errorf("boom")
+			getUserID: func(ctx context.Context) (string, string, error) {
+				return "", "", fmt.Errorf("boom")
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -439,8 +439,8 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 		svc,
 		strategyhttp.WithNow(func() time.Time { return now }),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-test-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -529,8 +529,8 @@ func TestHandlerMomentumBacktestCompletes(t *testing.T) {
 		svc,
 		strategyhttp.WithNow(func() time.Time { return now }),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-test-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -589,8 +589,8 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 		svc,
 		strategyhttp.WithNow(func() time.Time { return now }),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-test-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -681,8 +681,8 @@ func TestHandlerCopyTradingBacktestResultShape(t *testing.T) {
 		strategyhttp.WithNow(func() time.Time { return now }),
 		strategyhttp.WithBacktestStore(store),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-test-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -840,8 +840,8 @@ func TestHandlerCancelBacktest(t *testing.T) {
 	handler := strategyhttp.NewHandler(
 		svc,
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-test-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -899,8 +899,8 @@ func TestHandlerListBacktests(t *testing.T) {
 		svc,
 		strategyhttp.WithNow(tickClock(now)),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-test-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -1381,8 +1381,8 @@ func TestHandlerRestoreBacktests(t *testing.T) {
 		strategyhttp.WithBacktestStore(store),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-test-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -1470,8 +1470,8 @@ func TestHandlerListBacktestsWithFilters(t *testing.T) {
 		&strategyfakes.FakeService{},
 		strategyhttp.WithBacktestStore(store),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -1720,8 +1720,8 @@ func TestHandlerBacktestOwnership(t *testing.T) {
 		strategyhttp.WithBacktestStore(store),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-bob", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-bob", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -2151,7 +2151,7 @@ type memoryRunStore struct {
 
 type doraClientFunc struct {
 	listOrderBooks  func(context.Context) ([]strategyhttp.DORAOrderBookSummary, error)
-	getUserID       func(context.Context) (string, error)
+	getUserID       func(context.Context) (string, string, error)
 	getAssetByID    func(context.Context, string) (*strategyhttp.AssetInfo, error)
 	listCopyTraders func(context.Context) ([]strategyhttp.CopyTrader, error)
 }
@@ -2170,9 +2170,9 @@ func (f doraClientFunc) GetAssetByID(ctx context.Context, id string) (*strategyh
 	return f.getAssetByID(ctx, id)
 }
 
-func (f doraClientFunc) GetUserID(ctx context.Context) (string, error) {
+func (f doraClientFunc) GetUserID(ctx context.Context) (string, string, error) {
 	if f.getUserID == nil {
-		return "test-user", nil
+		return "test-user", "", nil
 	}
 	return f.getUserID(ctx)
 }
@@ -2534,8 +2534,8 @@ func TestHandlerRunOwnership(t *testing.T) {
 		strategyhttp.WithRunStore(store),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-bob", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-bob", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -2624,8 +2624,8 @@ func TestHandlerBacktestSummary(t *testing.T) {
 		&strategyfakes.FakeService{},
 		strategyhttp.WithBacktestStore(store),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -2678,8 +2678,8 @@ func TestHandlerRequiresAuth(t *testing.T) {
 			listOrderBooks: func(context.Context) ([]strategyhttp.DORAOrderBookSummary, error) {
 				return nil, nil
 			},
-			getUserID: func(context.Context) (string, error) {
-				return "user-x", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-x", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -2797,8 +2797,8 @@ func TestHandlerBacktestSubResources(t *testing.T) {
 		&strategyfakes.FakeService{},
 		strategyhttp.WithBacktestStore(store),
 		strategyhttp.WithDORAClient(doraClientFunc{
-			getUserID: func(context.Context) (string, error) {
-				return "user-1", nil
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-1", "", nil
 			},
 		}),
 		strategyhttp.WithTradesHistoryStore(nil),
@@ -2877,7 +2877,7 @@ func TestHandlerCopyTradingBacktestInitialBalance(t *testing.T) {
 			&strategyfakes.FakeService{},
 			strategyhttp.WithNow(func() time.Time { return now }),
 			strategyhttp.WithDORAClient(doraClientFunc{
-				getUserID: func(context.Context) (string, error) { return "user-1", nil },
+				getUserID: func(context.Context) (string, string, error) { return "user-1", "", nil },
 			}),
 			strategyhttp.WithTradesHistoryStore(nil),
 		)

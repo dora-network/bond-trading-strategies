@@ -21,6 +21,9 @@ import (
 
 	"github.com/dora-network/bond-trading-strategies/authctx"
 	"github.com/dora-network/bond-trading-strategies/cors"
+	agentconfig "github.com/dora-network/bond-trading-strategies/internal/agent/config"
+	agenthttpapi "github.com/dora-network/bond-trading-strategies/internal/agent/httpapi"
+	agentwiring "github.com/dora-network/bond-trading-strategies/internal/agent/wiring"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/notifications/orderupdates"
 	"github.com/dora-network/bond-trading-strategies/prices"
@@ -267,6 +270,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// dora-agent runtime: constructed from the same pool + ENCRYPTION_KEY
+	// the strategy handler uses, mounted at /v1/agent behind requireAuth.
+	agentCfg, err := agentconfig.Load()
+	if err != nil {
+		slog.Error("agent config load failed", "err", err)
+		os.Exit(1)
+	}
+	agentRuntime, err := agentwiring.Wire(ctx, pool, encryptionKey, agentCfg, log)
+	if err != nil {
+		slog.Error("agent wiring failed", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = agentRuntime.Close(context.Background()) }()
+
 	rlCfg := ratelimit.Config{
 		Enabled:    *rateLimitEnabled,
 		TrustProxy: *rateLimitTrustProxy,
@@ -299,7 +316,8 @@ func main() {
 					return "", errors.New("missing auth info in context")
 				}
 				client := strategyhttp.NewDORAClient()
-				return client.GetUserID(ctx)
+				id, _, err := client.GetUserID(ctx)
+				return id, err
 			},
 			notifications.WithHandlerLogger(log),
 			notifications.WithAcceptOptions(websocket.AcceptOptions{
@@ -312,6 +330,28 @@ func main() {
 		}
 		wsSubMux.Handle("/v1/notifications/ws", wsHandler)
 		wrappedHandler = notificationsRouter{fallback: wrappedHandler, sub: wsSubMux}
+	}
+
+	// Agent mount: /v1/agent/* routes through the host's requireAuth and a
+	// bridge that forwards the resolved Dora identity into the agent
+	// httpapi's Principal context; every other path falls through to the
+	// strategy handler chain.
+	// CORS: the host-wide cors.New is wrapped around the strategy handler
+	// chain above, but agentMount dispatches /v1/agent/* to a separate
+	// subtree that never sees those CORS headers. Without an OPTIONS
+	// preflight response the browser blocks every credentialed POST
+	// (provider-config, sessions, messages, etc.) with a generic
+	// "Failed to fetch" — even when the request would otherwise be
+	// allowed. Wrap the agent subtree with the same CORS middleware
+	// (when configured) so OPTIONS preflights return 204 with the
+	// right Allow-* headers before requireAuth rejects them.
+	agentHandler := strategyhttp.RequireAuth(agentPrincipalBridge(agentRuntime))
+	if *corsAllowedOrigins != "" {
+		agentHandler = cors.New(*corsAllowedOrigins)(agentHandler)
+	}
+	wrappedHandler = agentMount{
+		fallback: wrappedHandler,
+		agent:    agentHandler,
 	}
 
 	server := &http.Server{
@@ -499,4 +539,62 @@ func envOrFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	return f
+}
+
+// agentPrincipalBridge forwards the host-authenticated caller into the
+// agent httpapi's identity model. It runs inside the strategyhttp
+// .RequireAuth wrapper, so by the time it executes the request context
+// already carries the verified Dora user ID and the parsed credentials.
+// The bridge reads both and re-injects them via the agent httpapi's
+// WithPrincipal / PrincipalMiddleware — the same identity-injection path
+// the httpapi tests use — so the agent handlers see a Principal without
+// the agent package performing any authentication of its own.
+func agentPrincipalBridge(rt *agentwiring.Runtime) http.Handler {
+	inner := rt.Server.RoutesAt("/v1/agent")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := strategyhttp.DoraUserIDFromContext(r.Context())
+		if !ok {
+			http.Error(w, "unauthorised", http.StatusUnauthorized)
+			return
+		}
+		info, _ := authctx.AuthInfoFromContext(r.Context())
+		// Ensure the local user mirror exists before any per-user
+		// handler runs. The host's requireAuth resolved userID but
+		// never inserted into agent.users — every downstream table
+		// (provider_configs, sessions, strategies, etc.) FKs that
+		// row, so the first authenticated write fails with a
+		// constraint violation unless we upsert here. Mirrors the
+		// original dora-agent AuthMiddleware's Ensure step.
+		if err := rt.EnsurePrincipal(r.Context(), userID, info.TenantID); err != nil {
+			slog.Error("agent ensure principal failed", "user_id", userID, "error", err)
+			http.Error(w, "auth service unavailable", http.StatusBadGateway)
+			return
+		}
+		// Persist the sealed Dora API key for live-deployment crash
+		// recovery. Warn-only on failure — the request still works,
+		// only the recovery path degrades.
+		if err := rt.StorePrincipalKey(r.Context(), userID, info.APIKey); err != nil {
+			slog.Warn("agent store principal key failed", "user_id", userID, "error", err)
+		}
+		principal := agenthttpapi.Principal{UserID: userID, TenantID: info.TenantID}
+		agenthttpapi.PrincipalMiddleware(principal, info.APIKey)(inner).ServeHTTP(w, r)
+	})
+}
+
+// agentMount dispatches /v1/agent/* to the agent runtime's handler chain
+// (requireAuth + principal bridge + RoutesAt("/v1/agent")) and every other
+// path to the strategy handler chain. A plain prefix dispatch, no response
+// recorder: the agent handlers need http.Flusher for SSE and http.Hijacker
+// is not used on this subtree.
+type agentMount struct {
+	fallback http.Handler
+	agent    http.Handler
+}
+
+func (m agentMount) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/v1/agent/") {
+		m.agent.ServeHTTP(w, r)
+		return
+	}
+	m.fallback.ServeHTTP(w, r)
 }
