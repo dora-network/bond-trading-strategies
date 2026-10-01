@@ -2,6 +2,7 @@ package candles_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -150,4 +151,171 @@ func TestPGStore_LoadCandles(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.True(t, got[0].StartTimestamp.Equal(ts2))
+}
+
+func TestLoadCandlesBucketedRejectsUnknownResolution(t *testing.T) {
+	s := candles.NewPGStore(nil)
+	_, err := s.LoadCandlesBucketed(t.Context(), "ob", "7h", time.Time{}, time.Time{})
+	require.ErrorContains(t, err, "unknown resolution")
+}
+
+func TestLoadCandlesBucketed1mPassThrough(t *testing.T) {
+	pool := openTestPool(t)
+	store := candles.NewPGStore(pool)
+	ctx := context.Background()
+
+	obID := uuid.NewString()
+	ts1 := time.Date(2026, 4, 10, 15, 30, 0, 0, time.UTC)
+	ts2 := ts1.Add(time.Minute)
+	cleanup := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM candles_history WHERE order_book_id = $1`, obID)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	require.NoError(t, store.SaveCandles(ctx, []candles.StreamCandlesEntry{
+		{Time: ts1, Val: candles.Candle{OrderBookID: obID, StartTimestamp: ts1,
+			Open: decimal.MustParse("100.00"), High: decimal.MustParse("105.00"),
+			Low: decimal.MustParse("95.00"), Close: decimal.MustParse("102.50"),
+			Volume:  decimal.MustParse("1000"),
+			OpenYTM: decimal.MustParse("4.20"), HighYTM: decimal.MustParse("4.30"),
+			LowYTM: decimal.MustParse("4.10"), CloseYTM: decimal.MustParse("4.25")}},
+		{Time: ts2, Val: candles.Candle{OrderBookID: obID, StartTimestamp: ts2,
+			Open: decimal.MustParse("102.50"), High: decimal.MustParse("106.00"),
+			Low: decimal.MustParse("102.00"), Close: decimal.MustParse("104.75"),
+			Volume:  decimal.MustParse("1500"),
+			OpenYTM: decimal.MustParse("4.25"), HighYTM: decimal.MustParse("4.35"),
+			LowYTM: decimal.MustParse("4.20"), CloseYTM: decimal.MustParse("4.30")}},
+	}))
+
+	got, err := store.LoadCandlesBucketed(ctx, obID, "1m", ts1, ts2.Add(time.Second))
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.True(t, got[0].StartTimestamp.Equal(ts1))
+	assert.True(t, got[0].Open.Equal(decimal.MustParse("100.00")))
+	assert.True(t, got[1].StartTimestamp.Equal(ts2))
+	assert.True(t, got[1].CloseYTM.Equal(decimal.MustParse("4.30")))
+}
+
+// TestLoadCandlesBucketed5mFolds exercises the copied bucketing SQL: three
+// 1m candles inside one 5m bucket must fold to one bar (open of first,
+// close of last, summed volume) plus a forward-filled empty next bucket.
+func TestLoadCandlesBucketed5mFolds(t *testing.T) {
+	pool := openTestPool(t)
+	store := candles.NewPGStore(pool)
+	ctx := context.Background()
+
+	obID := uuid.NewString()
+	bucket := time.Date(2026, 4, 10, 15, 30, 0, 0, time.UTC)
+	cleanup := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM candles_history WHERE order_book_id = $1`, obID)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	var entries []candles.StreamCandlesEntry
+	for i := range 3 {
+		ts := bucket.Add(time.Duration(i) * time.Minute)
+		entries = append(entries, candles.StreamCandlesEntry{Time: ts, Val: candles.Candle{
+			OrderBookID: obID, StartTimestamp: ts,
+			Open:    decimal.MustParse(fmt.Sprintf("%d.00", 100+i)),
+			High:    decimal.MustParse(fmt.Sprintf("%d.00", 110+i)),
+			Low:     decimal.MustParse(fmt.Sprintf("%d.00", 90+i)),
+			Close:   decimal.MustParse(fmt.Sprintf("%d.50", 100+i)),
+			Volume:  decimal.MustParse("100"),
+			OpenYTM: decimal.MustParse(fmt.Sprintf("4.%d0", i)),
+			HighYTM: decimal.MustParse("4.90"), LowYTM: decimal.MustParse("4.10"),
+			CloseYTM: decimal.MustParse("4.50"),
+		}})
+	}
+	require.NoError(t, store.SaveCandles(ctx, entries))
+
+	got, err := store.LoadCandlesBucketed(ctx, obID, "5m", bucket, bucket.Add(10*time.Minute))
+	require.NoError(t, err)
+	require.Len(t, got, 2) // 2 buckets in [15:30, 15:40): one folded, one forward-filled
+	assert.True(t, got[0].StartTimestamp.Equal(bucket))
+	assert.True(t, got[0].Open.Equal(decimal.MustParse("100.00")))
+	assert.True(t, got[0].Close.Equal(decimal.MustParse("102.50")))
+	assert.True(t, got[0].High.Equal(decimal.MustParse("112.00")))
+	assert.True(t, got[0].Low.Equal(decimal.MustParse("90.00")))
+	assert.True(t, got[0].Volume.Equal(decimal.MustParse("300")))
+	assert.True(t, got[0].OpenYTM.Equal(decimal.MustParse("4.00")))
+	// Empty second bucket: forward-filled OHLC, volume zero.
+	assert.True(t, got[1].StartTimestamp.Equal(bucket.Add(5*time.Minute)))
+	assert.True(t, got[1].Open.Equal(got[0].Open))
+	assert.True(t, got[1].Volume.Equal(decimal.MustParse("0")))
+}
+
+func TestLoadCandlesBucketedPaginates(t *testing.T) {
+	pool := openTestPool(t)
+	store := candles.NewPGStore(pool)
+	ctx := context.Background()
+
+	obID := uuid.NewString()
+	ts1 := time.Date(2026, 4, 10, 15, 30, 0, 0, time.UTC)
+	cleanup := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM candles_history WHERE order_book_id = $1`, obID)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	var entries []candles.StreamCandlesEntry
+	for i := range 5 {
+		ts := ts1.Add(time.Duration(i) * time.Minute)
+		entries = append(entries, candles.StreamCandlesEntry{Time: ts, Val: candles.Candle{
+			OrderBookID: obID, StartTimestamp: ts,
+			Open: decimal.MustParse("100.00"), High: decimal.MustParse("101.00"),
+			Low: decimal.MustParse("99.00"), Close: decimal.MustParse("100.50"),
+			Volume:  decimal.MustParse("10"),
+			OpenYTM: decimal.MustParse("4.20"), HighYTM: decimal.MustParse("4.30"),
+			LowYTM: decimal.MustParse("4.10"), CloseYTM: decimal.MustParse("4.25"),
+		}})
+	}
+	require.NoError(t, store.SaveCandles(ctx, entries))
+
+	prev := *candles.MaxCandleRowsForTest
+	*candles.MaxCandleRowsForTest = 2
+	t.Cleanup(func() { *candles.MaxCandleRowsForTest = prev })
+
+	got, err := store.LoadCandlesBucketed(ctx, obID, "1m", ts1, ts1.Add(5*time.Minute))
+	require.NoError(t, err)
+	require.Len(t, got, 5)
+	for i := range got { // oldest-first across pages
+		assert.True(t, got[i].StartTimestamp.Equal(ts1.Add(time.Duration(i)*time.Minute)), "row %d", i)
+	}
+}
+
+func TestCandleRange(t *testing.T) {
+	pool := openTestPool(t)
+	store := candles.NewPGStore(pool)
+	ctx := context.Background()
+
+	obID := uuid.NewString()
+	ts1 := time.Date(2026, 4, 10, 15, 30, 0, 0, time.UTC)
+	ts2 := ts1.Add(3 * time.Minute)
+	cleanup := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM candles_history WHERE order_book_id = $1`, obID)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	require.NoError(t, store.SaveCandles(ctx, []candles.StreamCandlesEntry{
+		{Time: ts1, Val: candles.Candle{OrderBookID: obID, StartTimestamp: ts1,
+			Open: decimal.One, High: decimal.One, Low: decimal.One, Close: decimal.One,
+			Volume: decimal.One, OpenYTM: decimal.One, HighYTM: decimal.One,
+			LowYTM: decimal.One, CloseYTM: decimal.One}},
+		{Time: ts2, Val: candles.Candle{OrderBookID: obID, StartTimestamp: ts2,
+			Open: decimal.One, High: decimal.One, Low: decimal.One, Close: decimal.One,
+			Volume: decimal.One, OpenYTM: decimal.One, HighYTM: decimal.One,
+			LowYTM: decimal.One, CloseYTM: decimal.One}},
+	}))
+
+	lo, hi, err := store.CandleRange(ctx, obID)
+	require.NoError(t, err)
+	require.NotNil(t, lo)
+	require.NotNil(t, hi)
+	assert.True(t, lo.Equal(ts1))
+	assert.True(t, hi.Equal(ts2))
+
+	// No rows for an unknown book: nil, nil, no error.
+	lo, hi, err = store.CandleRange(ctx, uuid.NewString())
+	require.NoError(t, err)
+	assert.Nil(t, lo)
+	assert.Nil(t, hi)
 }

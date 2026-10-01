@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -70,7 +71,7 @@ func TestHandler_buildURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := candles.New(tt.cfg, &candlesfakes.FakeCandleStore{})
+			h := mustNew(t, tt.cfg, &candlesfakes.FakeCandleStore{})
 			u, err := h.BuildURL(tt.orderBookID, tt.since)
 
 			if tt.wantErr {
@@ -86,11 +87,42 @@ func TestHandler_buildURL(t *testing.T) {
 func TestHandler_safeURLRedactsAPIKey(t *testing.T) {
 	t.Parallel()
 
-	h := candles.New(candles.Config{}, &candlesfakes.FakeCandleStore{})
+	h := mustNew(t, candles.Config{}, &candlesfakes.FakeCandleStore{})
 	got := h.SafeURL("wss://example.com/v1/charts/book-123/candle/stream?api_key=secret123&resolution=1m")
 
 	assert.Equal(t, "wss://example.com/v1/charts/book-123/candle/stream?api_key=%2A%2A%2A&resolution=1m", got)
 	assert.NotContains(t, got, "secret123")
+}
+
+func mustNew(t *testing.T, cfg candles.Config, store candles.CandleStore) *candles.Handler {
+	t.Helper()
+	h, err := candles.New(cfg, store)
+	require.NoError(t, err)
+	return h
+}
+
+func TestBuildURLUsesConfiguredResolution(t *testing.T) {
+	t.Parallel()
+	h := mustNew(t, candles.Config{BaseURL: "wss://x", APIKey: "k", Resolution: "5m"}, &candlesfakes.FakeCandleStore{})
+	raw, err := h.BuildURL("ob-1", nil)
+	require.NoError(t, err)
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+	require.Equal(t, "5m", u.Query().Get("resolution"))
+}
+
+func TestNewDefaultsResolutionTo1m(t *testing.T) {
+	t.Parallel()
+	h := mustNew(t, candles.Config{BaseURL: "wss://x"}, &candlesfakes.FakeCandleStore{})
+	assert.Equal(t, candles.Resolution1m, h.Cfg().Resolution)
+}
+
+func TestNewRejectsInvalidResolution(t *testing.T) {
+	t.Parallel()
+	for _, res := range []candles.Resolution{"7h", "7d"} {
+		_, err := candles.New(candles.Config{BaseURL: "wss://x", Resolution: res}, nil)
+		require.ErrorContains(t, err, "invalid resolution")
+	}
 }
 
 func TestHandler_processMessage(t *testing.T) {
@@ -105,7 +137,7 @@ func TestHandler_processMessage(t *testing.T) {
 				return nil
 			},
 		}
-		h := candles.New(candles.Config{}, fakeStore)
+		h := mustNew(t, candles.Config{}, fakeStore)
 		requestID := uuid.Must(uuid.NewV7())
 		subCh, err := h.Subscribe(requestID)
 		require.NoError(t, err)
@@ -169,7 +201,7 @@ func TestHandler_processMessage(t *testing.T) {
 				return nil
 			},
 		}
-		h := candles.New(candles.Config{}, fakeStore)
+		h := mustNew(t, candles.Config{}, fakeStore)
 		requestID := uuid.Must(uuid.NewV7())
 		subCh, err := h.Subscribe(requestID)
 		require.NoError(t, err)
@@ -222,7 +254,7 @@ func TestHandler_processMessage(t *testing.T) {
 
 	t.Run("empty list", func(t *testing.T) {
 		fakeStore := &candlesfakes.FakeCandleStore{}
-		h := candles.New(candles.Config{}, fakeStore)
+		h := mustNew(t, candles.Config{}, fakeStore)
 
 		payload := []byte(`[]`)
 		err := h.ProcessMessage(context.Background(), "book-123", payload)
@@ -232,7 +264,7 @@ func TestHandler_processMessage(t *testing.T) {
 
 	t.Run("invalid json", func(t *testing.T) {
 		fakeStore := &candlesfakes.FakeCandleStore{}
-		h := candles.New(candles.Config{}, fakeStore)
+		h := mustNew(t, candles.Config{}, fakeStore)
 
 		payload := []byte(`{ not valid json }`)
 		err := h.ProcessMessage(context.Background(), "book-123", payload)
@@ -242,7 +274,7 @@ func TestHandler_processMessage(t *testing.T) {
 
 	t.Run("subscribes and unsubscribes", func(t *testing.T) {
 		fakeStore := &candlesfakes.FakeCandleStore{}
-		h := candles.New(candles.Config{}, fakeStore)
+		h := mustNew(t, candles.Config{}, fakeStore)
 		requestID := uuid.Must(uuid.NewV7())
 
 		ch, err := h.Subscribe(requestID)
@@ -271,7 +303,7 @@ func TestHandler_processMessage(t *testing.T) {
 				return assert.AnError
 			},
 		}
-		h := candles.New(candles.Config{}, fakeStore)
+		h := mustNew(t, candles.Config{}, fakeStore)
 		requestID := uuid.Must(uuid.NewV7())
 		subCh, err := h.Subscribe(requestID)
 		require.NoError(t, err)
@@ -341,7 +373,7 @@ func TestHandler_StreamSingle(t *testing.T) {
 
 		wsURL := strings.Replace(srv.URL, "http://", "ws://", 1)
 
-		h := candles.New(candles.Config{BaseURL: wsURL}, fakeStore)
+		h := mustNew(t, candles.Config{BaseURL: wsURL}, fakeStore)
 
 		// Mirror the daemon: a single subscriber drains the fan-out
 		// into SaveCandles. Register, then run the consumer in a
@@ -387,7 +419,7 @@ func TestHandler_StreamSingle(t *testing.T) {
 		fakeStore := &candlesfakes.FakeCandleStore{}
 		fakeStore.GetLastTimestampReturns(nil, assert.AnError)
 
-		h := candles.New(candles.Config{BaseURL: "wss://example.com"}, fakeStore)
+		h := mustNew(t, candles.Config{BaseURL: "wss://example.com"}, fakeStore)
 
 		err := h.StreamSingle(context.Background(), "book-123")
 		require.ErrorIs(t, err, assert.AnError)
@@ -399,13 +431,13 @@ func TestHandler_Stream(t *testing.T) {
 	t.Parallel()
 
 	t.Run("missing store", func(t *testing.T) {
-		h := candles.New(candles.Config{}, nil)
+		h := mustNew(t, candles.Config{}, nil)
 		err := h.Stream(context.Background())
 		require.ErrorContains(t, err, "missing candle store")
 	})
 
 	t.Run("missing order books", func(t *testing.T) {
-		h := candles.New(candles.Config{}, &candlesfakes.FakeCandleStore{})
+		h := mustNew(t, candles.Config{}, &candlesfakes.FakeCandleStore{})
 		err := h.Stream(context.Background())
 		require.ErrorContains(t, err, "no order books configured")
 	})
@@ -414,7 +446,7 @@ func TestHandler_Stream(t *testing.T) {
 		fakeStore := &candlesfakes.FakeCandleStore{}
 		fakeStore.GetLastTimestampReturns(nil, assert.AnError)
 
-		h := candles.New(candles.Config{
+		h := mustNew(t, candles.Config{
 			OrderBookIDs: []string{"book-1", "book-2"},
 		}, fakeStore)
 
@@ -436,7 +468,7 @@ func TestStoreSubscriber_Start(t *testing.T) {
 				return nil
 			},
 		}
-		h := candles.New(candles.Config{}, fakeStore)
+		h := mustNew(t, candles.Config{}, fakeStore)
 		s := candles.NewStoreSubscriber(fakeStore, h.Subscribe)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

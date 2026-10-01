@@ -2,15 +2,21 @@ package breakout_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
+	"github.com/dora-network/bond-trading-strategies/strategy/breakout/breakoutfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
+	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 )
 
@@ -34,14 +40,14 @@ func TestBacktest_SingleBreakoutTrade(t *testing.T) {
 	//   10 rising ticks 110→120 → hold the long; no opposite signal
 	const flatAt100 = 30
 	const risingTail = 10
-	obs := make([]types.YieldObservation, 0, flatAt100+1+risingTail)
+	obs := make([]types.Bar, 0, flatAt100+1+risingTail)
 	for i := range flatAt100 {
-		obs = append(obs, flatObs(i, 100))
+		obs = append(obs, flatBar(i, 100))
 	}
-	obs = append(obs, flatObs(flatAt100, 110))
+	obs = append(obs, flatBar(flatAt100, 110))
 	for i := range risingTail {
 		// 110, 111, 112, ..., 119
-		obs = append(obs, flatObs(flatAt100+1+i, 110+int64(i)+1))
+		obs = append(obs, flatBar(flatAt100+1+i, 110+int64(i)+1))
 	}
 
 	bt := breakout.NewBacktester(s, nil)
@@ -88,24 +94,24 @@ func TestBacktest_ForceCloseCarriesEntryArmedRatio(t *testing.T) {
 	// each tick, so the second confirmation close must clear the
 	// raised trigger; 155 > 140+1.5·ATR fires the BUY. 8 rising ticks
 	// — hold, force-close at end of history.
-	obs := make([]types.YieldObservation, 0, 26+6+2+8)
+	obs := make([]types.Bar, 0, 26+6+2+8)
 	for i := range 26 {
 		price := int64(100)
 		if i%2 == 1 {
 			price = 110
 		}
-		obs = append(obs, flatObs(i, price))
+		obs = append(obs, flatBar(i, price))
 	}
 	for i := range 6 {
 		price := int64(110)
 		if i%2 == 0 {
 			price = 109
 		}
-		obs = append(obs, flatObs(26+i, price))
+		obs = append(obs, flatBar(26+i, price))
 	}
-	obs = append(obs, flatObs(32, 140), flatObs(33, 155))
+	obs = append(obs, flatBar(32, 140), flatBar(33, 155))
 	for i := range 8 {
-		obs = append(obs, flatObs(34+i, 156+int64(i)))
+		obs = append(obs, flatBar(34+i, 156+int64(i)))
 	}
 
 	bt := breakout.NewBacktester(s, nil)
@@ -144,9 +150,9 @@ func TestBacktest_NoTradesOnFlatSeries(t *testing.T) {
 	cfg := defaultCfg()
 	s := breakout.New(cfg, nil)
 
-	obs := make([]types.YieldObservation, cfg.LongVolWindow+5)
+	obs := make([]types.Bar, cfg.LongVolWindow+5)
 	for i := range obs {
-		obs[i] = flatObs(i, 100)
+		obs[i] = flatBar(i, 100)
 	}
 
 	bt := breakout.NewBacktester(s, nil)
@@ -171,15 +177,15 @@ func TestBacktest_ReversalClosesOpenPosition(t *testing.T) {
 	// 30 flat at 100, 1 jump up at 110 (BUY), 30 flat at 110 (re-arm),
 	// 1 jump down at 90 (SELL → reversal close).
 	const flatTail = 30
-	obs := make([]types.YieldObservation, 0, cfg.LongVolWindow+1+flatTail+1)
-	for i := 0; i < cfg.LongVolWindow; i++ {
-		obs = append(obs, flatObs(i, 100))
+	obs := make([]types.Bar, 0, cfg.LongVolWindow+1+flatTail+1)
+	for i := range cfg.LongVolWindow {
+		obs = append(obs, flatBar(i, 100))
 	}
-	obs = append(obs, flatObs(cfg.LongVolWindow, 110)) // BUY
+	obs = append(obs, flatBar(cfg.LongVolWindow, 110)) // BUY
 	for i := range flatTail {
-		obs = append(obs, flatObs(cfg.LongVolWindow+1+i, 110))
+		obs = append(obs, flatBar(cfg.LongVolWindow+1+i, 110))
 	}
-	obs = append(obs, flatObs(cfg.LongVolWindow+1+flatTail, 90)) // SELL
+	obs = append(obs, flatBar(cfg.LongVolWindow+1+flatTail, 90)) // SELL
 
 	bt := breakout.NewBacktester(s, nil)
 	res, err := bt.Run(context.Background(), obs)
@@ -216,12 +222,12 @@ func TestBacktest_StopLossClosesAgainstMove(t *testing.T) {
 
 	// 30 flat at 100, 1 jump to 110 (BUY), 1 drop to 95 (well below SL).
 	dropTick := cfg.LongVolWindow + 1
-	obs := make([]types.YieldObservation, 0, dropTick+1)
-	for i := 0; i < cfg.LongVolWindow; i++ {
-		obs = append(obs, flatObs(i, 100))
+	obs := make([]types.Bar, 0, dropTick+1)
+	for i := range cfg.LongVolWindow {
+		obs = append(obs, flatBar(i, 100))
 	}
-	obs = append(obs, flatObs(cfg.LongVolWindow, 110)) // BUY
-	obs = append(obs, flatObs(dropTick, 95))           // SL should fire here
+	obs = append(obs, flatBar(cfg.LongVolWindow, 110)) // BUY
+	obs = append(obs, flatBar(dropTick, 95))           // SL should fire here
 
 	bt := breakout.NewBacktester(s, nil)
 	res, err := bt.Run(context.Background(), obs)
@@ -250,12 +256,12 @@ func TestBacktest_TakeProfitClosesFavourableMove(t *testing.T) {
 
 	// 30 flat at 100, 1 jump to 110 (BUY), 1 rise to 115 (above TP).
 	riseTick := cfg.LongVolWindow + 1
-	obs := make([]types.YieldObservation, 0, riseTick+1)
-	for i := 0; i < cfg.LongVolWindow; i++ {
-		obs = append(obs, flatObs(i, 100))
+	obs := make([]types.Bar, 0, riseTick+1)
+	for i := range cfg.LongVolWindow {
+		obs = append(obs, flatBar(i, 100))
 	}
-	obs = append(obs, flatObs(cfg.LongVolWindow, 110)) // BUY
-	obs = append(obs, flatObs(riseTick, 115))          // TP should fire here
+	obs = append(obs, flatBar(cfg.LongVolWindow, 110)) // BUY
+	obs = append(obs, flatBar(riseTick, 115))          // TP should fire here
 
 	bt := breakout.NewBacktester(s, nil)
 	res, err := bt.Run(context.Background(), obs)
@@ -287,12 +293,12 @@ func TestBacktest_SLPriorityOverReversal(t *testing.T) {
 	// would also qualify as the start of a SELL reversal since ShortVol
 	// is now greater than LongVol from the long drop).
 	tick := cfg.LongVolWindow + 1
-	obs := make([]types.YieldObservation, 0, tick+1)
-	for i := 0; i < cfg.LongVolWindow; i++ {
-		obs = append(obs, flatObs(i, 100))
+	obs := make([]types.Bar, 0, tick+1)
+	for i := range cfg.LongVolWindow {
+		obs = append(obs, flatBar(i, 100))
 	}
-	obs = append(obs, flatObs(cfg.LongVolWindow, 110)) // BUY
-	obs = append(obs, flatObs(tick, 90))               // both SL and reversal would close
+	obs = append(obs, flatBar(cfg.LongVolWindow, 110)) // BUY
+	obs = append(obs, flatBar(tick, 90))               // both SL and reversal would close
 
 	bt := breakout.NewBacktester(s, nil)
 	res, err := bt.Run(context.Background(), obs)
@@ -302,6 +308,119 @@ func TestBacktest_SLPriorityOverReversal(t *testing.T) {
 	ct := res.ClosedTrades[0]
 	assert.Equal(t, breakout.ExitReasonStopLoss, ct.ExitReason,
 		"SL has priority over reversal when both would fire on the same tick")
+}
+
+// wickBar builds a bar whose close stays inside the bands while one
+// extreme (low or high) pierces a band, so only the bar-extreme exit
+// path can fire.
+func wickBar(minute int, open, high, low, close int64) types.Bar {
+	return types.Bar{
+		Time:  epoch.Add(time.Duration(minute) * time.Minute),
+		Open:  decimal.MustNew(open, 0),
+		High:  decimal.MustNew(high, 0),
+		Low:   decimal.MustNew(low, 0),
+		Close: decimal.MustNew(close, 0),
+	}
+}
+
+func ptrYTM() *decimal.Decimal {
+	v := decimal.MustNew(5, 2)
+	return &v
+}
+
+// TestBacktest_StopLossFiresAtBarLowNotClose: long entered at 110 on a
+// flat-then-jump series (entry ATR ≈ 0.71). The next bar closes at 102
+// (above the stop band ≈ 99.3) but its Low=95 pierces the band — the
+// exit must record stop_loss via the adverse extreme, not a close-based
+// outcome.
+func TestBacktest_StopLossFiresAtBarLowNotClose(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.StopLossATR = decimal.MustNew(15, 0) // stop = 110 − 15×ATR(≈0.71) ≈ 99.3
+	cfg.TakeProfitATR = decimal.Zero
+	s := breakout.New(cfg, nil)
+
+	obs := make([]types.Bar, 0, cfg.LongVolWindow+2)
+	for i := range cfg.LongVolWindow {
+		obs = append(obs, flatBar(i, 100))
+	}
+	obs = append(obs, flatBar(cfg.LongVolWindow, 110)) // BUY entry
+	obs = append(obs, wickBar(cfg.LongVolWindow+1, 103, 103, 95, 102))
+
+	bt := breakout.NewBacktester(s, nil)
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+	require.Len(t, res.ClosedTrades, 1, "wick bar must close the position")
+	ct := res.ClosedTrades[0]
+	assert.Equal(t, breakout.ExitReasonStopLoss, ct.ExitReason,
+		"Low=95 < stop ≈ 99.3 must fire stop_loss even though Close=102 is inside the band")
+}
+
+// Tick-faithful replay: with ticks covering the bar window, the intrabar
+// stop fires on the first crossing TICK's price and timestamp, not via
+// the extreme approximation. Mirrors the live run loop, where ticks
+// between two bar closes drive liveCheckSLTP.
+func TestBacktest_TickReplayExitsAtTickPrice(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.StopLossATR = decimal.MustNew(15, 0) // stop ≈ 110 − 15×ATR(≈0.71) ≈ 99.3
+	cfg.TakeProfitATR = decimal.Zero
+	s := breakout.New(cfg, nil)
+
+	obs := make([]types.Bar, 0, cfg.LongVolWindow+2)
+	for i := range cfg.LongVolWindow {
+		obs = append(obs, flatBar(i, 100))
+	}
+	obs = append(obs, flatBar(cfg.LongVolWindow, 110)) // BUY entry
+	// No adverse wick: close 102 stays inside the band; only a tick can fire.
+	obs = append(obs, wickBar(cfg.LongVolWindow+1, 103, 103, 102, 102))
+
+	tickTime := epoch.Add(time.Duration(cfg.LongVolWindow+1)*time.Minute + 30*time.Second)
+	bt := breakout.NewBacktester(s, nil)
+	breakout.SetBacktestTicks(bt, []prices.AssetPrice{
+		{AssetID: "asset", Price: decimal.MustNew(95, 0), YTM: ptrYTM(), Time: tickTime},
+	})
+
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+	require.Len(t, res.ClosedTrades, 1, "crossing tick must close the position")
+	ct := res.ClosedTrades[0]
+	assert.Equal(t, breakout.ExitReasonStopLoss, ct.ExitReason)
+	assert.True(t, ct.ExitPrice.Equal(decimal.MustNew(95, 0)),
+		"exit fills at the tick price 95, got %s", ct.ExitPrice)
+	assert.True(t, ct.CloseTime.Equal(tickTime), "exit is timestamped at the tick, not the bar close")
+}
+
+// TestBacktest_TakeProfitFiresAtBarLowNotClose: short entered at 90,
+// take-profit band ≈ 90 − 15×ATR(≈0.71) ≈ 79.3 (a short profits
+// downward, so its favorable extreme is the Low). The next bar closes
+// at 98 (inside the band) but its Low=75 pierces it — the exit must
+// record take_profit via the favorable extreme.
+func TestBacktest_TakeProfitFiresAtBarLowNotClose(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.StopLossATR = decimal.Zero
+	cfg.TakeProfitATR = decimal.MustNew(15, 0) // TP = 90 − 15×ATR(≈0.71) ≈ 79.3
+	s := breakout.New(cfg, nil)
+
+	obs := make([]types.Bar, 0, cfg.LongVolWindow+2)
+	for i := range cfg.LongVolWindow {
+		obs = append(obs, flatBar(i, 100))
+	}
+	obs = append(obs, flatBar(cfg.LongVolWindow, 90)) // SELL entry
+	obs = append(obs, wickBar(cfg.LongVolWindow+1, 97, 99, 75, 98))
+
+	bt := breakout.NewBacktester(s, nil)
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+	require.Len(t, res.ClosedTrades, 1, "wick bar must close the position")
+	ct := res.ClosedTrades[0]
+	assert.Equal(t, types.SignalSell, ct.Signal, "short entry from the drop bar")
+	assert.Equal(t, breakout.ExitReasonTakeProfit, ct.ExitReason,
+		"Low=75 < TP ≈ 79.3 must fire take_profit even though Close=98 is inside the band")
 }
 
 // recordingWriter is a minimal in-memory stats.BacktestTradeWriter used to
@@ -344,13 +463,13 @@ func TestBacktest_PersistsTradesAndClosedTrades(t *testing.T) {
 
 	const flatAt100 = 30
 	const risingTail = 10
-	obs := make([]types.YieldObservation, 0, flatAt100+risingTail)
+	obs := make([]types.Bar, 0, flatAt100+risingTail)
 	for i := range flatAt100 {
-		obs = append(obs, flatObs(i, 100))
+		obs = append(obs, flatBar(i, 100))
 	}
-	obs = append(obs, flatObs(flatAt100, 110)) // BUY
+	obs = append(obs, flatBar(flatAt100, 110)) // BUY
 	for i := range risingTail {
-		obs = append(obs, flatObs(flatAt100+1+i, 110+int64(i)))
+		obs = append(obs, flatBar(flatAt100+1+i, 110+int64(i)))
 	}
 
 	w := &recordingWriter{}
@@ -380,4 +499,55 @@ func TestBacktest_PersistsTradesAndClosedTrades(t *testing.T) {
 	assert.True(t, w.trades[0].PositionSize.Equal(expectedQty),
 		"position_size should equal the computed bond quantity (%s), got %s",
 		expectedQty, w.trades[0].PositionSize)
+}
+
+// Regression (identity bug): Decision.BondID must be the order book's
+// BASE ASSET UUID — a different ID from the order book — carried from
+// the strategy onto every trade record.
+func TestBacktest_BondIDIsBaseAssetNotOrderBook(t *testing.T) {
+	t.Parallel()
+	const assetID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.OrderBookID = uuid.Must(uuid.NewV7())
+	s := breakout.New(cfg, nil)
+	breakout.SetBaseAssetID(s, assetID)
+
+	const flatAt100 = 30
+	const risingTail = 10
+	obs := make([]types.Bar, 0, flatAt100+1+risingTail)
+	for i := range flatAt100 {
+		obs = append(obs, flatBar(i, 100))
+	}
+	obs = append(obs, flatBar(flatAt100, 110))
+	for i := range risingTail {
+		obs = append(obs, flatBar(flatAt100+1+i, 110+int64(i)+1))
+	}
+
+	res, err := breakout.NewBacktester(s, nil).Run(context.Background(), obs)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.ClosedTrades, "breakout series must close at least one trade")
+	for _, ct := range res.ClosedTrades {
+		assert.Equal(t, assetID, ct.BondID,
+			"BondID must be the resolved base asset, not the order book")
+		assert.NotEqual(t, cfg.OrderBookID.String(), ct.BondID)
+	}
+}
+
+// Backtest fails fast with a wrapped error when the order book's base
+// asset cannot be resolved.
+func TestBacktest_RequiresBaseAssetLookup(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.OrderBookID = uuid.Must(uuid.NewV7())
+	end := time.Now().UTC().Add(-24 * time.Hour)
+	client := &strategyfakes.FakeMarketAPIClient{}
+	client.BaseAssetIDReturns("", errors.New("dora down"))
+	store := &breakoutfakes.FakeCandleHistoryStore{}
+	lo := end.Add(-72 * time.Hour)
+	store.CandleRangeReturns(&lo, &end, nil)
+	s := breakout.New(cfg, nil, breakout.WithMarketAPIClient(client), breakout.WithCandleHistoryStore(store))
+
+	_, err := s.Backtest(context.Background(), end.Add(-24*time.Hour), end)
+	require.ErrorContains(t, err, "backtest requires the order book's base asset")
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/copytrading"
 	strategyhttp "github.com/dora-network/bond-trading-strategies/strategy/http"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
+	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion/meanreversionfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
@@ -166,7 +167,7 @@ func TestHandlerListsStrategies(t *testing.T) {
 	breakout, ok := byType["breakout"]
 	require.True(t, ok, "breakout should be in the strategies list")
 	assert.Equal(t, "available", breakout.Status)
-	require.Len(t, breakout.ConfigFields, 14)
+	require.Len(t, breakout.ConfigFields, 15)
 	assert.Equal(t, "short_vol_window", breakout.ConfigFields[0].Name)
 	assert.Equal(t, "long_vol_window", breakout.ConfigFields[1].Name)
 	assert.Equal(t, "compression_threshold", breakout.ConfigFields[2].Name)
@@ -178,9 +179,10 @@ func TestHandlerListsStrategies(t *testing.T) {
 	assert.Equal(t, "min_long_vol_floor", breakout.ConfigFields[8].Name)
 	assert.Equal(t, "obv_trend_threshold", breakout.ConfigFields[9].Name)
 	assert.Equal(t, "obv_window", breakout.ConfigFields[10].Name)
-	assert.Equal(t, "order_book_id", breakout.ConfigFields[11].Name)
-	assert.Equal(t, "initial_balance", breakout.ConfigFields[12].Name)
-	assert.Equal(t, "leverage", breakout.ConfigFields[13].Name)
+	assert.Equal(t, "resolution", breakout.ConfigFields[11].Name)
+	assert.Equal(t, "order_book_id", breakout.ConfigFields[12].Name)
+	assert.Equal(t, "initial_balance", breakout.ConfigFields[13].Name)
+	assert.Equal(t, "leverage", breakout.ConfigFields[14].Name)
 	assert.True(t, breakout.SupportsRun)
 	assert.True(t, breakout.SupportsBacktest)
 
@@ -209,13 +211,19 @@ func TestHandlerListsStrategies(t *testing.T) {
 	mr, ok := byType["mean_reversion"]
 	require.True(t, ok, "mean_reversion should be in the strategies list")
 	assert.Equal(t, "available", mr.Status)
-	require.Len(t, mr.ConfigFields, 10)
+	require.Len(t, mr.ConfigFields, 13)
 	assert.Equal(t, "lookback_window", mr.ConfigFields[0].Name)
-	assert.Equal(t, float64(20), mr.ConfigFields[0].Default)
+	assert.Equal(t, float64(24), mr.ConfigFields[0].Default)
 	assert.Equal(t, "order_book_id", mr.ConfigFields[6].Name)
 	assert.Equal(t, "tenor", mr.ConfigFields[7].Name)
 	assert.Equal(t, float64(1), mr.ConfigFields[8].Default)
 	assert.Equal(t, float64(1), mr.ConfigFields[9].Default)
+	assert.Equal(t, "resolution", mr.ConfigFields[10].Name)
+	assert.Equal(t, "1h", mr.ConfigFields[10].Default)
+	assert.Equal(t, "imbalance_window", mr.ConfigFields[11].Name)
+	assert.Equal(t, float64(100), mr.ConfigFields[11].Default)
+	assert.Equal(t, "imbalance_threshold", mr.ConfigFields[12].Name)
+	assert.Equal(t, float64(0), mr.ConfigFields[12].Default)
 	twap, ok := byType["twap"]
 	require.True(t, ok, "twap should be in the strategies list")
 	assert.Equal(t, "available", twap.Status)
@@ -245,8 +253,8 @@ func TestHandlerListsStrategies(t *testing.T) {
 	mom, ok := byType["momentum"]
 	require.True(t, ok, "momentum should be in the strategies list")
 	assert.Equal(t, "available", mom.Status)
-	require.Len(t, mom.ConfigFields, 13)
-	// Field order mirrors newMomentumDefinition (handler.go:3346-3438).
+	require.Len(t, mom.ConfigFields, 16)
+	// Field order mirrors newMomentumDefinition.
 	assert.Equal(t, "signal_source", mom.ConfigFields[0].Name)
 	assert.Equal(t, "fast_window", mom.ConfigFields[1].Name)
 	assert.Equal(t, "slow_window", mom.ConfigFields[2].Name)
@@ -263,6 +271,13 @@ func TestHandlerListsStrategies(t *testing.T) {
 	assert.Equal(t, "number", mom.ConfigFields[11].Type)
 	assert.Equal(t, "leverage", mom.ConfigFields[12].Name)
 	assert.Equal(t, "number", mom.ConfigFields[12].Type)
+	assert.Equal(t, "resolution", mom.ConfigFields[13].Name)
+	assert.Equal(t, "string", mom.ConfigFields[13].Type)
+	assert.Equal(t, "15m", mom.ConfigFields[13].Default)
+	assert.Equal(t, "volume_avg_window", mom.ConfigFields[14].Name)
+	assert.Equal(t, "integer", mom.ConfigFields[14].Type)
+	assert.Equal(t, "volume_ratio_threshold", mom.ConfigFields[15].Name)
+	assert.Equal(t, "number", mom.ConfigFields[15].Type)
 	assert.True(t, mom.SupportsRun)
 	assert.True(t, mom.SupportsBacktest)
 }
@@ -466,7 +481,7 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 
 	var accepted strategyhttp.BacktestDetail
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
-	assert.JSONEq(t, `{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`, string(accepted.Config))
+	assert.JSONEq(t, `{"lookback_window":20,"resolution":"1h","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"imbalance_window":100,"imbalance_threshold":0}`, string(accepted.Config))
 	assert.Equal(t, "user-test-1", accepted.DORAUserID)
 	backtestID := accepted.ID
 
@@ -509,6 +524,139 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 		}
 		return summary.Status == "completed"
 	}, time.Second, 10*time.Millisecond)
+}
+
+// TestHandlerMomentumBacktestCandleCoverageError mirrors the
+// mean-reversion case: a momentum backtest whose candle window has no
+// coverage must fail with 400 before RunBacktest is launched.
+func TestHandlerMomentumBacktestCandleCoverageError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	resultCh := make(chan types.BacktestResult, 1)
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(context.Context, uuid.UUID, strategycore.Strategy, time.Time, time.Time) (<-chan types.BacktestResult, error) {
+			return resultCh, nil
+		},
+	}
+	store := &meanreversionfakes.FakeCandleHistoryStore{}
+	store.CandleRangeReturns(nil, nil, nil)
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithNow(func() time.Time { return now }),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
+			},
+		}),
+		strategyhttp.WithTradesHistoryStore(nil),
+		strategyhttp.WithMomentumCandleStore(store),
+	)
+
+	body := map[string]any{
+		"strategy_type": "momentum",
+		"config": map[string]any{
+			"order_book_id":   uuid.Must(uuid.NewV7()).String(),
+			"initial_balance": 1000,
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	}
+
+	rec := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "coverage")
+	assert.Equal(t, 0, svc.RunBacktestCallCount(), "backtest must not launch on a coverage error")
+}
+
+// TestHandlerBreakoutBacktestCandleCoverageError mirrors the momentum
+// case: a breakout backtest whose candle window has no coverage must
+// fail with 400 before RunBacktest is launched.
+func TestHandlerBreakoutBacktestCandleCoverageError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	resultCh := make(chan types.BacktestResult, 1)
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(context.Context, uuid.UUID, strategycore.Strategy, time.Time, time.Time) (<-chan types.BacktestResult, error) {
+			return resultCh, nil
+		},
+	}
+	store := &meanreversionfakes.FakeCandleHistoryStore{}
+	store.CandleRangeReturns(nil, nil, nil)
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithNow(func() time.Time { return now }),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
+			},
+		}),
+		strategyhttp.WithTradesHistoryStore(nil),
+		strategyhttp.WithBreakoutCandleStore(store),
+	)
+
+	body := map[string]any{
+		"strategy_type": "breakout",
+		"config": map[string]any{
+			"short_vol_window": 5,
+			"long_vol_window":  10,
+			"atr_window":       5,
+			"order_book_id":    uuid.Must(uuid.NewV7()).String(),
+			"initial_balance":  1000,
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	}
+
+	rec := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "coverage")
+	assert.Equal(t, 0, svc.RunBacktestCallCount(), "backtest must not launch on a coverage error")
+}
+
+func TestHandlerCreateBacktestCandleCoverageError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	resultCh := make(chan types.BacktestResult, 1)
+	svc := &strategyfakes.FakeService{
+		RunBacktestStub: func(context.Context, uuid.UUID, strategycore.Strategy, time.Time, time.Time) (<-chan types.BacktestResult, error) {
+			return resultCh, nil
+		},
+	}
+	store := &meanreversionfakes.FakeCandleHistoryStore{}
+	store.CandleRangeReturns(nil, nil, nil)
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithNow(func() time.Time { return now }),
+		strategyhttp.WithDORAClient(doraClientFunc{
+			getUserID: func(context.Context) (string, string, error) {
+				return "user-test-1", "", nil
+			},
+		}),
+		strategyhttp.WithTradesHistoryStore(nil),
+		strategyhttp.WithMeanReversionCandleStore(store),
+	)
+
+	body := map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window":   20,
+			"entry_z_score":     2.0,
+			"exit_z_score":      0.5,
+			"stop_loss_z_score": 3.5,
+			"min_std_dev":       0.0005,
+			"max_position_size": 1.0,
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	}
+
+	rec := performJSONRequest(t, handler, "/v1/backtests", body)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "coverage")
+	assert.Equal(t, 0, svc.RunBacktestCallCount(), "backtest must not launch on a coverage error")
 }
 
 // TestHandlerMomentumBacktestCompletes pins awaitBacktestResult's
@@ -983,7 +1131,7 @@ func TestHandlerCreateAndControlRun(t *testing.T) {
 	cfg, _ := body["config"].(map[string]any)
 	orderBookID, _ := cfg["order_book_id"].(string)
 	assert.JSONEq(t, fmt.Sprintf(
-		`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"order_book_id":%q,"tenor":"10Y","initial_balance":5.5,"leverage":2}`,
+		`{"lookback_window":20,"resolution":"1h","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"order_book_id":%q,"tenor":"10Y","initial_balance":5.5,"leverage":2,"imbalance_window":100,"imbalance_threshold":0}`,
 		orderBookID,
 	), string(created.Config))
 
@@ -2013,6 +2161,94 @@ func TestHandlerMomentumValidationErrors(t *testing.T) {
 			if tt.wantContain != "" {
 				assert.Contains(t, rec.Body.String(), tt.wantContain)
 			}
+		})
+	}
+}
+
+// TestHandlerMomentumBarConfigDecode pins the bar-era momentum config
+// surface: resolution defaulting + enum, and the volume-gate pointer
+// semantics (absent → default 20 / 1.0, explicit 0 preserved, negatives
+// rejected).
+func TestHandlerMomentumBarConfigDecode(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	t.Run("defaults", func(t *testing.T) {
+		rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+			"strategy_type": "momentum",
+			"config":        map[string]any{"order_book_id": uuid.Must(uuid.NewV7()).String()},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var detail struct {
+			Config struct {
+				Resolution           string  `json:"resolution"`
+				VolumeAvgWindow      int     `json:"volume_avg_window"`
+				VolumeRatioThreshold float64 `json:"volume_ratio_threshold"`
+				FastWindow           int     `json:"fast_window"`
+				SlowWindow           int     `json:"slow_window"`
+				ATRWindow            int     `json:"atr_window"`
+			} `json:"config"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+		assert.Equal(t, "15m", detail.Config.Resolution)
+		assert.Equal(t, 20, detail.Config.VolumeAvgWindow)
+		assert.Equal(t, 1.0, detail.Config.VolumeRatioThreshold)
+		assert.Equal(t, 8, detail.Config.FastWindow)
+		assert.Equal(t, 96, detail.Config.SlowWindow)
+		assert.Equal(t, 24, detail.Config.ATRWindow)
+	})
+
+	t.Run("explicit 5m and explicit zero volume gate", func(t *testing.T) {
+		rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+			"strategy_type": "momentum",
+			"config": map[string]any{
+				"order_book_id":          uuid.Must(uuid.NewV7()).String(),
+				"resolution":             "5m",
+				"volume_avg_window":      0,
+				"volume_ratio_threshold": 0,
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var detail struct {
+			Config struct {
+				Resolution           string  `json:"resolution"`
+				VolumeAvgWindow      int     `json:"volume_avg_window"`
+				VolumeRatioThreshold float64 `json:"volume_ratio_threshold"`
+			} `json:"config"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+		assert.Equal(t, "5m", detail.Config.Resolution)
+		assert.Equal(t, 0, detail.Config.VolumeAvgWindow, "explicit 0 must disable the gate, not default to 20")
+		assert.Equal(t, 0.0, detail.Config.VolumeRatioThreshold)
+	})
+
+	invalid := []struct {
+		name   string
+		config map[string]any
+		want   string
+	}{
+		{"resolution 7h", map[string]any{"resolution": "7h"}, "config.resolution"},
+		{"resolution 7d", map[string]any{"resolution": "7d"}, "config.resolution"},
+		{"negative volume window", map[string]any{"volume_avg_window": -1}, "config.volume_avg_window must be non-negative"},
+		{"negative volume ratio", map[string]any{"volume_ratio_threshold": -0.5}, "config.volume_ratio_threshold must be non-negative"},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := map[string]any{"order_book_id": uuid.Must(uuid.NewV7()).String()}
+			for k, v := range tt.config {
+				cfg[k] = v
+			}
+			rec := performJSONRequest(t, handler, "/v1/runs", map[string]any{
+				"strategy_type": "momentum",
+				"config":        cfg,
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), tt.want)
 		})
 	}
 }
@@ -3257,4 +3493,177 @@ func TestGetRunDecisions_LastPageOmitsNextCursor(t *testing.T) {
 	assert.Empty(t, body.NextCursor)
 	assert.NotContains(t, rec.Body.String(), "next_cursor")
 	assert.Equal(t, 1, reader.calls)
+}
+
+// TestMeanReversionResolutionDecode verifies the resolution config field:
+// default applied when absent, valid values accepted, invalid rejected 400.
+func TestMeanReversionResolutionDecode(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	newHandler := func() http.Handler {
+		resultCh := make(chan types.BacktestResult, 1)
+		svc := &strategyfakes.FakeService{
+			RunBacktestStub: func(context.Context, uuid.UUID, strategycore.Strategy, time.Time, time.Time) (<-chan types.BacktestResult, error) {
+				return resultCh, nil
+			},
+		}
+		return strategyhttp.NewHandler(
+			svc,
+			strategyhttp.WithNow(func() time.Time { return now }),
+			strategyhttp.WithDORAClient(doraClientFunc{
+				getUserID: func(context.Context) (string, string, error) {
+					return "user-test-1", "", nil
+				},
+			}),
+			strategyhttp.WithTradesHistoryStore(nil),
+		)
+	}
+
+	baseCfg := func(res any) map[string]any {
+		cfg := map[string]any{
+			"lookback_window": 20,
+			"entry_z_score":   2.0,
+			"exit_z_score":    0.5,
+		}
+		if res != nil {
+			cfg["resolution"] = res
+		}
+		return cfg
+	}
+	body := func(cfg map[string]any) map[string]any {
+		return map[string]any{
+			"strategy_type": "mean_reversion",
+			"config":        cfg,
+			"start":         now.Add(-24 * time.Hour).Format(time.RFC3339),
+			"end":           now.Format(time.RFC3339),
+		}
+	}
+
+	t.Run("defaults to 1h when absent", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(nil)))
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		var accepted strategyhttp.BacktestDetail
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+		assert.JSONEq(t, `{"lookback_window":20,"resolution":"1h","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"imbalance_window":100,"imbalance_threshold":0}`, string(accepted.Config))
+	})
+
+	t.Run("accepts 5m", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg("5m")))
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		var accepted strategyhttp.BacktestDetail
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+		assert.JSONEq(t, `{"lookback_window":20,"resolution":"5m","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"imbalance_window":100,"imbalance_threshold":0}`, string(accepted.Config))
+	})
+
+	for _, bad := range []string{"7h", "7d"} {
+		t.Run("rejects "+bad, func(t *testing.T) {
+			t.Parallel()
+			rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(bad)))
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "resolution")
+		})
+	}
+}
+
+func TestMeanReversionImbalanceDecode(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	newHandler := func() http.Handler {
+		resultCh := make(chan types.BacktestResult, 1)
+		svc := &strategyfakes.FakeService{
+			RunBacktestStub: func(context.Context, uuid.UUID, strategycore.Strategy, time.Time, time.Time) (<-chan types.BacktestResult, error) {
+				return resultCh, nil
+			},
+		}
+		return strategyhttp.NewHandler(
+			svc,
+			strategyhttp.WithNow(func() time.Time { return now }),
+			strategyhttp.WithDORAClient(doraClientFunc{
+				getUserID: func(context.Context) (string, string, error) {
+					return "user-test-1", "", nil
+				},
+			}),
+			strategyhttp.WithTradesHistoryStore(nil),
+		)
+	}
+
+	body := func(cfg map[string]any) map[string]any {
+		return map[string]any{
+			"strategy_type": "mean_reversion",
+			"config":        cfg,
+			"start":         now.Add(-24 * time.Hour).Format(time.RFC3339),
+			"end":           now.Format(time.RFC3339),
+		}
+	}
+	baseCfg := func(overrides map[string]any) map[string]any {
+		return overrides
+	}
+
+	t.Run("defaults when absent", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
+			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+		})))
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		var accepted strategyhttp.BacktestDetail
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(accepted.Config, &m))
+		assert.Equal(t, float64(100), m["imbalance_window"])
+		assert.Equal(t, float64(0), m["imbalance_threshold"])
+	})
+
+	t.Run("explicit zero disables the gate", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
+			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+			"imbalance_window": 0,
+		})))
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		var accepted strategyhttp.BacktestDetail
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(accepted.Config, &m))
+		assert.Equal(t, float64(0), m["imbalance_window"],
+			"explicit 0 must disable the gate, not fall back to the default 100")
+	})
+
+	t.Run("explicit values", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
+			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+			"imbalance_window": 50, "imbalance_threshold": 12.5,
+		})))
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		var accepted strategyhttp.BacktestDetail
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(accepted.Config, &m))
+		assert.Equal(t, float64(50), m["imbalance_window"])
+		assert.Equal(t, 12.5, m["imbalance_threshold"])
+	})
+
+	t.Run("negative window rejected", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
+			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+			"imbalance_window": -1,
+		})))
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "imbalance_window")
+	})
+
+	t.Run("negative threshold rejected", func(t *testing.T) {
+		t.Parallel()
+		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
+			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+			"imbalance_threshold": -0.1,
+		})))
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "imbalance_threshold")
+	})
 }

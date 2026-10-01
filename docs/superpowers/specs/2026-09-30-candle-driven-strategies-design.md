@@ -20,9 +20,9 @@ Meanwhile the repo already ingests everything needed:
   price-daemon, but `resolution` is hardcoded `1m` (`candles/handler.go:254`)
   and no strategy reads it. `LoadCandles` exists unused.
 - `internal/agent/store/history_store.go:276-370` already SQL-buckets 1m
-  candles into `5m/15m/1h/4h/1d/7d` (generate_series grid + forward-fill).
+  candles into `5m/15m/1h/4h/1d` (plus `7d`, SQL-only, not a stream resolution) (generate_series grid + forward-fill).
 - The agent/wasm path already requires an explicit `resolution` field with the
-  enum `1m, 5m, 15m, 1h, 4h, 1d, 7d` (`internal/agent/backtest/validate.go`).
+  enum `1m, 5m, 15m, 1h, 4h, 1d` (`internal/agent/backtest/validate.go`).
 - The full trade tape (live `streams.TradeStream.SubscribeOrderBook`, persisted
   `trades_history` with `side`, `quantity`, `aggressor_indicator`) reaches only
   breakout's OBV.
@@ -61,7 +61,7 @@ DORA WS (per book, per resolution) ──> candles.Handler (existing + Resolutio
 ### Components
 
 - **`candles.Config.Resolution string`** — validated enum `1m, 5m, 15m, 1h,
-  4h, 1d, 7d`; `buildURL` uses it instead of the hardcoded `1m`.
+  4h, 1d`; `buildURL` uses it instead of the hardcoded `1m`.
 - **`candleRegistry`** (strategy-server) — map keyed `(orderBookID,
   resolution)` → `*candles.Handler`, refcounted: first subscriber starts the
   stream (under `streams.Daemon` reconnect), last unsubscribe stops it.
@@ -95,9 +95,13 @@ tick price, as today.
 - Spread = `CloseYTM − benchmark` per bar; z-score math unchanged; window
   semantics now bars.
 - Defaults: `LookbackWindow 24` (≈ 1 day at 1h; was 20 ticks).
-- Exits: z-reversion on bar close; z-stop-loss intrabar from ticks (live);
-  in backtests, evaluated at the adverse spread extreme of the bar
-  (`HighYTM`/`LowYTM` − benchmark, whichever hurts the open position).
+- Exits: z-reversion on bar close; z-stop-loss intrabar from ticks (live).
+  Backtests replay `price_history` ticks intrabar through the same live math
+  (tick YTM − bar benchmark yield → zAgainstWindow → ShouldExit, exit at the
+  tick's price). Bars whose formation window has no tick coverage fall back
+  to the adverse spread extreme of the bar (`HighYTM`/`LowYTM` − benchmark,
+  whichever hurts the open position). Replaces the bar-extreme approximation
+  after user review (2026-10-01); the fallback is retained.
 - **New imbalance gate**: config `imbalance_window` (# recent trades,
   default 100), `imbalance_threshold` (signed quantity, default 0 — any net
   opposing flow blocks; `imbalance_window = 0` disables the gate). An entry
@@ -138,8 +142,10 @@ tick price, as today.
 
 1. Load bars: `LoadCandlesBucketed(book, resolution, start − warmup, end)`.
    Warmup = the strategy's largest window (+1 bar for ATR prev-close).
-2. Replay bar closes through `Update`; apply exits on the bar's adverse
-   extreme after each bar.
+2. Replay bar closes through `Update`; intrabar exits replay `price_history`
+   ticks in (close_i, close_{i+1}] through the live tick-case math, exiting at
+   the first crossing tick's price; bars with no tick coverage in that window
+   fall back to the adverse extreme (approximation kept only as fallback).
 3. Interleave `trades_history` by timestamp where the strategy needs trades
    (breakout OBV today; MR imbalance gate now). Reuse/generalize breakout's
    interleave helper.
@@ -150,7 +156,7 @@ tick price, as today.
 ## Config / API surface
 
 - `resolution` field on all three run + backtest payload structs
-  (`strategy/http/handler.go`), enum `1m, 5m, 15m, 1h, 4h, 1d, 7d`, defaulted
+  (`strategy/http/handler.go`), enum `1m, 5m, 15m, 1h, 4h, 1d`, defaulted
   per strategy, validated like the agent path.
 - New fields: `imbalance_window`, `imbalance_threshold` (MR);
   `volume_avg_window`, `volume_ratio_threshold` (momentum).

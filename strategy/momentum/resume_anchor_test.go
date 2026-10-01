@@ -27,12 +27,11 @@ func newAnchoredStrategy(t *testing.T, stopATR float64) *Strategy {
 	}
 	cfg.StopLossATR = stop
 	s := New(cfg, nil)
-	bond := "asset-A"
 	for i, px := range []int64{100, 101, 102} {
-		_, err := s.Update(types.YieldObservation{
-			Time:   time.Now().Add(time.Duration(i) * time.Second),
-			BondID: bond,
-			Price:  decimal.MustNew(px, 0),
+		p := decimal.MustNew(px, 0)
+		_, err := s.Update(types.Bar{
+			Time: time.Now().Add(time.Duration(i) * time.Second),
+			Open: p, High: p, Low: p, Close: p,
 		})
 		require.NoError(t, err)
 	}

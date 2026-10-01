@@ -1,4 +1,7 @@
-package breakout
+// Package trades reads the persisted trades_history table (written by
+// the platform) for backtest replay of candle-driven strategies
+// (breakout OBV, mean-reversion imbalance, VWAP volume buckets).
+package trades
 
 import (
 	"context"
@@ -11,10 +14,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Trade is the breakout package's in-memory representation of a single
-// row in trades_history, shaped for OBV (On-Balance Volume) accumulation.
-// It is intentionally decoupled from copytrading.Trade and streams.TradeEvent
-// so the breakout backtester does not depend on those packages.
+// Trade is the in-memory representation of a single row in
+// trades_history, shaped for signed-volume accumulation (OBV,
+// imbalance, ADV buckets). It is intentionally decoupled from
+// copytrading.Trade and streams.TradeEvent so strategy backtesters do
+// not depend on those packages.
 //
 // Direction sign is derived from the `side` field at read time, not
 // stored — trades_history stores "BUY" / "SELL" as VARCHAR.
@@ -25,13 +29,14 @@ type Trade struct {
 	Side     string // "BUY" or "SELL"
 }
 
-// TradeHistoryStore is the backtest's read-only data source for
-// historical trades on a specific order book. Used to compute OBV
-// (On-Balance Volume) for the volume confirmation filter (OBVWindow > 0).
-type TradeHistoryStore interface {
+// TradeStore is the read-only data source for historical trades on a
+// specific order book.
+type TradeStore interface {
 	// StreamTrades returns a channel of trades for the given order book
 	// within [start, end], in chronological order. The error channel
-	// receives at most one error and is then closed.
+	// receives at most one error and is then closed. Cancelling ctx (or
+	// the consumer stopping reads once the buffer fills) terminates the
+	// streaming goroutine.
 	StreamTrades(ctx context.Context, orderBookID uuid.UUID, start, end time.Time) (<-chan Trade, <-chan error)
 }
 
@@ -42,21 +47,21 @@ type pgxPool interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// PGTradeHistoryStore is the Postgres-backed TradeHistoryStore.
-type PGTradeHistoryStore struct {
+// PGStore is the Postgres-backed TradeStore.
+type PGStore struct {
 	pool pgxPool
 }
 
-// NewPGTradeHistoryStore constructs a store backed by the given pool.
+// NewPGStore constructs a store backed by the given pool.
 // The pool is not owned; the caller is responsible for closing it.
-func NewPGTradeHistoryStore(pool *pgxpool.Pool) *PGTradeHistoryStore {
-	return &PGTradeHistoryStore{pool: pool}
+func NewPGStore(pool *pgxpool.Pool) *PGStore {
+	return &PGStore{pool: pool}
 }
 
 // StreamTrades streams trades for the given order book in [start, end]
 // in chronological order (keyset on created_at, transaction_id).
 // Empty result set closes both channels immediately.
-func (s *PGTradeHistoryStore) StreamTrades(
+func (s *PGStore) StreamTrades(
 	ctx context.Context,
 	orderBookID uuid.UUID,
 	start, end time.Time,
@@ -73,7 +78,7 @@ func (s *PGTradeHistoryStore) StreamTrades(
 	return ch, done
 }
 
-func (s *PGTradeHistoryStore) streamTradesLoop(
+func (s *PGStore) streamTradesLoop(
 	ctx context.Context,
 	orderBookID uuid.UUID,
 	start, end time.Time,
@@ -103,7 +108,15 @@ func (s *PGTradeHistoryStore) streamTradesLoop(
 				return fmt.Errorf("scan trade row: %w", err)
 			}
 			t.Time = t.Time.UTC()
-			ch <- t
+			// Cancellation-safe send: if the consumer stops reading and
+			// the buffer fills, unblock on ctx.Done instead of leaking
+			// this goroutine on a stuck send.
+			select {
+			case ch <- t:
+			case <-ctx.Done():
+				rows.Close()
+				return ctx.Err()
+			}
 			lastTime = t.Time
 			lastID = txID
 			pageCount++
@@ -121,7 +134,7 @@ func (s *PGTradeHistoryStore) streamTradesLoop(
 	}
 }
 
-func (s *PGTradeHistoryStore) queryTradesPage(
+func (s *PGStore) queryTradesPage(
 	ctx context.Context,
 	orderBookID uuid.UUID,
 	start, end time.Time,

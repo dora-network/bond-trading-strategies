@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/assert"
@@ -13,10 +12,23 @@ import (
 
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy"
-	strategyfakes "github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
+	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/streams"
+	"github.com/dora-network/dora-client-go/doraclient"
 )
+
+// obBar returns a flat bar (O=H=L=C=price) at minute i.
+func obBar(i int, price int64) types.Bar {
+	p := decimal.MustNew(price, 0)
+	return types.Bar{
+		Time:  epoch.Add(time.Duration(i) * time.Minute),
+		Open:  p,
+		High:  p,
+		Low:   p,
+		Close: p,
+	}
+}
 
 // TestApplyTradeEvent_OBVAccumulation verifies the OBV accumulator's
 // sign-by-direction logic across a sequence of trades. The first
@@ -42,6 +54,15 @@ func TestApplyTradeEvent_OBVAccumulation(t *testing.T) {
 	assert.True(t, s.OBV().Equal(decimal.MustNew(5, 0)))
 }
 
+// warmFlat feeds n flat bars to arm compression.
+func warmFlat(t *testing.T, s *Strategy, n int) {
+	t.Helper()
+	for i := range n {
+		_, err := s.Update(obBar(i, 100))
+		require.NoError(t, err)
+	}
+}
+
 // TestUpdate_OBVFilterSuppressesBuyWhenOBVFlat verifies the signal gate
 // when OBVWindow > 0 and OBV doesn't confirm the BUY.
 func TestUpdate_OBVFilterSuppressesBuyWhenOBVFlat(t *testing.T) {
@@ -52,15 +73,7 @@ func TestUpdate_OBVFilterSuppressesBuyWhenOBVFlat(t *testing.T) {
 	cfg.ConfirmationBars = 1
 	s := New(cfg, nil)
 
-	// 10 flat ticks to arm compression.
-	for i := 0; i < cfg.LongVolWindow; i++ {
-		_, err := s.Update(types.YieldObservation{
-			Time:   time.Unix(int64(i), 0).UTC(),
-			BondID: "asset-A",
-			Price:  decimal.MustNew(100, 0),
-		})
-		require.NoError(t, err)
-	}
+	warmFlat(t, s, cfg.LongVolWindow)
 
 	// 5 BUY trades of 10 each with OBVWindow=5. OBV = 50.
 	for range 5 {
@@ -73,11 +86,7 @@ func TestUpdate_OBVFilterSuppressesBuyWhenOBVFlat(t *testing.T) {
 	assert.True(t, s.OBV().Equal(decimal.MustNew(50, 0)))
 
 	// Big jump that would normally trigger BUY.
-	d, err := s.Update(types.YieldObservation{
-		Time:   time.Unix(int64(cfg.LongVolWindow), 0).UTC(),
-		BondID: "asset-A",
-		Price:  decimal.MustNew(115, 0),
-	})
+	d, err := s.Update(obBar(cfg.LongVolWindow, 115))
 	require.NoError(t, err)
 	assert.Equal(t, types.SignalBuy, d.Signal(),
 		"OBV=10 > 0 and threshold=0, so BUY should fire")
@@ -92,25 +101,13 @@ func TestUpdate_OBVFilterSuppressesBuyWhenOBVZero(t *testing.T) {
 	cfg.ConfirmationBars = 1
 	s := New(cfg, nil)
 
-	// 10 flat ticks to arm compression.
-	for i := 0; i < cfg.LongVolWindow; i++ {
-		_, err := s.Update(types.YieldObservation{
-			Time:   time.Unix(int64(i), 0).UTC(),
-			BondID: "asset-A",
-			Price:  decimal.MustNew(100, 0),
-		})
-		require.NoError(t, err)
-	}
+	warmFlat(t, s, cfg.LongVolWindow)
 
 	// No trades have been applied. OBV is zero.
 	assert.True(t, s.OBV().IsZero())
 
 	// Big jump that would normally trigger BUY.
-	d, err := s.Update(types.YieldObservation{
-		Time:   time.Unix(int64(cfg.LongVolWindow), 0).UTC(),
-		BondID: "asset-A",
-		Price:  decimal.MustNew(115, 0),
-	})
+	d, err := s.Update(obBar(cfg.LongVolWindow, 115))
 	require.NoError(t, err)
 	assert.Equal(t, types.SignalHold, d.Signal(),
 		"OBV=0 must be below the BUY threshold; signal should be suppressed")
@@ -128,15 +125,7 @@ func TestUpdate_OBVFilterSuppressesSellWhenOBVPositive(t *testing.T) {
 	cfg.ConfirmationBars = 1
 	s := New(cfg, nil)
 
-	// 10 flat ticks.
-	for i := 0; i < cfg.LongVolWindow; i++ {
-		_, err := s.Update(types.YieldObservation{
-			Time:   time.Unix(int64(i), 0).UTC(),
-			BondID: "asset-A",
-			Price:  decimal.MustNew(100, 0),
-		})
-		require.NoError(t, err)
-	}
+	warmFlat(t, s, cfg.LongVolWindow)
 
 	// Trades: buy @ 100, +10. OBV = 10. Positive, so SELL won't confirm.
 	s.applyTradeEvent(streams.TradeEvent{
@@ -147,11 +136,7 @@ func TestUpdate_OBVFilterSuppressesSellWhenOBVPositive(t *testing.T) {
 	assert.True(t, s.OBV().Equal(decimal.MustNew(10, 0)))
 
 	// Drop that would normally trigger SELL.
-	d, err := s.Update(types.YieldObservation{
-		Time:   time.Unix(int64(cfg.LongVolWindow), 0).UTC(),
-		BondID: "asset-A",
-		Price:  decimal.MustNew(85, 0),
-	})
+	d, err := s.Update(obBar(cfg.LongVolWindow, 85))
 	require.NoError(t, err)
 	assert.Equal(t, types.SignalHold, d.Signal(),
 		"OBV=+10 must suppress a SELL (need OBV < -threshold)")
@@ -159,8 +144,8 @@ func TestUpdate_OBVFilterSuppressesSellWhenOBVPositive(t *testing.T) {
 }
 
 // TestRun_OBVUpdatesFromTradesAndGatesSignal is the integration
-// happy-path: drive runLoop with both a price channel and a trade
-// channel; verify OBV updates and the signal gates correctly.
+// happy-path: drive runLoop with bar, price, and trade channels; verify
+// OBV updates and the signal gates correctly.
 func TestRun_OBVUpdatesFromTradesAndGatesSignal(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultConfig()
@@ -182,24 +167,23 @@ func TestRun_OBVUpdatesFromTradesAndGatesSignal(t *testing.T) {
 		return "", nil
 	}
 
+	barsCh := make(chan types.Bar, 4)
+	feed := &strategyfakes.FakeCandleFeed{}
+	feed.SubscribeBarsReturns(barsCh, func() {}, nil)
+
 	s := New(
 		cfg, nil,
 		WithMarketAPIClient(fake),
 		WithTradeStream(streams.NewTradeStream()),
+		WithCandleFeed(feed),
 	)
 	s.cancel = func() {}
 
-	// Pre-fill: 10 flat ticks to arm compression.
-	flat := decimal.MustNew(100, 0)
-	for i := 0; i < cfg.LongVolWindow; i++ {
-		_, err := s.Update(types.YieldObservation{
-			Time:   time.Unix(int64(i), 0).UTC(),
-			BondID: "asset-A",
-			Price:  flat,
-		})
+	// Pre-fill: LongVolWindow flat bars at 100 to arm compression.
+	for i := range cfg.LongVolWindow {
+		_, err := s.Update(obBar(i, 100))
 		require.NoError(t, err)
 	}
-
 	msgs := make(chan strategy.Message, 4)
 	pricesCh := make(chan map[uuid.UUID]prices.AssetPrice, 4)
 	tradesCh := make(chan streams.TradeEvent, 4)
@@ -207,7 +191,9 @@ func TestRun_OBVUpdatesFromTradesAndGatesSignal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		_ = s.runLoop(ctx, msgs, pricesCh, tradesCh)
+		if err := s.runLoop(ctx, msgs, pricesCh, tradesCh); err != nil {
+			t.Logf("runLoop error: %v", err)
+		}
 		close(done)
 	}()
 	defer func() {
@@ -236,8 +222,8 @@ func TestRun_OBVUpdatesFromTradesAndGatesSignal(t *testing.T) {
 	require.True(t, s.OBV().Equal(decimal.MustNew(20, 0)),
 		"OBV should pick up the trade; got %v", s.OBV())
 
-	// Jump that would normally trigger BUY. OBV is positive → fires.
-	sendOBTestTick(t, pricesCh, "asset-A", decimal.MustNew(120, 0))
+	// Jump bar that would normally trigger BUY. OBV is positive → fires.
+	barsCh <- obBar(cfg.LongVolWindow, 120)
 
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -253,22 +239,6 @@ func TestRun_OBVUpdatesFromTradesAndGatesSignal(t *testing.T) {
 	got := s.openSignal
 	s.mu.RUnlock()
 	t.Fatalf("expected BUY after OBV-confirmed breakout, got openSignal=%v", got)
-}
-
-func sendOBTestTick(t *testing.T, ch chan map[uuid.UUID]prices.AssetPrice, assetID string, price decimal.Decimal) {
-	t.Helper()
-	tick := map[uuid.UUID]prices.AssetPrice{
-		uuid.MustParse("33333333-3333-3333-3333-333333333333"): {
-			Time:    time.Now().UTC(),
-			AssetID: assetID,
-			Price:   price,
-		},
-	}
-	select {
-	case ch <- tick:
-	case <-time.After(time.Second):
-		t.Fatalf("timed out sending tick")
-	}
 }
 
 // TestApplyTradeEvent_WindowedOBVEvictsOldest verifies that the
@@ -335,13 +305,8 @@ func TestOBV_CumulativeVsWindowed(t *testing.T) {
 	for _, tr := range trades {
 		sWin.applyTradeEvent(tr)
 	}
-	// Sum() is exact (maintained incrementally, not derived from Welford
-	// mean), so we can compare directly. Last 3 trades: BUY(5), SELL(2),
-	// BUY(7). OBV = 5 - 2 + 7 = 10.
+	// Last 3 trades: BUY(5), SELL(2), BUY(7). OBV = 5 - 2 + 7 = 10.
 	got := sWin.OBV()
 	assert.True(t, got.Equal(decimal.MustNew(10, 0)),
 		"windowed OBV (last 3) should be 10, got %s", got)
 }
-
-// silence unused import warning for streams (used by tests above)
-var _ = streams.TradeEvent{}

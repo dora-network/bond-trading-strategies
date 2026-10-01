@@ -21,3 +21,10 @@ func (h *Handler) ProcessMessage(ctx context.Context, orderBookID string, data [
 func (h *Handler) StreamSingle(ctx context.Context, orderBookID string) error {
 	return h.streamSingle(ctx, orderBookID)
 }
+
+func (h *Handler) Cfg() Config {
+	return h.cfg
+}
+
+// MaxCandleRowsForTest lets tests shrink the pagination page size.
+var MaxCandleRowsForTest = &maxCandleRows

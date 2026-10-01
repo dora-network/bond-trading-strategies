@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
+
+	"github.com/dora-network/bond-trading-strategies/trades"
 )
 
 const hoursPerDay = 24
@@ -42,7 +44,7 @@ func (s Schedule) Total() decimal.Decimal {
 // an even distribution across buckets.
 func BuildSchedule(
 	ctx context.Context,
-	store TradeVolumeStore,
+	store trades.TradeStore,
 	orderBookID uuid.UUID,
 	cfg Config,
 ) (Schedule, error) {
@@ -114,7 +116,7 @@ func BuildSchedule(
 // mean daily volume per time-of-day bucket.
 func aggregateADVByBucket(
 	ctx context.Context,
-	store TradeVolumeStore,
+	store trades.TradeStore,
 	orderBookID uuid.UUID,
 	start, end time.Time,
 	bucketMinutes int,

@@ -62,12 +62,6 @@ func WithStateStore(store strategy.StateStore) func(*Strategy) {
 	return func(s *Strategy) { s.exec.Store = store }
 }
 
-// WithOrderUpdates injects a channel of order fill events from the
-// DORA order update stream.
-func WithOrderUpdates(ch <-chan OrderFillEvent) func(*Strategy) {
-	return func(s *Strategy) { s.orderUpdates = ch }
-}
-
 // SetOrderUpdatesChannel lets the handler inject the channel after
 // construction.
 func (s *Strategy) SetOrderUpdatesChannel(ch <-chan OrderFillEvent) {

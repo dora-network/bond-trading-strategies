@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,6 +54,55 @@ type Config struct {
 	OrderBookIDs []string
 	// Since optionally requests candles only from this point in time onward.
 	Since time.Time
+	// Resolution is the candle resolution to subscribe to. One of
+	// 1m, 5m, 15m, 1h, 4h, 1d. Empty defaults to 1m (price-daemon's
+	// ingestion resolution).
+	Resolution Resolution
+}
+
+// Resolution is a Dora candle-stream resolution. The closed set Dora
+// serves: 1m, 5m, 15m, 1h, 4h, 1d.
+type Resolution string
+
+const (
+	// Resolution1m is the price-daemon ingestion resolution.
+	Resolution1m Resolution = "1m"
+	// Resolution5m is breakout's default signal resolution.
+	Resolution5m Resolution = "5m"
+	// Resolution15m is momentum's default signal resolution.
+	Resolution15m Resolution = "15m"
+	// Resolution1h is mean-reversion's default signal resolution.
+	Resolution1h Resolution = "1h"
+	// Resolution4h is an intraday swing resolution.
+	Resolution4h Resolution = "4h"
+	// Resolution1d is a daily resolution.
+	Resolution1d Resolution = "1d"
+)
+
+// ValidResolutions lists the closed set Dora serves on the candle stream.
+const ValidResolutions = "1m, 5m, 15m, 1h, 4h, 1d"
+
+// Validate reports whether r is a served candle-stream resolution.
+func (r Resolution) Validate() error {
+	switch r {
+	case Resolution1m, Resolution5m, Resolution15m, Resolution1h, Resolution4h, Resolution1d:
+		return nil
+	}
+	return fmt.Errorf("invalid resolution %q (allowed: %s)", string(r), ValidResolutions)
+}
+
+// ParseResolution converts a raw string (HTTP payload, env var) into a
+// Resolution, rejecting values outside the closed set. Empty input returns
+// Resolution1m — the ingestion default.
+func ParseResolution(s string) (Resolution, error) {
+	r := Resolution(strings.TrimSpace(s))
+	if r == "" {
+		return Resolution1m, nil
+	}
+	if err := r.Validate(); err != nil {
+		return "", err
+	}
+	return r, nil
 }
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
@@ -73,7 +123,13 @@ type Handler struct {
 }
 
 // New creates a new candles Handler.
-func New(cfg Config, store CandleStore, opts ...func(*Handler)) *Handler {
+func New(cfg Config, store CandleStore, opts ...func(*Handler)) (*Handler, error) {
+	if cfg.Resolution == "" {
+		cfg.Resolution = Resolution1m
+	}
+	if err := cfg.Resolution.Validate(); err != nil {
+		return nil, err
+	}
 	h := &Handler{
 		cfg:         cfg,
 		store:       store,
@@ -82,7 +138,7 @@ func New(cfg Config, store CandleStore, opts ...func(*Handler)) *Handler {
 	for _, opt := range opts {
 		opt(h)
 	}
-	return h
+	return h, nil
 }
 
 func WithMessageHook(onMessage func()) func(*Handler) {
@@ -250,8 +306,7 @@ func (h *Handler) buildURL(orderBookID string, since *time.Time) (string, error)
 	if h.cfg.APIKey != "" {
 		q.Set("api_key", h.cfg.APIKey)
 	}
-	// The plan specifies 1 minute candles
-	q.Set("resolution", "1m")
+	q.Set("resolution", string(h.cfg.Resolution))
 	if since != nil && !since.IsZero() {
 		q.Set("since", since.UTC().Format(time.RFC3339))
 	}

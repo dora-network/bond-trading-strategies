@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy"
@@ -17,6 +18,8 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
+	"github.com/dora-network/bond-trading-strategies/streams"
+	"github.com/dora-network/bond-trading-strategies/trades"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -26,9 +29,14 @@ import (
 // All fields have sensible defaults via DefaultConfig.
 type Config struct {
 	config.Config
-	// LookbackWindow is the number of observations used for the rolling mean
-	// and standard deviation. Typical values: 20-60 trading days.
+	// LookbackWindow is the number of closed bars used for the rolling
+	// mean and standard deviation. Typical values: 20-60 bars.
 	LookbackWindow int
+
+	// Resolution is the candle resolution of the signal bar series
+	// (e.g. "1h"). Validated against the Dora candle resolution set;
+	// the HTTP decoder enforces it, New defaults "" to "1h".
+	Resolution candles.Resolution
 
 	// EntryZScore is the z-score threshold at which the strategy opens a
 	// position. A common starting point is 2.0 (2 standard deviations).
@@ -66,18 +74,33 @@ type Config struct {
 
 	// Leverage to apply when placing orders. Default is 1.0
 	Leverage decimal.Decimal
+
+	// ImbalanceWindow is the number of most recent tape trades used for
+	// the trade-imbalance entry gate. 0 disables the gate. Typical
+	// values: 50-500 trades.
+	ImbalanceWindow int
+
+	// ImbalanceThreshold is the signed-quantity tolerance of the
+	// imbalance gate: an entry is blocked when the net flow of the last
+	// ImbalanceWindow trades exceeds this magnitude in the OPPOSING
+	// direction (net selling blocks a BUY, net buying blocks a SELL).
+	// 0 means any net opposing flow blocks the entry.
+	ImbalanceThreshold decimal.Decimal
 }
 
 func DefaultConfig() Config {
 	return Config{
-		LookbackWindow:  20,
-		EntryZScore:     decimal.Two,
-		ExitZScore:      decimal.MustNew(5, 1),  //nolint:mnd
-		StopLossZScore:  decimal.MustNew(35, 1), //nolint:mnd
-		MinStdDev:       decimal.MustNew(5, 4),  //nolint:mnd
-		MaxPositionSize: decimal.One,
-		InitialBalance:  decimal.One,
-		Leverage:        decimal.One,
+		LookbackWindow:     24,
+		Resolution:         candles.Resolution1h,
+		EntryZScore:        decimal.Two,
+		ExitZScore:         decimal.MustNew(5, 1),  //nolint:mnd
+		StopLossZScore:     decimal.MustNew(35, 1), //nolint:mnd
+		MinStdDev:          decimal.MustNew(5, 4),  //nolint:mnd
+		MaxPositionSize:    decimal.One,
+		InitialBalance:     decimal.One,
+		Leverage:           decimal.One,
+		ImbalanceWindow:    100,
+		ImbalanceThreshold: decimal.Zero,
 	}
 }
 
@@ -88,21 +111,35 @@ func DefaultConfig() Config {
 // (bond YTM - benchmark yield), computes a z-score, and emits buy/sell
 // signals when the spread deviates significantly from its mean.
 type Strategy struct {
-	mu                    sync.RWMutex
-	cfg                   Config
-	log                   *slog.Logger
-	window                *window.Rolling
-	cancel                context.CancelFunc
-	isRunning             bool
-	paused                bool
-	pricesHandler         *prices.Handler
-	marketAPIClient       strategy.MarketAPIClient
-	historyStore          historicalPriceStore
+	mu              sync.RWMutex
+	cfg             Config
+	log             *slog.Logger
+	window          *window.Rolling
+	cancel          context.CancelFunc
+	isRunning       bool
+	paused          bool
+	pricesHandler   *prices.Handler
+	marketAPIClient strategy.MarketAPIClient
+	candleStore     candleHistoryStore
+	// priceHistoryStore reads tick history (price_history) for backtest
+	// tick replay. nil self-wires from DATABASE_URL (best-effort).
+	priceHistoryStore     priceHistorySource
+	candleFeed            strategy.CandleFeed
 	benchmarkClient       benchmarkYieldClient
 	pricesReqID           uuid.UUID
 	benchmarkObservations []fred.Observation
 	errs                  []error
 	backtestWriter        stats.BacktestTradeWriter
+
+	tradeStream       *streams.TradeStream
+	tradeHistoryStore trades.TradeStore
+	// imbWin is the signed-quantity window of the last ImbalanceWindow
+	// tape trades (BUY=+, SELL=-) behind the imbalance entry gate.
+	// imbMu guards imbWin writes and tradeSubID (mirroring breakout's
+	// obvMu). Gate reads also run in the run loop / backtest replay.
+	imbWin     *window.Rolling
+	imbMu      sync.Mutex
+	tradeSubID uuid.UUID
 
 	// Tracked balances, initialised from DORA on Run and updated on trade
 	// execution.  Protected by mu.
@@ -128,6 +165,12 @@ type Strategy struct {
 	// DORA during Run. Defaults to 1.0 if unavailable. Used to compute effective
 	// capital: InitialBalance × collateralWeight × Leverage.
 	collateralWeight decimal.Decimal
+
+	// baseAssetID is the order book's BASE ASSET UUID — distinct from
+	// the order book ID. Resolved once per run/backtest via
+	// lookupAssetID and stamped onto every Decision as bondID.
+	// Protected by mu.
+	baseAssetID string
 
 	// lastStop* record the most recent stop-loss trigger from ShouldExit.
 	// The HTTP handler polls LastStopLossTrigger to emit EventRunStopLoss.
@@ -158,6 +201,9 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 	if cfg.Leverage.IsZero() {
 		cfg.Leverage = decimal.One
 	}
+	if cfg.Resolution == "" {
+		cfg.Resolution = candles.Resolution1h
+	}
 
 	s := &Strategy{
 		cfg:              cfg,
@@ -166,6 +212,9 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		marketAPIClient:  strategy.NewDoraClientWithKey(os.Getenv("DORA_API_KEY")),
 		errs:             make([]error, 0),
 		collateralWeight: decimal.One,
+	}
+	if cfg.ImbalanceWindow > 0 {
+		s.imbWin = window.NewRollingWindow(cfg.ImbalanceWindow)
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -177,6 +226,49 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 func WithLogger(log *slog.Logger) func(*Strategy) {
 	return func(s *Strategy) {
 		s.log = log
+	}
+}
+
+// WithCandleFeed sets the bar source used by the live run loop. Required
+// for Run: the loop fails fast when no feed is configured.
+func WithCandleFeed(f strategy.CandleFeed) func(*Strategy) {
+	return func(s *Strategy) {
+		s.candleFeed = f
+	}
+}
+
+// WithCandleHistoryStore sets the candle history store used by backtests.
+// When unset, the strategy self-wires a store from DATABASE_URL.
+func WithCandleHistoryStore(store candleHistoryStore) func(*Strategy) {
+	return func(s *Strategy) {
+		s.candleStore = store
+	}
+}
+
+// WithPriceHistoryStore sets the tick history source used by backtest
+// tick replay. When unset, the strategy self-wires from DATABASE_URL.
+func WithPriceHistoryStore(store priceHistorySource) func(*Strategy) {
+	return func(s *Strategy) {
+		s.priceHistoryStore = store
+	}
+}
+
+// WithTradeStream injects the live trade stream. When set and
+// ImbalanceWindow > 0, the run loop subscribes to the configured order
+// book and accumulates signed trade flow for the imbalance entry gate.
+// Ignored when the gate is disabled.
+func WithTradeStream(ts *streams.TradeStream) func(*Strategy) {
+	return func(s *Strategy) {
+		s.tradeStream = ts
+	}
+}
+
+// WithTradeHistoryStore injects the historical trade source the
+// backtester interleaves with the bar replay to evaluate the
+// imbalance gate (active when ImbalanceWindow > 0). Ignored otherwise.
+func WithTradeHistoryStore(store trades.TradeStore) func(*Strategy) {
+	return func(s *Strategy) {
+		s.tradeHistoryStore = store
 	}
 }
 
@@ -236,11 +328,20 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtest
 	}
 
 	bt := NewBacktester(s, s.backtestWriter)
-	obs, err := s.getObservations(ctx, start, end)
+	bars, err := s.getBars(ctx, start, end)
 	if err != nil {
 		return backtestResult, err
 	}
-	return bt.Run(ctx, obs)
+
+	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
+	if err != nil {
+		return backtestResult, fmt.Errorf("backtest requires the order book's base asset: %w", err)
+	}
+	s.mu.Lock()
+	s.baseAssetID = assetID
+	s.mu.Unlock()
+	bt.ticks = s.loadTicks(ctx, assetID, bars)
+	return bt.Run(ctx, bars)
 }
 
 func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
@@ -263,7 +364,7 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 	s.isRunning = true
 	s.mu.Unlock()
 
-	return s.run(runCtx, msgCh, pricesCh)
+	return s.run(runCtx, msgCh, pricesCh, nil)
 }
 
 func (s *Strategy) subscribePrices() (<-chan map[uuid.UUID]prices.AssetPrice, error) {
@@ -672,18 +773,28 @@ func (s *Strategy) executeDecision(ctx context.Context, decision Decision, asset
 }
 
 //nolint:funlen // main run loop with setup and teardown
-func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices <-chan map[uuid.UUID]prices.AssetPrice) error {
+func (s *Strategy) run(
+	ctx context.Context,
+	msgs <-chan strategy.Message,
+	prices <-chan map[uuid.UUID]prices.AssetPrice,
+	trades <-chan streams.TradeEvent,
+) error {
 	defer func() {
 		s.mu.Lock()
 		s.isRunning = false
 		s.mu.Unlock()
 	}()
 	defer s.unsubscribePrices()
+	defer s.unsubscribeTrades()
 
 	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
 	if err != nil {
 		return fmt.Errorf("error looking up asset ID: %w", err)
 	}
+
+	s.mu.Lock()
+	s.baseAssetID = assetID
+	s.mu.Unlock()
 
 	// Fetch the collateral weight of the base asset from DORA. This is
 	// best-effort — if the API is unavailable the default of 1.0 is used.
@@ -696,15 +807,27 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 		s.mu.Unlock()
 	}
 
-	// Pre-fill the rolling window with historical data so that signals can
-	// be generated immediately on the first price tick.  This is best-effort
-	// — if the historical price store or FRED client are unavailable the
-	// strategy will still start with an empty window (the existing behaviour).
-	s.log.Info("prefilling window with historical data", "runID", s.runID)
-	if err := s.prefillWindow(ctx, assetID); err != nil {
-		s.mu.Lock()
-		s.errs = append(s.errs, fmt.Errorf("prefill window (non-fatal): %w", err))
-		s.mu.Unlock()
+	// Bars are the signal source: the feed bootstraps history back to
+	// `since` (warm start, replacing the old prefillWindow) and then
+	// streams closed bars.
+	if s.candleFeed == nil {
+		return fmt.Errorf("candle feed not configured")
+	}
+	if err := s.requireCandleCoverage(ctx); err != nil {
+		return err
+	}
+	warmup := time.Duration(s.cfg.LookbackWindow+1) * strategy.ResolutionDuration(s.cfg.Resolution)
+	bars, cancelBars, err := s.candleFeed.SubscribeBars(ctx, s.cfg.OrderBookID, s.cfg.Resolution, time.Now().UTC().Add(-warmup))
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to bars: %w", err)
+	}
+	defer cancelBars()
+
+	// Imbalance gate: subscribe to the order book's tape when enabled.
+	// A nil channel (gate off / no stream injected) never fires in the
+	// select below.
+	if trades == nil {
+		trades = s.subscribeTrades()
 	}
 
 	// Fetch the user's bond position and USD balance from DORA and track
@@ -731,105 +854,103 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 				s.cancel()
 			}
 			s.mu.Unlock()
-		case pxs := <-prices:
-			for _, px := range pxs {
-				s.log.Debug("processing price update", "runID", s.runID, "assetID", px.AssetID, "time", px.Time)
-				// if the price update is for a different asset, ignore it
-				if px.AssetID != assetID {
-					continue
-				}
-				if px.YTM == nil {
-					// no YTM available, ignore price updates
-					continue
-				}
-				// getBenchmarkYield may make a FRED API call and acquire a
-				// write lock to update the cache, so we call it without
-				// holding s.mu.
-				benchmarkYield := s.getBenchmarkYield(ctx, px.Time)
-				s.log.Debug("processing price update",
-					"runID", s.runID,
-					"assetID", px.AssetID,
-					"time", px.Time,
-					"price", px.Price,
-					"ytm", *px.YTM,
-					"benchmarkYield", benchmarkYield)
-
-				s.mu.Lock()
-				obs := types.YieldObservation{
-					Time:           px.Time,
-					BondID:         px.AssetID,
-					YTM:            *px.YTM,
-					BenchmarkYield: benchmarkYield,
-					Price:          px.Price,
-				}
-				// Track the most recent clean price for the configured
-				// asset. Recorded on close decisions as the approximate
-				// fill price (DORA fills at the market mid, which is
-				// approximately the last observed mid). s.lastPrice is
-				// also updated inside Update() so a single tick update
-				// is enough — no separate per-tick write needed here.
-				// Read window readiness before Update so the guard and the
-				// z-score in decision are computed from the same window state.
-				// On the tick that makes the window full, decision.ZScore is
-				// still 0 (computed from the incomplete pre-add window), so
-				// we must not evaluate exit conditions on that tick.
-				windowReadyBeforeUpdate := s.window.Ready()
-				decision, err := s.Update(obs)
-				s.log.Debug(
-					"decision generated",
-					"runID", s.runID,
-					"assetID", px.AssetID,
-					"time", px.Time,
-					"zScore", decision.ZScore,
-					"signal", decision.Signal(),
-				)
-				if err != nil {
-					s.log.Error("failed to update strategy", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "err", err)
-					s.mu.Unlock()
-					continue
-				}
-
-				if s.paused {
-					// strategy is paused, ignore decision
-					s.log.Debug("strategy is paused, ignoring decision", "runID", s.runID, "assetID", px.AssetID, "time", px.Time)
-					s.mu.Unlock()
-					continue
-				}
-				currentOpenSignal := s.openSignal
+		case bar := <-bars:
+			s.log.Debug("processing bar", "runID", s.runID, "time", bar.Time)
+			// Resolve the benchmark at the bar's close time. This may make
+			// a FRED API call, so it runs without holding s.mu.
+			bar.BenchmarkYield = s.getBenchmarkYield(ctx, bar.Time.Add(strategy.ResolutionDuration(s.cfg.Resolution)))
+			s.mu.Lock()
+			// Read window readiness before Update so the exit guard and
+			// the z-score in the decision come from the same window state.
+			windowReadyBeforeUpdate := s.window.Ready()
+			decision, err := s.Update(bar)
+			if err != nil {
+				s.log.Error("failed to update strategy", "runID", s.runID, "time", bar.Time, "err", err)
 				s.mu.Unlock()
+				continue
+			}
+			if s.paused {
+				s.log.Debug("strategy is paused, ignoring decision", "runID", s.runID, "time", bar.Time)
+				s.mu.Unlock()
+				continue
+			}
+			currentOpenSignal := s.openSignal
+			s.mu.Unlock()
 
-				if currentOpenSignal != types.SignalHold {
-					// A position is open. Only evaluate exit conditions once the
-					// rolling window was already full before this tick so that
-					// the z-score in decision is statistically meaningful.
-					if windowReadyBeforeUpdate {
-						if shouldExit, reason := s.ShouldExit(currentOpenSignal, decision.ZScore); shouldExit {
-							s.log.Info("exiting position", "reason", reason, "runID", s.runID)
-							if err := s.closePosition(ctx, px.AssetID); err != nil {
-								s.log.Error("failed to close position", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "err", err)
-								s.mu.Lock()
-								s.errs = append(s.errs, err)
-								s.mu.Unlock()
-							}
+			if currentOpenSignal != types.SignalHold {
+				// A position is open. Only evaluate exit conditions once the
+				// rolling window was already full before this bar so that
+				// the z-score in decision is statistically meaningful.
+				if windowReadyBeforeUpdate {
+					if shouldExit, reason := s.ShouldExit(currentOpenSignal, decision.ZScore); shouldExit {
+						s.log.Info("exiting position", "reason", reason, "runID", s.runID)
+						if err := s.closePosition(ctx, assetID); err != nil {
+							s.log.Error("failed to close position", "runID", s.runID, "assetID", assetID, "time", bar.Time, "err", err)
+							s.mu.Lock()
+							s.errs = append(s.errs, err)
+							s.mu.Unlock()
 						}
 					}
-					// Whether we just closed or are still holding, do not
-					// open a new position on this tick.
+				}
+				// Whether we just closed or are still holding, do not
+				// open a new position on this bar.
+				continue
+			}
+
+			// No open position — check for a new entry signal.
+			if decision.Signal() == types.SignalHold {
+				continue
+			}
+			if !s.imbalanceAllows(decision.Signal()) {
+				net, _ := s.netImbalance()
+				s.log.Info("entry filtered by trade-imbalance gate",
+					"runID", s.runID, "signal", decision.Signal().String(), "net_flow", net, "time", bar.Time)
+				continue
+			}
+			if _, err := s.executeDecision(ctx, decision, assetID); err != nil {
+				s.log.Error("failed to execute decision", "runID", s.runID, "assetID", assetID, "time", bar.Time, "err", err)
+				s.mu.Lock()
+				s.errs = append(s.errs, err)
+				s.mu.Unlock()
+			}
+		case pxs := <-prices:
+			// Ticks no longer drive entries or the rolling window; they
+			// update lastPrice and provide intra-bar exits.
+			for _, px := range pxs {
+				if px.AssetID != assetID || px.YTM == nil {
 					continue
 				}
-
-				// No open position — check for a new entry signal.
-				if decision.Signal() == types.SignalHold {
+				bench := s.getBenchmarkYield(ctx, px.Time)
+				s.mu.Lock()
+				s.lastPrice = px.Price
+				open := s.openSignal
+				paused := s.paused
+				s.mu.Unlock()
+				if paused || open == types.SignalHold {
+					// Paused means hands-off: track the price but take no
+					// action, mirroring the bar case.
 					continue
 				}
-
-				if _, err := s.executeDecision(ctx, decision, px.AssetID); err != nil {
-					s.log.Error("failed to execute decision", "runID", s.runID, "assetID", px.AssetID, "time", px.Time, "err", err)
-					s.mu.Lock()
-					s.errs = append(s.errs, err)
-					s.mu.Unlock()
+				z, ok := s.intrabarZ(*px.YTM, bench)
+				if ok {
+					if shouldExit, reason := s.ShouldExit(open, z); shouldExit {
+						s.log.Info("exiting position intra-bar", "reason", reason, "runID", s.runID)
+						if err := s.closePosition(ctx, assetID); err != nil {
+							s.log.Error("failed to close position", "runID", s.runID, "assetID", assetID, "time", px.Time, "err", err)
+							s.mu.Lock()
+							s.errs = append(s.errs, err)
+							s.mu.Unlock()
+						}
+					}
 				}
 			}
+		case ev, ok := <-trades:
+			if !ok {
+				// Channel closed; stop selecting on it.
+				trades = nil
+				continue
+			}
+			s.applyTrade(ev)
 		case <-ticker.C:
 			s.mu.RLock()
 			if s.paused {
@@ -919,17 +1040,15 @@ func (s *Strategy) getBenchmarkYield(ctx context.Context, ts time.Time) decimal.
 //
 // If the rolling window is not yet full (not enough history), the signal will
 // always be SignalHold.
-func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
+func (s *Strategy) Update(bar types.Bar) (Decision, error) {
 	// Update the last-observed price under the same lock that protects
 	// the rolling-window state, so closePosition (which reads
 	// s.lastPrice via a separate RLock) sees a consistent snapshot.
-	// The value is set before we touch the window so the next tick's
-	// close records this tick's price.
-	s.lastPrice = obs.Price
+	s.lastPrice = bar.Close
 
-	spread, err := obs.Spread()
+	spread, err := bar.CloseYTM.Sub(bar.BenchmarkYield)
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, fmt.Errorf("compute spread: %w", err)
 	}
 
 	// Compute rolling statistics from the window state BEFORE adding the
@@ -960,18 +1079,19 @@ func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
 	}
 
 	d := Decision{
-		time:           obs.Time,
-		bondID:         obs.BondID,
-		YTM:            obs.YTM,
-		BenchmarkYield: obs.BenchmarkYield,
+		time:           bar.Time,
+		YTM:            bar.CloseYTM,
+		BenchmarkYield: bar.BenchmarkYield,
 		Spread:         spread,
 		RollingMean:    rollingMean,
 		RollingStdDev:  stdDev,
 		ZScore:         zScore,
-		price:          obs.Price,
+		price:          bar.Close,
 		signal:         types.SignalHold,
 		reason:         DecisionReasonWarmingUp,
 	}
+	// Caller (run loop / backtester) holds s.mu; plain read is safe.
+	d.bondID = s.baseAssetID
 
 	// Signal logic uses the pre-add z-score.
 	switch {
@@ -1004,6 +1124,43 @@ func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
 	}
 
 	return d, nil
+}
+
+// intrabarZ computes the z-score of a tick's spread against the current
+// window statistics without mutating the window. ok=false when the window
+// is not ready, the std dev is below MinStdDev, or decimal ops fail.
+func (s *Strategy) intrabarZ(ytm, bench decimal.Decimal) (decimal.Decimal, bool) {
+	spread, err := ytm.Sub(bench)
+	if err != nil {
+		return decimal.Zero, false
+	}
+	return s.zAgainstWindow(spread)
+}
+
+// zAgainstWindow scores an arbitrary spread against the current window
+// statistics without mutating the window. Shared by the live intra-bar
+// stop-loss check and the backtester's adverse-extreme stop check.
+// ok=false when the window is not ready, the std dev is below MinStdDev,
+// or decimal ops fail.
+func (s *Strategy) zAgainstWindow(spread decimal.Decimal) (decimal.Decimal, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.window.Ready() {
+		return decimal.Zero, false
+	}
+	stdDev, err := s.window.StdDev()
+	if err != nil || stdDev.Cmp(s.cfg.MinStdDev) < 0 {
+		return decimal.Zero, false
+	}
+	num, err := spread.Sub(s.window.Mean())
+	if err != nil {
+		return decimal.Zero, false
+	}
+	z, err := num.Quo(stdDev)
+	if err != nil {
+		return decimal.Zero, false
+	}
+	return z, true
 }
 
 // ShouldExit reports whether an open position should be closed given the

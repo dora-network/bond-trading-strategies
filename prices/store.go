@@ -87,31 +87,6 @@ func (s *PGStore) LoadHistoricalPrices(ctx context.Context, assetID string, star
 	return scanAssetPriceRows(rows, "price history")
 }
 
-// LoadLastPrices loads the last N historical prices for one asset ordered by
-// time ascending. Only rows with a non-null YTM are returned.
-func (s *PGStore) LoadLastPrices(ctx context.Context, assetID string, limit int) ([]AssetPrice, error) {
-	const q = `
-		SELECT asset_id::text, price::text, ytm::text, timestamp
-		FROM (
-			SELECT asset_id, price, ytm, timestamp
-			FROM price_history
-			WHERE asset_id = $1
-			  AND ytm IS NOT NULL
-			ORDER BY timestamp DESC
-			LIMIT $2
-		) sub
-		ORDER BY timestamp ASC
-	`
-
-	rows, err := s.pool.Query(ctx, q, assetID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("query last prices: %w", err)
-	}
-	defer rows.Close()
-
-	return scanAssetPriceRows(rows, "last prices")
-}
-
 type Subscriber struct {
 	requestID uuid.UUID
 	store     PriceStore
