@@ -33,7 +33,7 @@ computed from the trade tape, blocks entries against strong opposing flow.
 | `min_std_dev` | float | 0.0005 | Minimum spread volatility required before trading. Must be non-negative. |
 | `max_position_size` | float | 1.0 | Maximum fraction of capital allocated per trade, in (0, 1]. |
 | `order_book_id` | uuid | – | DORA order book UUID used to locate the traded asset. |
-| `tenor` | string | – | Benchmark Treasury tenor (e.g. `1M`, `6M`, `2Y`, `5Y`, `10Y`, `30Y`). |
+| `tenor` | string | – | Benchmark Treasury tenor (e.g. `1M`, `6M`, `2Y`, `5Y`, `10Y`, `30Y`). **Required** — the strategy signals on the bond-vs-benchmark spread; missing or unsupported values are rejected at request time. |
 | `initial_balance` | float | 1 | Starting capital for backtests. Must be greater than 0 for backtests. |
 | `leverage` | float | 1.0 | Leverage multiplier for live orders. Must be greater than 0. |
 | `resolution` | string | `1h` | Candle resolution for the signal series. One of `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. |

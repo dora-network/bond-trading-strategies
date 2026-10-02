@@ -41,6 +41,7 @@ func bondPriceFromYTM(ytm decimal.Decimal) decimal.Decimal {
 
 func defaultConfig() meanreversion.Config {
 	return meanreversion.Config{
+		Tenor:           "2Y",
 		LookbackWindow:  20,
 		EntryZScore:     decimal.Two,
 		ExitZScore:      decimal.MustNew(5, 1),

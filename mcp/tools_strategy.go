@@ -134,7 +134,11 @@ func configProperties() map[string]any {
 		"min_std_dev":       num("Minimum spread volatility required before trading. Must be non-negative."),
 		"max_position_size": fraction("Maximum fraction of capital allocated per trade, in (0,1]."),
 		"order_book_id":     map[string]any{"type": "string", "format": "uuid", "description": "DORA order book UUID."},
-		"tenor":             map[string]any{"type": "string", "description": "Benchmark tenor code (e.g. 10Y)."},
+		"tenor": map[string]any{
+			"type": "string",
+			//nolint:lll // spans two strategies' rules
+			"description": "Benchmark tenor code (e.g. 10Y). REQUIRED for mean_reversion (the strategy signals on the bond-vs-benchmark spread and cannot run without it); required for momentum only when signal_source is spread.",
+		},
 		//nolint:lll // description spans two strategies' rules
 		"initial_balance": num("Starting capital allocated to the strategy. Omit or 0 uses the default (10000 for copytrading); must be > 0 for mean_reversion."),
 		"resolution": map[string]any{

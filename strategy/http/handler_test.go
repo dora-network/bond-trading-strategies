@@ -464,6 +464,7 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 	body := map[string]any{
 		"strategy_type": "mean_reversion",
 		"config": map[string]any{
+			"tenor":             "2Y",
 			"lookback_window":   20,
 			"entry_z_score":     2.0,
 			"exit_z_score":      0.5,
@@ -481,7 +482,7 @@ func TestHandlerCreateAndGetBacktest(t *testing.T) {
 
 	var accepted strategyhttp.BacktestDetail
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
-	assert.JSONEq(t, `{"lookback_window":20,"resolution":"1h","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"imbalance_window":100,"imbalance_threshold":0}`, string(accepted.Config))
+	assert.JSONEq(t, `{"lookback_window":20,"resolution":"1h","tenor":"2Y","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"imbalance_window":100,"imbalance_threshold":0}`, string(accepted.Config))
 	assert.Equal(t, "user-test-1", accepted.DORAUserID)
 	backtestID := accepted.ID
 
@@ -642,6 +643,7 @@ func TestHandlerCreateBacktestCandleCoverageError(t *testing.T) {
 	body := map[string]any{
 		"strategy_type": "mean_reversion",
 		"config": map[string]any{
+			"tenor":             "2Y",
 			"lookback_window":   20,
 			"entry_z_score":     2.0,
 			"exit_z_score":      0.5,
@@ -747,6 +749,7 @@ func TestHandlerFailedBacktestIncludesError(t *testing.T) {
 	body := map[string]any{
 		"strategy_type": "mean_reversion",
 		"config": map[string]any{
+			"tenor":             "2Y",
 			"lookback_window":   20,
 			"entry_z_score":     2.0,
 			"exit_z_score":      0.5,
@@ -998,6 +1001,7 @@ func TestHandlerCancelBacktest(t *testing.T) {
 	body := map[string]any{
 		"strategy_type": "mean_reversion",
 		"config": map[string]any{
+			"tenor":             "2Y",
 			"lookback_window":   20,
 			"entry_z_score":     2.0,
 			"exit_z_score":      0.5,
@@ -1057,6 +1061,7 @@ func TestHandlerListBacktests(t *testing.T) {
 	body := map[string]any{
 		"strategy_type": "mean_reversion",
 		"config": map[string]any{
+			"tenor":           "2Y",
 			"lookback_window": 20,
 			"entry_z_score":   2.0,
 			"exit_z_score":    0.5,
@@ -1209,6 +1214,7 @@ func TestHandlerListRuns(t *testing.T) {
 	body := map[string]any{
 		"strategy_type": "mean_reversion",
 		"config": map[string]any{
+			"tenor":           "2Y",
 			"lookback_window": 20,
 			"entry_z_score":   2.0,
 			"exit_z_score":    0.5,
@@ -1399,7 +1405,7 @@ func TestHandlerRestoreRuns(t *testing.T) {
 					CreatedAt:    now,
 					UpdatedAt:    now,
 				},
-				Config: json.RawMessage(`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`),
+				Config: json.RawMessage(`{"lookback_window":20,"tenor":"2Y","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`),
 			},
 			pausedID: {
 				RunSummary: strategyhttp.RunSummary{
@@ -1410,7 +1416,7 @@ func TestHandlerRestoreRuns(t *testing.T) {
 					CreatedAt:    now.Add(-time.Minute),
 					UpdatedAt:    now.Add(-time.Minute),
 				},
-				Config: json.RawMessage(`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`),
+				Config: json.RawMessage(`{"lookback_window":20,"tenor":"2Y","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`),
 			},
 		},
 	}
@@ -1926,6 +1932,7 @@ func TestHandlerValidationErrors(t *testing.T) {
 	rec = performJSONRequest(t, handler, "/v1/runs", map[string]any{
 		"strategy_type": "mean_reversion",
 		"config": map[string]any{
+			"tenor":           "2Y",
 			"initial_balance": 0,
 		},
 	})
@@ -1936,6 +1943,7 @@ func TestHandlerValidationErrors(t *testing.T) {
 	backtestBody := map[string]any{
 		"strategy_type": "mean_reversion",
 		"config": map[string]any{
+			"tenor":           "2Y",
 			"initial_balance": 0,
 		},
 		"start": time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
@@ -1956,6 +1964,7 @@ func TestHandlerValidationErrors(t *testing.T) {
 	rec = performJSONRequest(t, handler, "/v1/runs", map[string]any{
 		"strategy_type": "mean_reversion",
 		"config": map[string]any{
+			"tenor":           "2Y",
 			"initial_balance": -1,
 		},
 	})
@@ -2251,6 +2260,53 @@ func TestHandlerMomentumBarConfigDecode(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), tt.want)
 		})
 	}
+}
+
+// TestHandlerMeanReversionTenorRequired pins the trust-boundary fix for
+// the "unsupported tenor" runtime failure: mean-reversion is a spread
+// strategy, so a missing or invalid tenor must be a 400 at decode time,
+// not a start-time error in getBars/getBenchmarkYield.
+func TestHandlerMeanReversionTenorRequired(t *testing.T) {
+	t.Parallel()
+
+	handler := strategyhttp.NewHandler(
+		&strategyfakes.FakeService{},
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	mkBody := func(tenor any) map[string]any {
+		return map[string]any{
+			"strategy_type": "mean_reversion",
+			"config": map[string]any{
+				"order_book_id": uuid.Must(uuid.NewV7()).String(),
+				"tenor":         tenor,
+			},
+		}
+	}
+
+	t.Run("missing tenor is a 400", func(t *testing.T) {
+		rec := performJSONRequest(t, handler, "/v1/runs", mkBody(nil))
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "config.tenor is required")
+	})
+
+	t.Run("empty tenor is a 400", func(t *testing.T) {
+		rec := performJSONRequest(t, handler, "/v1/runs", mkBody(""))
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "config.tenor is required")
+	})
+
+	t.Run("unsupported tenor is a 400", func(t *testing.T) {
+		rec := performJSONRequest(t, handler, "/v1/runs", mkBody("13Y"))
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "config.tenor")
+	})
+
+	t.Run("valid tenor passes decode", func(t *testing.T) {
+		rec := performJSONRequest(t, handler, "/v1/runs", mkBody("2Y"))
+		require.Equal(t, http.StatusCreated, rec.Code)
+	})
 }
 
 // TestHandlerMomentumExplicitZeroRoundTrip pins the "0 disables"/"0 means
@@ -2758,7 +2814,7 @@ func TestHandlerRunOwnership(t *testing.T) {
 					CreatedAt:    now,
 					UpdatedAt:    now,
 				},
-				Config: json.RawMessage(`{"lookback_window":20,"entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`),
+				Config: json.RawMessage(`{"lookback_window":20,"tenor":"2Y","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1}`),
 			},
 		},
 	}
@@ -3522,6 +3578,7 @@ func TestMeanReversionResolutionDecode(t *testing.T) {
 
 	baseCfg := func(res any) map[string]any {
 		cfg := map[string]any{
+			"tenor":           "2Y",
 			"lookback_window": 20,
 			"entry_z_score":   2.0,
 			"exit_z_score":    0.5,
@@ -3546,7 +3603,7 @@ func TestMeanReversionResolutionDecode(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, rec.Code)
 		var accepted strategyhttp.BacktestDetail
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
-		assert.JSONEq(t, `{"lookback_window":20,"resolution":"1h","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"imbalance_window":100,"imbalance_threshold":0}`, string(accepted.Config))
+		assert.JSONEq(t, `{"lookback_window":20,"resolution":"1h","tenor":"2Y","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"imbalance_window":100,"imbalance_threshold":0}`, string(accepted.Config))
 	})
 
 	t.Run("accepts 5m", func(t *testing.T) {
@@ -3555,7 +3612,7 @@ func TestMeanReversionResolutionDecode(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, rec.Code)
 		var accepted strategyhttp.BacktestDetail
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
-		assert.JSONEq(t, `{"lookback_window":20,"resolution":"5m","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"imbalance_window":100,"imbalance_threshold":0}`, string(accepted.Config))
+		assert.JSONEq(t, `{"lookback_window":20,"resolution":"5m","tenor":"2Y","entry_z_score":2,"exit_z_score":0.5,"stop_loss_z_score":3.5,"min_std_dev":0.0005,"max_position_size":1,"imbalance_window":100,"imbalance_threshold":0}`, string(accepted.Config))
 	})
 
 	for _, bad := range []string{"7h", "7d"} {
@@ -3606,7 +3663,7 @@ func TestMeanReversionImbalanceDecode(t *testing.T) {
 	t.Run("defaults when absent", func(t *testing.T) {
 		t.Parallel()
 		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
-			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+			"tenor": "2Y", "lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
 		})))
 		require.Equal(t, http.StatusAccepted, rec.Code)
 		var accepted strategyhttp.BacktestDetail
@@ -3620,7 +3677,7 @@ func TestMeanReversionImbalanceDecode(t *testing.T) {
 	t.Run("explicit zero disables the gate", func(t *testing.T) {
 		t.Parallel()
 		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
-			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+			"tenor": "2Y", "lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
 			"imbalance_window": 0,
 		})))
 		require.Equal(t, http.StatusAccepted, rec.Code)
@@ -3635,7 +3692,7 @@ func TestMeanReversionImbalanceDecode(t *testing.T) {
 	t.Run("explicit values", func(t *testing.T) {
 		t.Parallel()
 		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
-			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+			"tenor": "2Y", "lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
 			"imbalance_window": 50, "imbalance_threshold": 12.5,
 		})))
 		require.Equal(t, http.StatusAccepted, rec.Code)
@@ -3650,7 +3707,7 @@ func TestMeanReversionImbalanceDecode(t *testing.T) {
 	t.Run("negative window rejected", func(t *testing.T) {
 		t.Parallel()
 		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
-			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+			"tenor": "2Y", "lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
 			"imbalance_window": -1,
 		})))
 		require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -3660,7 +3717,7 @@ func TestMeanReversionImbalanceDecode(t *testing.T) {
 	t.Run("negative threshold rejected", func(t *testing.T) {
 		t.Parallel()
 		rec := performJSONRequest(t, newHandler(), "/v1/backtests", body(baseCfg(map[string]any{
-			"lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
+			"tenor": "2Y", "lookback_window": 20, "entry_z_score": 2.0, "exit_z_score": 0.5,
 			"imbalance_threshold": -0.1,
 		})))
 		require.Equal(t, http.StatusBadRequest, rec.Code)

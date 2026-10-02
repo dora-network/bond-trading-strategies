@@ -327,6 +327,14 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtest
 		return backtestResult, fmt.Errorf("start and end date must be in the past")
 	}
 
+	// Mean-reversion computes spread = bond YTM − benchmark yield; without
+	// a parseable tenor every signal evaluation fails. Fail fast here so a
+	// mis-configured strategy surfaces one clear error instead of per-bar
+	// parse failures (the HTTP decoder rejects this earlier still).
+	if _, err := fred.ParseBenchmarkTenor(s.cfg.Tenor); err != nil {
+		return backtestResult, fmt.Errorf("tenor is required for mean_reversion: %w", err)
+	}
+
 	bt := NewBacktester(s, s.backtestWriter)
 	bars, err := s.getBars(ctx, start, end)
 	if err != nil {
@@ -812,6 +820,12 @@ func (s *Strategy) run(
 	// streams closed bars.
 	if s.candleFeed == nil {
 		return fmt.Errorf("candle feed not configured")
+	}
+	// Same tenor guard as Backtest: every bar's spread evaluation needs a
+	// benchmark, so a missing/invalid tenor is a start-time failure, not a
+	// per-bar error.
+	if _, err := fred.ParseBenchmarkTenor(s.cfg.Tenor); err != nil {
+		return fmt.Errorf("tenor is required for mean_reversion: %w", err)
 	}
 	if err := s.requireCandleCoverage(ctx); err != nil {
 		return err

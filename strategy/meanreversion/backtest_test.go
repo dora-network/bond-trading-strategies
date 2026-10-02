@@ -473,3 +473,23 @@ func TestBacktest_RequiresBaseAssetLookup(t *testing.T) {
 	_, err := s.Backtest(context.Background(), end.Add(-24*time.Hour), end)
 	require.ErrorContains(t, err, "backtest requires the order book's base asset")
 }
+
+// Backtest and live runs fail fast with one clear error when the config
+// carries no usable tenor — instead of per-bar parse failures deep in
+// getBars/getBenchmarkYield (the "unsupported tenor" bug).
+func TestBacktest_RequiresTenor(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.OrderBookID = uuid.Must(uuid.NewV7())
+	cfg.Resolution = "1h"
+	cfg.Tenor = "" // the broken default
+	s := meanreversion.New(cfg, nil)
+	end := time.Now().UTC().Add(-24 * time.Hour)
+
+	_, err := s.Backtest(context.Background(), end.Add(-24*time.Hour), end)
+	require.ErrorContains(t, err, "tenor is required for mean_reversion")
+
+	cfg.Tenor = "13Y" // unsupported value surfaces the parse error too
+	s2 := meanreversion.New(cfg, nil)
+	_, err = s2.Backtest(context.Background(), end.Add(-24*time.Hour), end)
+	require.ErrorContains(t, err, "tenor is required for mean_reversion")
+}

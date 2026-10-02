@@ -2674,7 +2674,7 @@
           },
           "tenor": {
             "type": "string",
-            "description": "Benchmark Treasury tenor, e.g. 1M, 6M, 2Y, 5Y, 10Y, 30Y."
+            "description": "Benchmark Treasury tenor, e.g. 1M, 6M, 2Y, 5Y, 10Y, 30Y. Required: mean-reversion signals on the bond-vs-benchmark spread and cannot run without it."
           },
           "initial_balance": {
             "type": "number",
@@ -2690,7 +2690,14 @@
           },
           "resolution": {
             "type": "string",
-            "enum": ["1m", "5m", "15m", "1h", "4h", "1d"],
+            "enum": [
+              "1m",
+              "5m",
+              "15m",
+              "1h",
+              "4h",
+              "1d"
+            ],
             "default": "1h",
             "description": "Candle resolution for the signal series."
           },
@@ -2798,7 +2805,14 @@
           },
           "resolution": {
             "type": "string",
-            "enum": ["1m", "5m", "15m", "1h", "4h", "1d"],
+            "enum": [
+              "1m",
+              "5m",
+              "15m",
+              "1h",
+              "4h",
+              "1d"
+            ],
             "default": "5m",
             "description": "Candle resolution for the signal series."
           }
@@ -2890,7 +2904,14 @@
           },
           "resolution": {
             "type": "string",
-            "enum": ["1m", "5m", "15m", "1h", "4h", "1d"],
+            "enum": [
+              "1m",
+              "5m",
+              "15m",
+              "1h",
+              "4h",
+              "1d"
+            ],
             "default": "15m",
             "description": "Candle resolution for the signal series."
           },

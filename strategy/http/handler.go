@@ -2671,10 +2671,12 @@ func newMeanReversionDefinition(
 				Required:    false,
 			},
 			{
-				Name:        "tenor",
-				Type:        "string",
-				Description: "Benchmark Treasury tenor, for example 1M, 6M, 2Y, 5Y, 10Y, or 30Y.",
-				Required:    false,
+				Name: "tenor",
+				Type: "string",
+				Description: "Benchmark Treasury tenor the spread is computed against " +
+					"(for example 1M, 6M, 2Y, 5Y, 10Y, or 30Y). Required: " +
+					"mean-reversion is a spread strategy and cannot signal without it.",
+				Required: true,
 			},
 			{
 				Name:        "initial balance",
@@ -3768,6 +3770,17 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 	}
 	if payload.MaxPositionSize <= 0 || payload.MaxPositionSize > 1 {
 		return meanreversion.Config{}, nil, fmt.Errorf("config.max_position_size must be in (0,1]")
+	}
+	// Mean-reversion is a spread strategy (bond YTM − benchmark): it can
+	// never compute a signal without a tenor, so unlike momentum's
+	// conditional check, tenor is required for every config and validated
+	// here at the trust boundary rather than failing later in getBars or
+	// getBenchmarkYield.
+	if payload.Tenor == "" {
+		return meanreversion.Config{}, nil, fmt.Errorf("config.tenor is required for mean_reversion")
+	}
+	if _, err := fred.ParseBenchmarkTenor(payload.Tenor); err != nil {
+		return meanreversion.Config{}, nil, fmt.Errorf("config.tenor: %w", err)
 	}
 
 	entry, err := decimal.NewFromFloat64(payload.EntryZScore)
