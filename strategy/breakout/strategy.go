@@ -631,6 +631,11 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.Ba
 	s.mu.Unlock()
 	bt := NewBacktester(s, s.backtestWriter)
 	bt.ticks = s.loadTicks(ctx, assetID, bars)
+	// Pin the trading window so warmup bars (the pre-`start` slice
+	// getBars returns) only seed indicators; entries and reporting
+	// stay restricted to [start, end].
+	bt.TradeFrom = start
+	bt.TradeTo = end
 	return bt.Run(ctx, bars)
 }
 
@@ -1029,9 +1034,10 @@ func (s *Strategy) closePosition(ctx context.Context, assetID, reason string) er
 	return nil
 }
 
-// liveCheckSLTP is the live-loop equivalent of the backtest's
-// checkStopLossTakeProfit. Returns the exit reason and true if the
-// current price has crossed the SL or TP band, ("", false) otherwise.
+// liveCheckSLTP is the live-loop counterpart of the backtest's band
+// checks, sharing bandLevel's entry ± multiplier×ATR math. Returns the
+// exit reason and true if the current price has crossed the SL or TP
+// band, ("", false) otherwise.
 // Stops at the first hit (SL first, then TP) so a single fast move
 // records the worse outcome.
 func liveCheckSLTP(openSig types.Signal, entryPrice, entryATR, currentPrice decimal.Decimal, cfg Config) (string, bool) {

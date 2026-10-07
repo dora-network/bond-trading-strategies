@@ -30,6 +30,13 @@ type Backtester struct {
 	// chronological order. Empty disables tick replay: intrabar exits
 	// fall back to the bar-extreme approximation.
 	ticks []prices.AssetPrice
+	// TradeFrom / TradeTo define the trading window. Bars before
+	// TradeFrom only warm indicators and trade filters; entries
+	// execute only for bars with Time >= TradeFrom (and, when set,
+	// Time < TradeTo). Summary bounds come from these fields when
+	// non-zero, else the bar slice. Zero values = unrestricted.
+	TradeFrom time.Time
+	TradeTo   time.Time
 }
 
 // NewBacktester creates a Backtester wrapping the given Strategy. The
@@ -85,6 +92,11 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 	// Bar.Time is the bar START; the decision happens at the bar CLOSE
 	// (bar.Time+res). Trades during the signal bar must fold into OBV
 	// before that bar's gate evaluation, so the cutoff is the close.
+	// Bar-driven trade records (entries, bar-driven exits, force-closes)
+	// are stamped at the bar CLOSE, not the START, so they sort AFTER
+	// any tick-driven exit that fired inside the preceding bar's
+	// formation window. Tick-driven exits (closeOnTick) keep the
+	// tick's own timestamp.
 	res := strategy.ResolutionDuration(b.strategy.cfg.Resolution)
 	tickIdx := 0
 	// prevWindowHadTicks records whether the window (close_{i-1}, close_i]
@@ -115,6 +127,10 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 				// extreme approximation is skipped.
 				exitZ := decision.ZScore
 				shouldExit, exitReason := b.strategy.ShouldExit(openTrade.Signal, decision.ZScore)
+				var (
+					adverseExitSpread decimal.Decimal
+					adverseExit       bool
+				)
 				if !prevWindowHadTicks {
 					if adverseYTM, ok := adverseExtreme(openTrade.Signal, bar); ok {
 						adverseSpread, err := adverseYTM.Sub(bar.BenchmarkYield)
@@ -124,6 +140,8 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 						if z, ok := b.strategy.zAgainstWindow(adverseSpread); ok {
 							if stop, reason := b.strategy.ShouldExit(openTrade.Signal, z); stop {
 								shouldExit, exitReason, exitZ = true, reason, z
+								adverseExitSpread = adverseSpread
+								adverseExit = true
 							}
 						}
 					}
@@ -131,16 +149,35 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 				if shouldExit {
 					// Compute exit quantity and update remaining balance.
 					exitQty := openTrade.Quantity
+					// YTM extremes have no direct price mapping; the
+					// backtest records the bar's adverse PRICE extreme
+					// (long → Low, short → High) as the "worse outcome"
+					// fill. Close-decision exits keep the decision close.
 					exitPrice := decision.Price()
+					exitSpread := decision.Spread
+					if adverseExit {
+						if openTrade.Signal == types.SignalBuy {
+							exitPrice = bar.Low
+						} else {
+							exitPrice = bar.High
+						}
+						exitSpread = adverseExitSpread
+					}
 
 					// Record the exit trade event (use the open trade's signal so the
 					// exit record carries the original direction, not the HOLD signal
 					// generated once the spread has reverted).
+					// Bar-driven exit: stamp the close at the bar's CLOSE
+					// (decision.Time() = bar.Time = bar START, so we add res).
+					// Without this shift, a re-entry on the next bar could
+					// be stamped at the bar START (earlier than this exit)
+					// and break timeline monotonicity. Tick-driven exits
+					// are unaffected (handled in closeOnTick with tick.Time).
 					tradeRecords = append(tradeRecords, TradeRecord{
-						Time:         decision.Time(),
+						Time:         decision.Time().Add(res),
 						BondID:       openTrade.BondID,
 						Signal:       openTrade.Signal,
-						Spread:       decision.Spread,
+						Spread:       exitSpread,
 						PositionSize: openTrade.PositionSize,
 						ZScore:       exitZ,
 						Price:        exitPrice,
@@ -173,13 +210,17 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 					}
 
 					ct := ClosedTrade{
-						BondID:       openTrade.BondID,
-						OpenTime:     openTrade.Time,
-						CloseTime:    decision.Time(),
+						BondID:   openTrade.BondID,
+						OpenTime: openTrade.Time,
+						// Bar-driven exit: stamp CloseTime at the bar's
+						// CLOSE (decision.Time() = bar START, so add res).
+						// Tick-driven exits use the tick's own time via
+						// closeOnTick (see below).
+						CloseTime:    decision.Time().Add(res),
 						Signal:       openTrade.Signal,
 						ExitSignal:   decision.Signal(),
 						EntrySpread:  openTrade.Spread,
-						ExitSpread:   decision.Spread,
+						ExitSpread:   exitSpread,
 						EntryZScore:  openTrade.ZScore,
 						ExitZScore:   exitZ,
 						PositionSize: openTrade.PositionSize,
@@ -204,8 +245,14 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 
 			// No open position - check for a new entry signal. A position
 			// closed on this bar's decision does not re-enter the same bar.
+			// Entry is also gated on the trading window: bars before
+			// TradeFrom (warmup) or at/after TradeTo only feed Update,
+			// ingestTradesUpTo (imbalance), and run exits — they never
+			// open a position.
 			if openTrade == nil && !closedThisBar &&
-				decision.Signal() != types.SignalHold && b.strategy.imbalanceAllows(decision.Signal()) {
+				decision.Signal() != types.SignalHold && b.strategy.imbalanceAllows(decision.Signal()) &&
+				(b.TradeFrom.IsZero() || !bar.Time.Before(b.TradeFrom)) &&
+				(b.TradeTo.IsZero() || bar.Time.Before(b.TradeTo)) {
 				entryPrice := decision.Price()
 				budget, err := remainingBalance.Mul(decision.PositionSize())
 				if err != nil {
@@ -226,8 +273,14 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 				// Record the entry trade event with the remaining balance before
 				// any cash-flow adjustment, so the PnL of the closed trade
 				// matches the actual return on the deployed capital.
+				// Bar-driven entry: stamp the entry at the bar's CLOSE
+				// (decision.Time() = bar START, so add res). Without this
+				// shift, a re-entry after a tick-driven exit could be
+				// stamped at the bar START — earlier than the tick exit —
+				// breaking timeline monotonicity. Tick exits are
+				// unaffected.
 				tradeRecords = append(tradeRecords, TradeRecord{
-					Time:         decision.Time(),
+					Time:         decision.Time().Add(res),
 					BondID:       decision.BondID(),
 					Signal:       decision.Signal(),
 					Spread:       decision.Spread,
@@ -338,8 +391,11 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 		// Record the exit trade event (use the original signal for direction,
 		// not the HOLD signal from the last bar). The z-score comes
 		// from the last strategy decision captured in the loop above.
+		// Force-close is a bar-driven event: stamp the close at the
+		// last bar's CLOSE (last.Time + res) so it sorts AFTER any
+		// tick exit that fired in the last bar's formation window.
 		tradeRecords = append(tradeRecords, TradeRecord{
-			Time:         last.Time,
+			Time:         last.Time.Add(res),
 			BondID:       openTrade.BondID,
 			Signal:       openTrade.Signal,
 			Spread:       lastSpread,
@@ -352,7 +408,7 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 		ct := ClosedTrade{
 			BondID:       openTrade.BondID,
 			OpenTime:     openTrade.Time,
-			CloseTime:    last.Time,
+			CloseTime:    last.Time.Add(res),
 			Signal:       openTrade.Signal,
 			ExitSignal:   lastDecision.Signal(),
 			EntrySpread:  openTrade.Spread,
@@ -378,6 +434,15 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 	if len(bars) > 0 {
 		start = bars[0].Time
 		end = bars[len(bars)-1].Time
+	}
+	// When the runner pinned the trading window, report bounds from
+	// TradeFrom/TradeTo so the summary covers only the requested
+	// period (not the warmup slice).
+	if !b.TradeFrom.IsZero() {
+		start = b.TradeFrom
+	}
+	if !b.TradeTo.IsZero() {
+		end = b.TradeTo
 	}
 
 	if b.writer != nil {

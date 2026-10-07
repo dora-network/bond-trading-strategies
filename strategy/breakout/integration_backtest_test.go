@@ -16,6 +16,7 @@ import (
 
 	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
+	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 )
 
 // Integration test for the bar-driven breakout backtester — seeds
@@ -102,8 +103,16 @@ func TestIntegration_BacktestAgainstCandleHistory(t *testing.T) {
 
 	store := candles.NewPGStore(pool)
 
+	// Stub the market API client so Backtest's lookupAssetID resolves
+	// without a live DORA dependency — keeps this test DB-only.
+	fake := &strategyfakes.FakeMarketAPIClient{}
+	fake.BaseAssetIDReturns("asset-A", nil)
+
 	run := func() breakout.BacktestResult {
-		s := breakout.New(cfg, nil, breakout.WithCandleHistoryStore(store))
+		s := breakout.New(cfg, nil,
+			breakout.WithCandleHistoryStore(store),
+			breakout.WithMarketAPIClient(fake),
+		)
 		r, err := s.Backtest(ctx, start, start.Add(41*time.Minute))
 		require.NoError(t, err)
 		return r.(breakout.BacktestResult)

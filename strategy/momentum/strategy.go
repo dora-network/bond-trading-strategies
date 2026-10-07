@@ -299,6 +299,11 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.Ba
 	s.mu.Unlock()
 	bt := NewBacktester(s, s.backtestWriter)
 	bt.ticks = s.loadTicks(ctx, assetID, bars)
+	// Pin the trading window so warmup bars (the pre-`start` slice
+	// getBars returns) only seed indicators; entries and reporting
+	// stay restricted to [start, end].
+	bt.TradeFrom = start
+	bt.TradeTo = end
 	return bt.Run(ctx, bars)
 }
 
@@ -317,44 +322,77 @@ func (s *Strategy) bandExit(
 	openSignal types.Signal,
 	entryPrice, entryATR, price decimal.Decimal,
 ) (string, bool) {
-	cfg := s.cfg
-
-	if cfg.StopLossATR.IsPos() && entryATR.IsPos() {
-		stopDist, err := cfg.StopLossATR.Mul(entryATR)
-		if err == nil {
-			switch openSignal { //nolint:exhaustive // SignalHold means flat — no stop check
-			case types.SignalBuy:
-				threshold, err := entryPrice.Sub(stopDist)
-				if err == nil && price.Cmp(threshold) <= 0 {
-					return ExitReasonStopLoss, true
-				}
-			case types.SignalSell:
-				threshold, err := entryPrice.Add(stopDist)
-				if err == nil && price.Cmp(threshold) >= 0 {
-					return ExitReasonStopLoss, true
-				}
+	stop, tp, hasStop, hasTP := s.bandLevels(openSignal, entryPrice, entryATR)
+	if hasStop {
+		switch openSignal { //nolint:exhaustive // SignalHold means flat — no stop check
+		case types.SignalBuy:
+			if price.Cmp(stop) <= 0 {
+				return ExitReasonStopLoss, true
+			}
+		case types.SignalSell:
+			if price.Cmp(stop) >= 0 {
+				return ExitReasonStopLoss, true
 			}
 		}
 	}
-
-	if cfg.TakeProfitATR.IsPos() && entryATR.IsPos() {
-		tpDist, err := cfg.TakeProfitATR.Mul(entryATR)
-		if err == nil {
-			switch openSignal { //nolint:exhaustive // SignalHold means flat — no take-profit check
-			case types.SignalBuy:
-				threshold, err := entryPrice.Add(tpDist)
-				if err == nil && price.Cmp(threshold) >= 0 {
-					return ExitReasonTakeProfit, true
-				}
-			case types.SignalSell:
-				threshold, err := entryPrice.Sub(tpDist)
-				if err == nil && price.Cmp(threshold) <= 0 {
-					return ExitReasonTakeProfit, true
-				}
+	if hasTP {
+		switch openSignal { //nolint:exhaustive // SignalHold means flat — no take-profit check
+		case types.SignalBuy:
+			if price.Cmp(tp) >= 0 {
+				return ExitReasonTakeProfit, true
+			}
+		case types.SignalSell:
+			if price.Cmp(tp) <= 0 {
+				return ExitReasonTakeProfit, true
 			}
 		}
 	}
 	return "", false
+}
+
+// bandLevels returns the entry-anchored stop and take-profit price
+// levels for the open position. Single source of truth: bandExit (close
+// decisions, live tick check) and the bar-extreme backtest helper share
+// this math so the levels can never drift.
+func (s *Strategy) bandLevels(
+	openSignal types.Signal,
+	entryPrice, entryATR decimal.Decimal,
+) (stop, tp decimal.Decimal, hasStop, hasTP bool) {
+	cfg := s.cfg
+	if !entryATR.IsPos() {
+		return stop, tp, false, false
+	}
+	if cfg.StopLossATR.IsPos() {
+		stopDist, err := cfg.StopLossATR.Mul(entryATR)
+		if err != nil {
+			return stop, tp, false, false
+		}
+		switch openSignal { //nolint:exhaustive // SignalHold means flat
+		case types.SignalBuy:
+			stop, err = entryPrice.Sub(stopDist)
+		case types.SignalSell:
+			stop, err = entryPrice.Add(stopDist)
+		}
+		if err == nil {
+			hasStop = true
+		}
+	}
+	if cfg.TakeProfitATR.IsPos() {
+		tpDist, err := cfg.TakeProfitATR.Mul(entryATR)
+		if err != nil {
+			return stop, tp, hasStop, false
+		}
+		switch openSignal { //nolint:exhaustive // SignalHold means flat
+		case types.SignalBuy:
+			tp, err = entryPrice.Add(tpDist)
+		case types.SignalSell:
+			tp, err = entryPrice.Sub(tpDist)
+		}
+		if err == nil {
+			hasTP = true
+		}
+	}
+	return stop, tp, hasStop, hasTP
 }
 
 // ShouldExit reports whether an open position should close, and why.
