@@ -245,6 +245,66 @@ func TestStrategyGetBars(t *testing.T) {
 
 // TestPreflightBacktest mirrors meanreversion's: coverage-only, no bar
 // loading, and a no-op without an injected store.
+
+// TestGetBars_UnalignedEndTruncatesToGrid: getBars must floor end to the
+// resolution grid so a partial trailing bucket is never loaded. At 15m
+// resolution with end = start + 4*15m + 7m30s, the pre-fix code passed
+// the raw end to LoadCandlesBucketed (including the 7m30s partial
+// bucket). Post-fix the call's `until` arg equals the truncated loadEnd
+// and coverage is checked against the same value, so a store that only
+// covers up to the truncated end passes. momentum fetches benchmark
+// yields only in spread mode; verify the FRED fetch window uses loadEnd
+// too.
+func TestGetBars_UnalignedEndTruncatesToGrid(t *testing.T) {
+	t.Parallel()
+
+	ob := uuid.Must(uuid.NewV7())
+	res := 15 * time.Minute
+	start := btStart
+	end := start.Add(4*res + 7*time.Minute + 30*time.Second)
+	loadEnd := end.UTC().Truncate(res) // start + 4*res
+
+	cfg := momentum.DefaultConfig()
+	cfg.SignalSource = momentum.SignalSourceSpread
+	cfg.OrderBookID = ob
+	cfg.Tenor = "10Y"
+	cfg.Resolution = "15m"
+	cfg.SlowWindow = 8
+	s := momentum.New(cfg, nil)
+
+	store := coveredStore(start.Add(-9*res), loadEnd.Add(-time.Minute))
+	store.LoadCandlesBucketedStub = func(
+		_ context.Context, _ string, _ candles.Resolution, since, until time.Time,
+	) ([]candles.Candle, error) {
+		assert.Equal(t, start.Add(-9*res).UTC(), since.UTC(),
+			"since must remain warmup-inclusive")
+		assert.Equal(t, loadEnd, until.UTC(),
+			"until must be the resolution-truncated loadEnd, dropping the partial trailing bucket")
+		return nil, nil
+	}
+	momentum.SetCandleHistoryStore(s, store)
+
+	benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
+	benchmark.FetchHistoricalYieldsStub = func(
+		_ context.Context, _ fred.Tenor, since, until time.Time,
+	) ([]fred.Observation, error) {
+		assert.Equal(t, start.Add(-9*res).UTC(), since.UTC())
+		assert.Equal(t, loadEnd, until.UTC(),
+			"FRED fetch window must use the truncated loadEnd, not raw end")
+		return nil, nil
+	}
+	momentum.SetBenchmarkYieldClient(s, benchmark)
+
+	_, err := momentum.GetBars(context.Background(), s, start, end)
+	require.NoError(t, err)
+
+	// Preflight covers the same window: with raw end unaligned, the
+	// store's hi (loadEnd−1m) must be sufficient; if getBars still
+	// checked against raw end the preflight would fail because the
+	// store does not cover the 7m30s past loadEnd.
+	require.NoError(t, momentum.PreflightBacktest(context.Background(), s, start, end))
+}
+
 func TestPreflightBacktest(t *testing.T) {
 	t.Parallel()
 

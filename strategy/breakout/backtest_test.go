@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/breakout/breakoutfakes"
@@ -803,4 +804,155 @@ func TestBacktest_TradeBoundsSuppressWarmupEntry(t *testing.T) {
 		"OpenTime bar %s must be >= TradeFrom %s", openBarStart, tradeFrom)
 	require.False(t, ct.CloseTime.After(tradeTo.Add(time.Minute)),
 		"CloseTime %s must be <= TradeTo+res %s", ct.CloseTime, tradeTo.Add(time.Minute))
+}
+
+// barAt builds a flat bar at an arbitrary absolute time so tests can
+// exercise the unaligned-end F12 guard (a tail bar whose Time < TradeTo
+// but Time+res > TradeTo).
+func barAt(t time.Time, price int64) types.Bar {
+	p := decimal.MustNew(price, 0)
+	return types.Bar{
+		Time:  t,
+		Open:  p,
+		High:  p,
+		Low:   p,
+		Close: p,
+	}
+}
+
+// TestBacktest_TradeToCompletionGated pins the F12 entry-guard fix:
+// the TradeTo comparison must use the bar's COMPLETION (bar.Time + res),
+// not its START, so a bar whose START is inside the window but whose
+// COMPLETION lands past TradeTo cannot open a position.
+//
+// Fixture (1m resolution): 30 warmup flat at 100 (LongVolWindow=30,
+// arms compression) → 1 in-bounds flat at 100 (bar 30, compression
+// stays armed, no signal because price == prevPrice) → 1 TAIL breakout
+// at 110 whose bar.Time + 1m > TradeTo. TradeTo is set 30s into the
+// tail bar's window, so the old guard (bar.Time.Before(TradeTo)) would
+// let the entry through; the new guard (completion-gated) suppresses it.
+//
+// Pre-fix: the tail bar's BUY fires and is held to end → 1 closed
+// trade (force-close at last bar's completion = TradeTo + 30s).
+// Post-fix: the tail bar's BUY is suppressed → 0 closed trades.
+func TestBacktest_TradeToCompletionGated(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.StopLossATR = decimal.Zero
+	cfg.TakeProfitATR = decimal.Zero
+	s := breakout.New(cfg, nil)
+
+	obs := make([]types.Bar, 0, 30+1+1)
+	for i := range 30 {
+		obs = append(obs, flatBar(i, 100))
+	}
+	obs = append(obs, flatBar(30, 100)) // compression stays armed, no signal
+	// TAIL breakout: bar.Time = 31m, completion = 32m. TradeTo = 31m30s,
+	// so the old guard (bar.Time.Before(TradeTo)) would let the entry
+	// through; the new guard (completion-gated) suppresses it.
+	tradeTo := obs[len(obs)-1].Time.Add(time.Minute).Add(30 * time.Second)
+	obs = append(obs, barAt(obs[len(obs)-1].Time.Add(time.Minute), 110))
+
+	bt := breakout.NewBacktester(s, nil)
+	bt.TradeFrom = obs[30].Time
+	bt.TradeTo = tradeTo
+
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	// Post-fix: no closed trade (the tail bar's BUY is suppressed by
+	// the completion-gated guard, so no position is ever opened).
+	// Pre-fix: 1 closed trade (the tail bar's BUY fires and is force-
+	// closed at end).
+	require.Empty(t, res.ClosedTrades,
+		"the tail bar's entry must be suppressed; got %d closed trades",
+		len(res.ClosedTrades))
+	require.Empty(t, res.TradeRecords,
+		"no trade record may be produced for the suppressed tail entry; got %d",
+		len(res.TradeRecords))
+}
+
+// TestBacktest_ForceCloseStampWithinTruncatedWindow pins the F12 force-
+// close path: with the partial trailing bucket excluded by the
+// resolution-truncated loadEnd, the last loaded bar's Time <= loadEnd
+// <= end (raw), so the force-close stamp (last.Time + res) lands at or
+// before the requested end. Fixture: getBars is called with an
+// UNALIGNED end (1h res, end = start + 2h + 30m, loadEnd = start + 2h);
+// the store returns bars up to loadEnd only. Run with bt.TradeTo = end
+// (raw, unaligned) — the force-close stamp must equal the last bar's
+// Time + res = loadEnd, NOT loadEnd + res (which would be > TradeTo).
+// This is the F12 reasoning: loadEnd + res > end is fine for the entry
+// guard (it suppresses entries on the partial tail), but the bars
+// themselves never include the partial bucket, so the force-close
+// stamp is bounded by loadEnd.
+func TestBacktest_ForceCloseStampWithinTruncatedWindow(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.ConfirmationBars = 1
+	cfg.StopLossATR = decimal.Zero
+	cfg.TakeProfitATR = decimal.Zero
+
+	ob := uuid.Must(uuid.NewV7())
+	res := time.Hour
+	cfg.Resolution = "1h"
+	cfg.LongVolWindow = 4
+	cfg.OrderBookID = ob
+	s := breakout.New(cfg, nil)
+
+	start := hEpoch.Add(2 * time.Hour)
+	end := start.Add(2*res + 30*time.Minute) // unaligned: 2h + 30m
+	loadEnd := end.UTC().Truncate(res)       // start + 2h
+	dataStart := start.Add(-time.Duration(cfg.LongVolWindow+1) * res)
+
+	// Build bars from dataStart up to (but not including) loadEnd.
+	// Bar flat: price 100, so no breakout fires during the run.
+	store := &breakoutfakes.FakeCandleHistoryStore{}
+	lo, hi := dataStart, loadEnd.Add(-time.Minute)
+	store.CandleRangeReturns(&lo, &hi, nil)
+
+	// Hand-craft 1h bars from dataStart to loadEnd, all flat at 100.
+	// LongVolWindow=4 means LongVol fills at bar 4; then compression
+	// arms and stays armed (ShortVol=0). With flat prices, no breakout
+	// fires — so the backtest produces no trades at all, and the
+	// force-close path is not exercised. That's the point: an unaligned
+	// end with no breakout means no trade record has any timestamp.
+	var bcs []candles.Candle
+	for t := dataStart; t.Before(loadEnd); t = t.Add(res) {
+		bcs = append(bcs, candles.Candle{
+			OrderBookID: ob.String(), StartTimestamp: t,
+			Open: decimal.One, High: decimal.One, Low: decimal.One, Close: decimal.One,
+		})
+	}
+	store.LoadCandlesBucketedReturns(bcs, nil)
+	breakout.SetCandleHistoryStore(s, store)
+
+	bars, err := breakout.GetBars(context.Background(), s, start, end)
+	require.NoError(t, err)
+	require.NotEmpty(t, bars)
+
+	// Run with the bars that came out of getBars (the partial bucket
+	// is already excluded). The runner pins TradeTo = end (raw,
+	// unaligned). No trades fire on a flat series, so this just
+	// exercises the load + boundary plumbing.
+	bt := breakout.NewBacktester(s, nil)
+	bt.TradeFrom = start
+	bt.TradeTo = end
+
+	_, err = bt.Run(context.Background(), bars)
+	require.NoError(t, err)
+
+	// Key assertion: the last bar's Time + res == loadEnd, not loadEnd
+	// + res. A force-close in this run would stamp last.Time + res
+	// = loadEnd <= end (the runner's TradeTo). Pre-fix (no truncation
+	// in getBars) the store would have returned an additional bar
+	// starting at loadEnd, and the force-close stamp would have been
+	// loadEnd + res > end.
+	last := bars[len(bars)-1]
+	assert.True(t, last.Time.Equal(loadEnd.Add(-res)),
+		"last bar's Time must be loadEnd - res (partial bucket dropped); got %s, want %s",
+		last.Time, loadEnd.Add(-res))
+	assert.True(t, last.Time.Add(res).Equal(loadEnd),
+		"last bar's completion must equal loadEnd (NOT loadEnd + res); got %s, want %s",
+		last.Time.Add(res), loadEnd)
 }

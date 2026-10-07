@@ -180,14 +180,19 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 				}
 			} else if decision.Signal() != types.SignalHold &&
 				(b.TradeFrom.IsZero() || !bar.Time.Before(b.TradeFrom)) &&
-				(b.TradeTo.IsZero() || bar.Time.Before(b.TradeTo)) {
+				(b.TradeTo.IsZero() || !bar.Time.Add(res).After(b.TradeTo)) {
 				// Flat — open on a fresh entry signal, but only
 				// when the bar sits inside the trading window.
-				// Bars before TradeFrom (warmup) or at/after TradeTo
-				// still update indicators, OBV via ingestTradesUpTo,
-				// and run exits — only the entry branch is gated,
-				// so a position opened in-bounds can still run to
-				// end of data.
+				// Entries execute at bar completion (bar.Time + res),
+				// so every entry timestamp falls in (TradeFrom,
+				// TradeTo]. The TradeFrom side stays `Before`-strict
+				// (bars starting before TradeFrom never trade even
+				// if they complete exactly at TradeFrom — warmup
+				// contract). Bars outside the window still seed
+				// indicators, OBV via ingestTradesUpTo, and run
+				// exits — only the entry branch is gated, so a
+				// position opened in-bounds can still run to end
+				// of data.
 				entryPrice := decision.Price()
 				budget, err := remainingBalance.Mul(decision.PositionSize())
 				if err != nil {

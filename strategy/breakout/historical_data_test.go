@@ -154,3 +154,54 @@ func TestPreflightBacktest_SourceEdgePasses(t *testing.T) {
 
 	require.NoError(t, breakout.PreflightBacktest(context.Background(), s, start, end))
 }
+
+// TestGetBars_UnalignedEndTruncatesToGrid: getBars must floor end to the
+// resolution grid so a partial trailing bucket is never loaded. At 15m
+// resolution with end = start + 4*15m + 7m30s, the pre-fix code passed
+// the raw end to LoadCandlesBucketed (including the 7m30s partial
+// bucket). Post-fix the call's `until` arg equals the truncated loadEnd
+// and coverage is checked against the same value, so a store that only
+// covers up to the truncated end passes.
+func TestGetBars_UnalignedEndTruncatesToGrid(t *testing.T) {
+	t.Parallel()
+
+	ob := uuid.Must(uuid.NewV7())
+	res := 15 * time.Minute
+	start := hEpoch
+	end := start.Add(4*res + 7*time.Minute + 30*time.Second)
+	loadEnd := end.UTC().Truncate(res) // start + 4*res
+
+	cfg := defaultCfg()
+	cfg.Resolution = "15m"
+	cfg.LongVolWindow = 8
+	cfg.OrderBookID = ob
+	s := breakout.New(cfg, nil)
+
+	// Coverage must extend up to loadEnd (NOT raw end). Last raw 1m
+	// candle at loadEnd−1m satisfies the source-level guard for the
+	// truncated window.
+	store := &breakoutfakes.FakeCandleHistoryStore{}
+	lo := start.Add(-9 * res)
+	hi := loadEnd.Add(-time.Minute)
+	store.CandleRangeReturns(&lo, &hi, nil)
+	store.LoadCandlesBucketedReturns(nil, nil)
+	breakout.SetCandleHistoryStore(s, store)
+
+	_, err := breakout.GetBars(context.Background(), s, start, end)
+	require.NoError(t, err)
+
+	// LoadCandlesBucketed must have been called with loadEnd, not raw end.
+	ctxArg, obID, resolution, since, until := store.LoadCandlesBucketedArgsForCall(0)
+	_ = ctxArg
+	_ = obID
+	_ = resolution
+	assert.Equal(t, start.Add(-9*res).UTC(), since.UTC(), "since must remain warmup-inclusive")
+	assert.Equal(t, loadEnd, until.UTC(),
+		"until must be the resolution-truncated loadEnd, dropping the partial trailing bucket")
+
+	// Preflight covers the same window: with raw end unaligned, the
+	// store's hi (loadEnd−1m) must be sufficient; if getBars still
+	// checked against raw end the preflight would fail because the
+	// store does not cover the 7m30s past loadEnd.
+	require.NoError(t, breakout.PreflightBacktest(context.Background(), s, start, end))
+}

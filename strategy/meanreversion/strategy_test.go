@@ -19,6 +19,7 @@ import (
 
 var (
 	epoch   = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	hEpoch  = time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	timeout = 10 * time.Second
 )
 

@@ -248,11 +248,16 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 			// Entry is also gated on the trading window: bars before
 			// TradeFrom (warmup) or at/after TradeTo only feed Update,
 			// ingestTradesUpTo (imbalance), and run exits — they never
-			// open a position.
+			// open a position. Entries execute at bar completion
+			// (bar.Time + res), so every entry timestamp falls in
+			// (TradeFrom, TradeTo]; the TradeFrom side stays
+			// `Before`-strict (bars starting before TradeFrom never
+			// trade even if they complete exactly at TradeFrom —
+			// warmup contract).
 			if openTrade == nil && !closedThisBar &&
 				decision.Signal() != types.SignalHold && b.strategy.imbalanceAllows(decision.Signal()) &&
 				(b.TradeFrom.IsZero() || !bar.Time.Before(b.TradeFrom)) &&
-				(b.TradeTo.IsZero() || bar.Time.Before(b.TradeTo)) {
+				(b.TradeTo.IsZero() || !bar.Time.Add(res).After(b.TradeTo)) {
 				entryPrice := decision.Price()
 				budget, err := remainingBalance.Mul(decision.PositionSize())
 				if err != nil {

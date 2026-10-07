@@ -816,3 +816,129 @@ func TestBacktest_TradeToExactBoundaryIsExclusive(t *testing.T) {
 		"entry on bar.Time == TradeTo must be suppressed; got %d trade records",
 		len(res.TradeRecords))
 }
+
+// barAt builds a bar at an arbitrary absolute time, used by the
+// unaligned-end and force-close tests.
+func barAt(t time.Time, price int64) types.Bar {
+	p := decimal.MustNew(price, 0)
+	return types.Bar{
+		Time: t, Open: p, High: p, Low: p, Close: p,
+	}
+}
+
+// TestBacktest_TradeToCompletionGated pins the F12 entry-guard fix:
+// the TradeTo comparison must use the bar's COMPLETION (bar.Time + res),
+// not its START, so a bar whose START is inside the window but whose
+// COMPLETION lands past TradeTo cannot open a position.
+//
+// Fixture (1m resolution, fast=3, slow=5): 5 warmup flat at 100 (no
+// cross, fast=slow=100) → 1 in-bounds flat at 100 (no cross) → 1 TAIL
+// rising bar at 110 (cross fires: fastMA > slowMA). TradeTo is set
+// 30s into the tail bar's window, so the old guard
+// (bar.Time.Before(TradeTo)) would let the entry through; the new
+// guard (completion-gated) suppresses it.
+//
+// Pre-fix: the tail bar's BUY fires → 1 closed trade (force-close at end).
+// Post-fix: the tail bar's BUY is suppressed → 0 closed trades.
+func TestBacktest_TradeToCompletionGated(t *testing.T) {
+	cfg := testCfg(3, 5, decimal.Zero, decimal.Zero)
+	cfg.Resolution = candles.Resolution1m
+	s := momentum.New(cfg, nil)
+	bt := momentum.NewBacktester(s, nil)
+
+	obs := make([]types.Bar, 0, 5+1+1)
+	for i := range 5 {
+		obs = append(obs, flatBar(i, 100))
+	}
+	obs = append(obs, flatBar(5, 100)) // still no cross
+	// TAIL bar at Time=barBase+6m, completion=barBase+7m. TradeTo=
+	// barBase+6m30s, so the old guard (bar.Time.Before(TradeTo))
+	// would let the entry through; the new guard (completion-gated)
+	// suppresses it.
+	tradeTo := barBase.Add(6*time.Minute + 30*time.Second)
+	obs = append(obs, barAt(barBase.Add(6*time.Minute), 110))
+
+	bt.TradeFrom = obs[0].Time
+	bt.TradeTo = tradeTo
+
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	// Post-fix: no closed trade (the tail bar's BUY is suppressed by
+	// the completion-gated guard, so no position is ever opened).
+	// Pre-fix: 1 closed trade (the tail bar's BUY fires and is force-
+	// closed at end).
+	require.Empty(t, res.ClosedTrades,
+		"the tail bar's entry must be suppressed; got %d closed trades",
+		len(res.ClosedTrades))
+	require.Empty(t, res.TradeRecords,
+		"no trade record may be produced for the suppressed tail entry; got %d",
+		len(res.TradeRecords))
+}
+
+// TestBacktest_ForceCloseStampWithinTruncatedWindow pins the F12 force-
+// close path: with the partial trailing bucket excluded by the
+// resolution-truncated loadEnd, the last loaded bar's Time <= loadEnd
+// <= end (raw), so the force-close stamp (last.Time + res) lands at or
+// before the requested end. Fixture: getBars is called with an
+// UNALIGNED end (1h res, end = start + 2h + 30m, loadEnd = start + 2h);
+// the store returns bars up to loadEnd only. Run with bt.TradeTo = end
+// (raw, unaligned) — the force-close stamp must equal the last bar's
+// Time + res = loadEnd, NOT loadEnd + res (which would be > TradeTo).
+// No signal fires (steady prices), so the backtest produces no trades;
+// the assertion is on the bar-time bound after the truncated load.
+func TestBacktest_ForceCloseStampWithinTruncatedWindow(t *testing.T) {
+	cfg := testCfg(3, 5, decimal.Zero, decimal.Zero)
+
+	ob := uuid.Must(uuid.NewV7())
+	cfg.OrderBookID = ob
+	cfg.Resolution = "1h"
+	cfg.SlowWindow = 4
+	s := momentum.New(cfg, nil)
+
+	start := barBase.Add(2 * time.Hour)
+	end := start.Add(2*time.Hour + 30*time.Minute) // unaligned
+	loadEnd := end.UTC().Truncate(time.Hour)       // start + 2h
+	dataStart := start.Add(-time.Duration(cfg.SlowWindow+1) * time.Hour)
+
+	store := &momentumfakes.FakeCandleHistoryStore{}
+	lo, hi := dataStart, loadEnd.Add(-time.Minute)
+	store.CandleRangeReturns(&lo, &hi, nil)
+
+	// Hand-craft 1h bars from dataStart to loadEnd, all flat at 100.
+	// fast=slow=100 throughout, no cross, no signal.
+	var bcs []candles.Candle
+	for t := dataStart; t.Before(loadEnd); t = t.Add(time.Hour) {
+		bcs = append(bcs, candles.Candle{
+			OrderBookID: ob.String(), StartTimestamp: t,
+			Close: decimal.One,
+		})
+	}
+	store.LoadCandlesBucketedReturns(bcs, nil)
+	momentum.SetCandleHistoryStore(s, store)
+
+	bars, err := momentum.GetBars(context.Background(), s, start, end)
+	require.NoError(t, err)
+	require.NotEmpty(t, bars)
+
+	bt := momentum.NewBacktester(s, nil)
+	bt.TradeFrom = start
+	bt.TradeTo = end
+
+	_, err = bt.Run(context.Background(), bars)
+	require.NoError(t, err)
+
+	// Key assertion: the last bar's Time + res == loadEnd, not loadEnd
+	// + res. A force-close in this run would stamp last.Time + res
+	// = loadEnd <= end (the runner's TradeTo). Pre-fix (no truncation
+	// in getBars) the store would have returned an additional bar
+	// starting at loadEnd, and the force-close stamp would have been
+	// loadEnd + res > end.
+	last := bars[len(bars)-1]
+	assert.True(t, last.Time.Equal(loadEnd.Add(-time.Hour)),
+		"last bar's Time must be loadEnd - res (partial bucket dropped); got %s, want %s",
+		last.Time, loadEnd.Add(-time.Hour))
+	assert.True(t, last.Time.Add(time.Hour).Equal(loadEnd),
+		"last bar's completion must equal loadEnd (NOT loadEnd + res); got %s, want %s",
+		last.Time.Add(time.Hour), loadEnd)
+}

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/candles"
+	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion/meanreversionfakes"
@@ -681,4 +683,164 @@ func TestBacktester_TradeBoundsSuppressWarmupEntry(t *testing.T) {
 		"OpenTime bar %s must be >= TradeFrom %s", openBarStart, tradeFrom)
 	require.False(t, ct.CloseTime.After(tradeTo.Add(time.Hour)),
 		"CloseTime %s must be <= TradeTo+res %s", ct.CloseTime, tradeTo.Add(time.Hour))
+}
+
+// barAt builds a bar with CloseYTM and BenchmarkYield at the supplied
+// absolute time, used by the unaligned-end and force-close tests.
+func barAt(t time.Time, ytm, bench decimal.Decimal) types.Bar {
+	return types.Bar{
+		Time: t, Close: bondPriceFromYTM(ytm),
+		CloseYTM: ytm, BenchmarkYield: bench,
+	}
+}
+
+// TestBacktester_TradeToCompletionGated pins the F12 entry-guard fix:
+// the TradeTo comparison must use the bar's COMPLETION (bar.Time + res),
+// not its START, so a bar whose START is inside the window but whose
+// COMPLETION lands past TradeTo cannot open a position.
+//
+// Fixture (1h resolution, LookbackWindow=20): 20 warmup bars cycling
+// spreads (0.009, 0.010, 0.011) → 1 in-bounds bar at the cycle-spread
+// (no signal — the z-score at the boundary is exactly 0) → 1 TAIL
+// wide-spread bar at 0.13 (z=10, BUY fires) whose bar.Time+res >
+// TradeTo. TradeTo is set 30m into the tail bar's window, so the old
+// guard (bar.Time.Before(TradeTo)) would let the entry through; the
+// new guard (completion-gated) suppresses it.
+//
+// Pre-fix: the tail bar's BUY fires → 1 closed trade (BUY held to end).
+// Post-fix: the tail bar's BUY is suppressed → 0 closed trades.
+func TestBacktester_TradeToCompletionGated(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.LookbackWindow = 20
+	cfg.MinStdDev = decimal.MustNew(1, 4)
+	cfg.InitialBalance = decimal.MustNew(10000, 0)
+	s := meanreversion.New(cfg, nil)
+	bt := meanreversion.NewBacktester(s, nil)
+
+	base := decimal.MustNew(5, 2)
+	spreads := []decimal.Decimal{
+		decimal.MustNew(9, 3), decimal.MustNew(10, 3), decimal.MustNew(11, 3),
+	}
+	buildBar := func(i int, ytm decimal.Decimal) types.Bar {
+		return types.Bar{
+			Time:           epoch.Add(time.Duration(i) * time.Hour),
+			Close:          bondPriceFromYTM(ytm),
+			CloseYTM:       ytm,
+			BenchmarkYield: base,
+		}
+	}
+
+	bars := make([]types.Bar, 0, 20+1+1)
+	for i := range 20 {
+		sp := spreads[i%3]
+		ytm, _ := base.Add(sp)
+		bars = append(bars, buildBar(i, ytm))
+	}
+	// In-bounds bar at the cycle spread (10bp): z=0, no signal.
+	bars = append(bars, buildBar(20, decimal.MustNew(60, 3)))
+	// TAIL wide spread: z=10, BUY fires. bar.Time+res > TradeTo.
+	tailYTM := decimal.MustNew(13, 2) // 0.13
+	tailStart := bars[len(bars)-1].Time.Add(time.Hour)
+	tradeTo := tailStart.Add(30 * time.Minute)
+	bars = append(bars, barAt(tailStart, tailYTM, base))
+
+	bt.TradeFrom = bars[20].Time
+	bt.TradeTo = tradeTo
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	res, err := bt.Run(ctx, bars)
+	require.NoError(t, err)
+
+	// Post-fix: no closed trade (the tail bar's BUY is suppressed by
+	// the completion-gated guard, so no position is ever opened).
+	// Pre-fix: 1 closed trade (the tail bar's BUY fires and is force-
+	// closed at end).
+	require.Empty(t, res.ClosedTrades,
+		"the tail bar's entry must be suppressed; got %d closed trades",
+		len(res.ClosedTrades))
+	require.Empty(t, res.TradeRecords,
+		"no trade record may be produced for the suppressed tail entry; got %d",
+		len(res.TradeRecords))
+}
+
+// TestBacktester_ForceCloseStampWithinTruncatedWindow pins the F12
+// force-close path: with the partial trailing bucket excluded by the
+// resolution-truncated loadEnd, the last loaded bar's Time <= loadEnd
+// <= end (raw), so the force-close stamp (last.Time + res) lands at or
+// before the requested end. Fixture: getBars is called with an
+// UNALIGNED end (1h res, end = start + 2h + 30m, loadEnd = start + 2h);
+// the store returns bars up to loadEnd only. Run with bt.TradeTo = end
+// (raw, unaligned) — the force-close stamp must equal the last bar's
+// Time + res = loadEnd, NOT loadEnd + res (which would be > TradeTo).
+// No breakout fires (steady cycle-spread), so the backtest produces no
+// trades; the assertion is on the bar-time bound after the truncated
+// load.
+func TestBacktester_ForceCloseStampWithinTruncatedWindow(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.LookbackWindow = 4
+	cfg.InitialBalance = decimal.MustNew(10000, 0)
+
+	ob := uuid.Must(uuid.NewV7())
+	cfg.OrderBookID = ob
+	cfg.Tenor = "10Y"
+	cfg.Resolution = "1h"
+	s := meanreversion.New(cfg, nil)
+
+	start := hEpoch.Add(2 * time.Hour)
+	end := start.Add(2*time.Hour + 30*time.Minute) // unaligned
+	loadEnd := end.UTC().Truncate(time.Hour)       // start + 2h
+	dataStart := start.Add(-time.Duration(cfg.LookbackWindow+1) * time.Hour)
+
+	store := &meanreversionfakes.FakeCandleHistoryStore{}
+	lo, hi := dataStart, loadEnd.Add(-time.Minute)
+	store.CandleRangeReturns(&lo, &hi, nil)
+
+	// Hand-craft 1h bars from dataStart to loadEnd, all at the same
+	// spread — no signal fires, the run produces no trades.
+	base := decimal.MustNew(5, 2)
+	benchYTM := decimal.MustNew(60, 3) // 0.06; spread = 0.01 (within LookbackWindow mean)
+	var bcs []candles.Candle
+	for t := dataStart; t.Before(loadEnd); t = t.Add(time.Hour) {
+		bcs = append(bcs, candles.Candle{
+			OrderBookID: ob.String(), StartTimestamp: t,
+			CloseYTM: benchYTM, Close: decimal.One,
+			HighYTM: benchYTM, LowYTM: benchYTM,
+		})
+	}
+	store.LoadCandlesBucketedReturns(bcs, nil)
+	meanreversion.SetCandleHistoryStore(s, store)
+
+	// FRED: return enough observations to cover the window.
+	bench := &meanreversionfakes.FakeBenchmarkYieldClient{}
+	bench.FetchHistoricalYieldsReturns([]fred.Observation{
+		{Date: dataStart, Yield: base}, {Date: loadEnd, Yield: base},
+	}, nil)
+	meanreversion.SetBenchmarkYieldClient(s, bench)
+
+	bars, err := meanreversion.GetBars(context.Background(), s, start, end)
+	require.NoError(t, err)
+	require.NotEmpty(t, bars)
+
+	bt := meanreversion.NewBacktester(s, nil)
+	bt.TradeFrom = start
+	bt.TradeTo = end
+
+	_, err = bt.Run(context.Background(), bars)
+	require.NoError(t, err)
+
+	// Key assertion: the last bar's Time + res == loadEnd, not loadEnd
+	// + res. A force-close in this run would stamp last.Time + res
+	// = loadEnd <= end (the runner's TradeTo). Pre-fix (no truncation
+	// in getBars) the store would have returned an additional bar
+	// starting at loadEnd, and the force-close stamp would have been
+	// loadEnd + res > end.
+	last := bars[len(bars)-1]
+	assert.True(t, last.Time.Equal(loadEnd.Add(-time.Hour)),
+		"last bar's Time must be loadEnd - res (partial bucket dropped); got %s, want %s",
+		last.Time, loadEnd.Add(-time.Hour))
+	assert.True(t, last.Time.Add(time.Hour).Equal(loadEnd),
+		"last bar's completion must equal loadEnd (NOT loadEnd + res); got %s, want %s",
+		last.Time.Add(time.Hour), loadEnd)
 }
