@@ -262,13 +262,21 @@ func (h *Handler) processMessage(ctx context.Context, orderBookID string, data [
 		return nil
 	}
 
+	// Hold the read lock across the entire fan-out so Unsubscribe
+	// (which takes the write lock to close + delete) waits for any
+	// in-flight send to finish. Without this, a concurrent
+	// Unsubscribe can close a channel that processMessage is still
+	// sending on, panicking the goroutine. Tradeoff: a stalled
+	// subscriber now blocks Unsubscribe/Subscribe for at most one
+	// pushTimeout (5s), accepted to guarantee no send-on-closed-channel.
 	h.mu.RLock()
+	defer h.mu.RUnlock()
+
 	count := len(h.subscribers)
 	subs := make([]chan []StreamCandlesEntry, 0, count)
 	for _, subCh := range h.subscribers {
 		subs = append(subs, subCh)
 	}
-	h.mu.RUnlock()
 
 	slog.Debug("sending candle updates", "order_book_id", orderBookID, "updates", len(entries), "subscribers", count)
 

@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -23,15 +24,20 @@ type candleSource interface {
 // persists candles — price-daemon owns ingestion; strategy bars are
 // ephemeral.
 type CandleRegistryConfig struct {
+	// WSBaseURL is the DORA WebSocket API base URL.
 	WSBaseURL string
-	APIKey    string
-	// Store supplies the stream's resume cursor. Optional: nil swaps in
-	// a no-op store so the stream works without persistence (candles.Handler
-	// rejects a nil store with "missing candle store").
+	// APIKey is the DORA API key sent on the WebSocket URL.
+	APIKey string
+	// Store is the candle persistence backend (GetLastTimestamp/LoadCandles).
+	// Nil falls back to nopCandleStore: no resume cursor, Config.Since
+	// reaches the handler untouched so the warm-start bootstrap honours it.
 	Store candles.CandleStore
-	// NewHandler is injectable for tests; defaults to candles.New.
-	NewHandler func(cfg candles.Config, store candles.CandleStore) (candleSource, error)
-	// StartDaemon runs the reconnect loop for a handler; injectable for tests.
+	// NewHandler constructs the candle source for a new (book, resolution)
+	// entry. nil falls back to candles.New wrapped via the streams daemon.
+	NewHandler func(c candles.Config, s candles.CandleStore) (candleSource, error)
+	// StartDaemon launches the websocket/stream goroutine for a new
+	// (book, resolution) entry. nil falls back to streams.Run on a
+	// *candles.Handler.
 	StartDaemon func(ctx context.Context, src candleSource)
 }
 
@@ -47,10 +53,27 @@ func (nopCandleStore) LoadCandles(context.Context, string, time.Time, time.Time)
 	return nil, nil
 }
 
+// ponytail: closedBarCacheCap is the replay ceiling. A 1m-resolution
+// first-subscriber since ~3 days ago produces ~4320 closed bars; deeper
+// since requests see a partial cache and would need
+// candles_history.LoadCandlesBucketed prefill rather than a larger ring.
+const closedBarCacheCap = 4096
+
+// subscriberChanBase is the slack above the snapshot length reserved on
+// every subscriber channel; absorbs short bursts between snapshots.
+const subscriberChanBase = 16
+
+// registryEntry owns one shared observer subscription, one BarCloser,
+// and a bounded cache of closed bars replayed to late subscribers.
 type registryEntry struct {
-	src    candleSource
-	cancel context.CancelFunc
-	refs   int
+	src         candleSource
+	cancel      context.CancelFunc
+	observerID  uuid.UUID
+	closer      *BarCloser
+	refs        int
+	mu          sync.Mutex
+	cache       []types.Bar
+	subscribers map[uuid.UUID]chan types.Bar
 }
 
 // CandleRegistry owns one candle stream per (order book, resolution),
@@ -97,7 +120,10 @@ func (r *CandleRegistry) HandlerCount() int {
 // The stream is started by the first subscriber and stopped when the last
 // subscriber unsubscribes. Since is first-subscriber-wins: later
 // subscribers joining an existing (book, resolution) entry inherit the
-// entry's original warm-up point; deeper since requests are not honoured.
+// entry's original warm-up point. Deeper since requests are not honoured
+// beyond what the entry's own Config.Since requested at creation; late
+// joiners are warmed from the entry's closed-bar cache, bounded by
+// closedBarCacheCap (see the ponytail note on the cap).
 // The ctx parameter is kept for CandleFeed fidelity but does not scope the
 // stream — entry lifetime is registry-managed via refcounting.
 func (r *CandleRegistry) SubscribeBars(
@@ -108,7 +134,6 @@ func (r *CandleRegistry) SubscribeBars(
 	}
 	key := book.String() + "|" + string(resolution)
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	e, ok := r.entries[key]
 	if !ok {
 		src, err := r.cfg.NewHandler(candles.Config{
@@ -117,39 +142,114 @@ func (r *CandleRegistry) SubscribeBars(
 			Resolution:   resolution, Since: since,
 		}, r.cfg.Store)
 		if err != nil {
+			r.mu.Unlock()
+			return nil, nil, err
+		}
+		observerID := uuid.New()
+		raw, err := src.Subscribe(observerID)
+		if err != nil {
+			r.mu.Unlock()
 			return nil, nil, err
 		}
 		// Background-derived: a shared entry must not die when one
 		// subscriber's ctx is cancelled; teardown is refcount-driven.
 		streamCtx, cancel := context.WithCancel(context.Background())
-		r.cfg.StartDaemon(streamCtx, src)
-		e = &registryEntry{src: src, cancel: cancel}
-		r.entries[key] = e
-	}
-	subID := uuid.New()
-	raw, err := e.src.Subscribe(subID)
-	if err != nil {
-		if e.refs == 0 {
-			e.cancel()
-			delete(r.entries, key)
+		e = &registryEntry{
+			src:         src,
+			cancel:      cancel,
+			observerID:  observerID,
+			closer:      StartBarCloser(raw),
+			subscribers: map[uuid.UUID]chan types.Bar{},
 		}
-		return nil, nil, err
+		r.entries[key] = e
+		// F7: start the daemon only after the observer is registered.
+		// Otherwise the DORA websocket bootstrap (history batch honoring
+		// Config.Since) can be fanned out to zero subscribers and the warm
+		// start is silently lost.
+		r.cfg.StartDaemon(streamCtx, src)
+		startEntryForwarder(e)
 	}
+	// Snapshot the cache and replay synchronously into the new subscriber's
+	// channel. The forwarder takes entry.mu to append+send, so the snapshot
+	// is strictly ordered before every subsequent live bar — no gap, no
+	// duplication.
+	e.mu.Lock()
+	snap := make([]types.Bar, len(e.cache))
+	copy(snap, e.cache)
+	subID := uuid.New()
+	ch := make(chan types.Bar, len(snap)+subscriberChanBase)
+	for _, b := range snap {
+		ch <- b
+	}
+	e.subscribers[subID] = ch
+	e.mu.Unlock()
 	e.refs++
-	closer := StartBarCloser(raw)
+	r.mu.Unlock()
+
 	var once sync.Once
 	unsub := func() {
 		once.Do(func() {
-			_ = e.src.Unsubscribe(subID)
-			closer.Stop()
+			// Lock-ordering: entry.mu must NEVER be held while acquiring
+			// r.mu; the only nested path is SubscribeBars (r.mu → entry.mu).
+			e.mu.Lock()
+			sub, found := e.subscribers[subID]
+			if found {
+				delete(e.subscribers, subID)
+				close(sub)
+			}
+			e.mu.Unlock()
+
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			e.refs--
 			if e.refs == 0 {
 				e.cancel()
+				// Unsubscribe closes the observer's raw channel, which
+				// makes the BarCloser loop exit and close closer.Bars().
+				// The forwarder drains, closes any remaining subscriber
+				// channels, and exits.
+				_ = e.src.Unsubscribe(e.observerID)
+				e.closer.Stop()
 				delete(r.entries, key)
 			}
 		})
 	}
-	return closer.Bars(), unsub, nil
+	return ch, unsub, nil
+}
+
+// startEntryForwarder launches the per-entry goroutine which drains the
+// BarCloser into every subscriber's channel and the bounded cache.
+// Lock-ordering invariant: entry.mu is acquired exactly once per bar
+// (append+evict+fan-out); non-blocking sends mean a slow subscriber
+// causes a drop, not a stall (same degradation as the handler's
+// push-timeout drop — a strategy that cannot keep up loses a bar).
+func startEntryForwarder(e *registryEntry) {
+	go func() {
+		for bar := range e.closer.Bars() {
+			e.mu.Lock()
+			e.cache = append(e.cache, bar)
+			if n := len(e.cache); n > closedBarCacheCap {
+				// ponytail: O(closedBarCacheCap) memmove on overflow.
+				copy(e.cache, e.cache[n-closedBarCacheCap:])
+				e.cache = e.cache[:closedBarCacheCap]
+			}
+			for _, ch := range e.subscribers {
+				select {
+				case ch <- bar:
+				default:
+					slog.Warn("candle registry subscriber lagging; dropping bar",
+						"subscribers", len(e.subscribers))
+				}
+			}
+			e.mu.Unlock()
+		}
+		// Stream ended (Unsubscribe on the observer, Stop, or daemon exit).
+		// Close every remaining subscriber channel so reads unblock with ok=false.
+		e.mu.Lock()
+		for _, ch := range e.subscribers {
+			close(ch)
+		}
+		e.subscribers = map[uuid.UUID]chan types.Bar{}
+		e.mu.Unlock()
+	}()
 }
