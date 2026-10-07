@@ -104,9 +104,9 @@ func TestStrategyGetBars(t *testing.T) {
 		cfg := barTestConfig()
 		s := meanreversion.New(cfg, nil)
 		lo := btStart.Add(-21 * time.Hour)
-		// Last bar starts two hours before end, so its close (hi+1h)
-		// is still one hour short of end.
-		hi := btEnd.Add(-2 * time.Hour)
+		// Last raw 1m candle is two minutes before end, so its source
+		// interval [hi, hi+1m) ends a full minute short of end.
+		hi := btEnd.Add(-2 * time.Minute)
 		store := coveredStore(lo, hi)
 		meanreversion.SetCandleHistoryStore(s, store)
 
@@ -124,9 +124,10 @@ func TestStrategyGetBars(t *testing.T) {
 		cfg := barTestConfig()
 		s := meanreversion.New(cfg, nil)
 		lo := btStart.Add(-21 * time.Hour)
-		// The last persisted bar starts at end−1h, closing exactly at
-		// end — sufficient; a bar starting at/after end is never loaded.
-		hi := btEnd.Add(-time.Hour)
+		// The last raw 1m candle starts at end−1m, covering [end−1m,
+		// end) — sufficient at the source level; a 1m candle starting
+		// at/after end is never loaded.
+		hi := btEnd.Add(-time.Minute)
 		store := coveredStore(lo, hi)
 		store.LoadCandlesBucketedStub = func(
 			_ context.Context, _ string, _ candles.Resolution, since, _ time.Time,
@@ -267,6 +268,39 @@ func TestPreflightBacktest(t *testing.T) {
 
 	t.Run("no injected store is a no-op", func(t *testing.T) {
 		s := meanreversion.New(barTestConfig(), nil)
+
+		require.NoError(t, meanreversion.PreflightBacktest(context.Background(), s, btStart, btEnd))
+	})
+
+	// Source-level guard: CandleRange reports raw 1m rows, so the
+	// guard must reject when the last 1m candle is more than 1m
+	// short of end, regardless of the strategy's bar resolution. The
+	// pre-fix guard added the strategy resolution (1h here) to hi,
+	// so it wrongly passed.
+	t.Run("source resolution enforced: 1h strategy with last 1m candle 2m before end", func(t *testing.T) {
+		s := meanreversion.New(barTestConfig(), nil)
+		// barTestConfig sets Resolution=1h; warmup = (LookbackWindow+1)*1h = 25h.
+		// Last raw 1m candle is 2m before btEnd → 1m of source data
+		// is missing for the requested end.
+		hi := btEnd.Add(-2 * time.Minute)
+		store := coveredStore(btStart.Add(-25*time.Hour), hi)
+		meanreversion.SetCandleHistoryStore(s, store)
+
+		err := meanreversion.PreflightBacktest(context.Background(), s, btStart, btEnd)
+
+		var cov *candles.ErrNoCandleCoverage
+		require.ErrorAs(t, err, &cov)
+		assert.True(t, cov.Until.Equal(hi))
+	})
+
+	// Regression: the corrected guard does not over-reject at the
+	// source edge. The last raw 1m candle at end−1m covers
+	// [end−1m, end), so coverage is sufficient.
+	t.Run("source resolution enforced: 1h strategy with last 1m candle at end-1m passes", func(t *testing.T) {
+		s := meanreversion.New(barTestConfig(), nil)
+		hi := btEnd.Add(-time.Minute)
+		store := coveredStore(btStart.Add(-25*time.Hour), hi)
+		meanreversion.SetCandleHistoryStore(s, store)
 
 		require.NoError(t, meanreversion.PreflightBacktest(context.Background(), s, btStart, btEnd))
 	})

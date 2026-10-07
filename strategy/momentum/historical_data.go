@@ -118,11 +118,20 @@ func (s *Strategy) getBars(ctx context.Context, start, end time.Time) ([]types.B
 	return bars, nil
 }
 
+// sourceBarDuration is the resolution of the raw candles_history rows
+// CandleRange reports; the raw table stores 1m candles, not the strategy's
+// bar resolution.
+const sourceBarDuration = time.Minute
+
 // checkCandleCoverage verifies candles_history fully covers the requested
-// window (including warmup) for the strategy's order book. The last
-// persisted bar starts at hi and covers [hi, hi+res), so the window is
-// covered when end ≤ hi+res — a bar starting at/after end is never loaded
-// and must not be required.
+// window (including warmup) for the strategy's order book. CandleRange
+// reports the min/max timestamps of the RAW 1m candles_history rows: the
+// last persisted row starts at hi and covers [hi, hi+1m), so the window
+// is covered when end ≤ hi+1m — a 1m candle starting at/after end is
+// never loaded and must not be required. At resolutions above 1m, the
+// final folded bucket may still be partial (an inherent approximation of
+// folding raw 1m rows to a coarser bar), but coverage now only
+// guarantees raw-minute presence through end.
 func (s *Strategy) checkCandleCoverage(ctx context.Context, store candleHistoryStore, dataStart, end time.Time) error {
 	ob := s.cfg.OrderBookID.String()
 	lo, hi, err := store.CandleRange(ctx, ob)
@@ -132,8 +141,7 @@ func (s *Strategy) checkCandleCoverage(ctx context.Context, store candleHistoryS
 	if lo == nil || hi == nil {
 		return &candles.ErrNoCandleCoverage{OrderBookID: ob}
 	}
-	res := strategy.ResolutionDuration(s.cfg.Resolution)
-	if lo.After(dataStart) || hi.Add(res).Before(end) {
+	if lo.After(dataStart) || hi.Add(sourceBarDuration).Before(end) {
 		return &candles.ErrNoCandleCoverage{OrderBookID: ob, Available: lo, Until: hi}
 	}
 	return nil
