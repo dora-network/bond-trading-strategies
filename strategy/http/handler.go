@@ -13,10 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/govalues/decimal"
-
 	"github.com/dora-network/bond-trading-strategies/authctx"
+	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/fred"
 	"github.com/dora-network/bond-trading-strategies/internal/secrets"
 	"github.com/dora-network/bond-trading-strategies/notifications"
@@ -32,6 +30,9 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
+	"github.com/dora-network/bond-trading-strategies/trades"
+	"github.com/google/uuid"
+	"github.com/govalues/decimal"
 )
 
 const (
@@ -76,6 +77,15 @@ type Handler struct {
 	runStore           RunStore
 	backtestStore      BacktestStore
 	tradesHistoryStore *copytrading.PGTradesHistoryStore
+	// mrCandleStore backs mean-reversion backtests (candles_history).
+	// nil leaves the strategy to self-wire from DATABASE_URL.
+	mrCandleStore strategyCandleStore
+	// momentumCandleStore backs momentum backtests (candles_history).
+	// nil leaves the strategy to self-wire from DATABASE_URL.
+	momentumCandleStore strategyCandleStore
+	// breakoutCandleStore backs breakout backtests (candles_history).
+	// nil leaves the strategy to self-wire from DATABASE_URL.
+	breakoutCandleStore strategyCandleStore
 	// decisionStore is invoked by the live strategy loop (meanreversion
 	// and copytrading) after every successful market order to record
 	// the decision that triggered it. nil disables recording; backtests
@@ -85,23 +95,24 @@ type Handler struct {
 	// progress for crash recovery. nil disables persistence; the
 	// strategy runs but won't recover state across restarts.
 	stateStore strategycore.StateStore
+	// decisionReader serves the read-only /v1/trading-decisions/{run_id}
 	// endpoint. The route is registered unconditionally in NewHandler;
 	// when decisionReader is nil the handler short-circuits to 503 so
 	// the endpoint can be deployed without wiring a reader until the
 	// operator opts in. Distinct from decisionStore (the write-side
 	// DecisionRecorder) so the read path carries no write concerns.
-	decisionReader       DecisionReader
-	tradeStream          *streams.TradeStream
-	historicalPriceStore breakout.HistoricalPriceStore
-	tradeHistoryStore    breakout.TradeHistoryStore
-	notifier             notifications.Notifier
-	orderUpdates         orderUpdatesManager // nil disables the order-update feature
-	encryptionKey        []byte              // 32-byte AES-256 key for encrypting API keys at rest
-	mux                  *http.ServeMux
-	authedMux            http.Handler
-	mu                   sync.RWMutex
-	backtests            map[uuid.UUID]*BacktestDetail
-	runs                 map[uuid.UUID]*RunDetail
+	decisionReader    DecisionReader
+	tradeStream       *streams.TradeStream
+	candleFeed        strategycore.CandleFeed
+	tradeHistoryStore trades.TradeStore
+	notifier          notifications.Notifier
+	orderUpdates      orderUpdatesManager // nil disables the order-update feature
+	encryptionKey     []byte              // 32-byte AES-256 key for encrypting API keys at rest
+	mux               *http.ServeMux
+	authedMux         http.Handler
+	mu                sync.RWMutex
+	backtests         map[uuid.UUID]*BacktestDetail
+	runs              map[uuid.UUID]*RunDetail
 	// runningStrategies maps a live run id to the strategy instance that
 	// was started for it, so the stop-loss observer can query the
 	// strategy's recorded trigger. Populated in createRun and
@@ -144,11 +155,12 @@ type StrategyDefinition struct {
 }
 
 type StrategyConfigField struct {
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	Description string `json:"description"`
-	Required    bool   `json:"required"`
-	Default     any    `json:"default,omitempty"`
+	Name          string   `json:"name"`
+	Type          string   `json:"type"`
+	Description   string   `json:"description"`
+	Required      bool     `json:"required"`
+	Default       any      `json:"default,omitempty"`
+	AllowedValues []string `json:"allowed_values,omitempty"`
 }
 
 type CreateBacktestRequest struct {
@@ -524,7 +536,10 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		h.log = slog.Default()
 	}
 	if h.strategies == nil {
-		h.strategies = defaultStrategies(h.prices, h.tradesHistoryStore, h.tradeStream, h.historicalPriceStore, h.tradeHistoryStore, h.log)
+		h.strategies = defaultStrategies(
+			h.prices, h.candleFeed, h.tradesHistoryStore, h.tradeStream,
+			h.tradeHistoryStore, h.log,
+		)
 	}
 
 	h.mux = http.NewServeMux()
@@ -557,15 +572,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func WithNow(now func() time.Time) func(*Handler) {
 	return func(h *Handler) {
 		h.now = now
-	}
-}
-
-func WithStrategies(defs ...StrategyDefinition) func(*Handler) {
-	return func(h *Handler) {
-		h.strategies = make(map[string]StrategyDefinition, len(defs))
-		for _, def := range defs {
-			h.strategies[def.Type] = def
-		}
 	}
 }
 
@@ -628,21 +634,50 @@ func WithTradeStream(ts *streams.TradeStream) func(*Handler) {
 	}
 }
 
-// WithHistoricalPriceStore wires a breakout backtest data source so
-// Strategy.Backtest can read candles_history. May be nil; the
-// breakout strategy returns an error from Backtest when no store is
-// configured.
-func WithHistoricalPriceStore(s breakout.HistoricalPriceStore) func(*Handler) {
+// WithCandleFeed sets the live candle feed used by candle-driven
+// strategies. May be nil; strategies error at run time when absent.
+func WithCandleFeed(feed strategycore.CandleFeed) func(*Handler) {
 	return func(h *Handler) {
-		h.historicalPriceStore = s
+		h.candleFeed = feed
 	}
 }
 
-// WithTradeHistoryStore wires a breakout backtest trade source so the
-// OBV (On-Balance Volume) filter can be evaluated in backtests when
-// OBVWindow > 0. Reads from trades_history. May be nil; the backtester
+// strategyCandleStore is the candle-history surface strategy backtests
+// read; satisfied by *candles.PGStore. Each strategy package defines its
+// own identically-shaped candleHistoryStore — this is the handler-side
+// shared spelling.
+type strategyCandleStore interface {
+	LoadCandlesBucketed(ctx context.Context, orderBookID string, resolution candles.Resolution,
+		since, until time.Time) ([]candles.Candle, error)
+	CandleRange(ctx context.Context, orderBookID string) (*time.Time, *time.Time, error)
+}
+
+// WithMeanReversionCandleStore wires the candle-history store used by
+// mean-reversion backtests. When unset, the strategy self-wires from
+// DATABASE_URL.
+func WithMeanReversionCandleStore(s strategyCandleStore) func(*Handler) {
+	return func(h *Handler) { h.mrCandleStore = s }
+}
+
+// WithMomentumCandleStore wires the candle-history store used by
+// momentum backtests. When unset, the strategy self-wires from
+// DATABASE_URL.
+func WithMomentumCandleStore(s strategyCandleStore) func(*Handler) {
+	return func(h *Handler) { h.momentumCandleStore = s }
+}
+
+// WithBreakoutCandleStore wires the candle-history store used by
+// breakout backtests. When unset, the strategy self-wires from
+// DATABASE_URL.
+func WithBreakoutCandleStore(s strategyCandleStore) func(*Handler) {
+	return func(h *Handler) { h.breakoutCandleStore = s }
+}
+
+// WithTradeHistoryStore wires a trades.TradeStore as the backtest trade
+// source for breakout (OBV filter), mean-reversion (imbalance gate),
+// and VWAP (ADV buckets). Reads from trades_history. May be nil; the backtester
 // simply skips OBV accumulation when no store is configured.
-func WithTradeHistoryStore(s breakout.TradeHistoryStore) func(*Handler) {
+func WithTradeHistoryStore(s trades.TradeStore) func(*Handler) {
 	return func(h *Handler) {
 		h.tradeHistoryStore = s
 	}
@@ -944,6 +979,26 @@ func (h *Handler) handleRunByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// injectCandleStores wires the handler's candle-history stores into the
+// freshly decoded strategy instance before a backtest starts.
+func (h *Handler) injectCandleStores(strat strategycore.Strategy) {
+	if h.mrCandleStore != nil {
+		if s, ok := strat.(*meanreversion.Strategy); ok {
+			meanreversion.WithCandleHistoryStore(h.mrCandleStore)(s)
+		}
+	}
+	if h.momentumCandleStore != nil {
+		if s, ok := strat.(*momentum.Strategy); ok {
+			momentum.WithCandleHistoryStore(h.momentumCandleStore)(s)
+		}
+	}
+	if h.breakoutCandleStore != nil {
+		if s, ok := strat.(*breakout.Strategy); ok {
+			breakout.WithCandleHistoryStore(h.breakoutCandleStore)(s)
+		}
+	}
+}
+
 func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	var req CreateBacktestRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -981,6 +1036,23 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		apiKey = info.APIKey
 	}
 	h.applyUserAPIKey(strat, apiKey)
+	h.injectCandleStores(strat)
+
+	// Synchronous data-coverage preflight so a bad window fails fast with
+	// a 4xx instead of an accepted backtest that later fails asynchronously.
+	if p, ok := strat.(interface {
+		PreflightBacktest(context.Context, time.Time, time.Time) error
+	}); ok {
+		if err := p.PreflightBacktest(r.Context(), req.Start, req.End); err != nil {
+			var cov *candles.ErrNoCandleCoverage
+			if errors.As(err, &cov) {
+				writeError(w, http.StatusBadRequest, cov.Error())
+				return
+			}
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("preflight backtest: %v", err))
+			return
+		}
+	}
 
 	resultCh, err := h.service.RunBacktest(r.Context(), id, strat, req.Start, req.End)
 	if err != nil {
@@ -1021,12 +1093,23 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	go h.awaitBacktestResult(id, resultCh, batcher) //nolint:contextcheck,gosec // backtest outlives the HTTP request context
+	// The await goroutine outlives the HTTP request; scope it to the
+	// service's base context — the same signal-cancelled server context
+	// service.RunBacktest spawns the backtest under. FakeService tests
+	// without a BaseContext fall back to Background().
+	btCtx := h.service.BaseContext()
+	if btCtx == nil {
+		btCtx = context.Background()
+	}
+	go h.awaitBacktestResult(btCtx, id, resultCh, batcher)
 	writeJSON(w, http.StatusAccepted, detail)
 }
 
 //nolint:funlen // 5 strategy result cases; consider a map-based dispatcher in a follow-up
-func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.BacktestResult, batcher *BatchingBacktestWriter) {
+func (h *Handler) awaitBacktestResult(
+	ctx context.Context, id uuid.UUID,
+	resultCh <-chan types.BacktestResult, batcher *BatchingBacktestWriter,
+) {
 	result, ok := <-resultCh
 	if !ok {
 		result = types.ErrorResult{Err: errors.New("backtest result channel closed")}
@@ -1105,14 +1188,7 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 	}
 	h.mu.Unlock()
 
-	// TODO: replace context.Background() with a context scoped to the
-	// backtest's lifetime. The backtest is launched via
-	// service.RunBacktest, which uses s.baseCtx (the signal-cancelled
-	// server context set in cmd/strategy-server/main.go). Capturing
-	// that ctx at backtest-creation time and threading it through to
-	// this goroutine is the right fix; r.Context() is already
-	// cancelled by the time the backtest finishes.
-	if err := h.saveBacktest(context.Background(), detail); err != nil {
+	if err := h.saveBacktest(ctx, detail); err != nil {
 		slog.Error("failed to save backtest result", "err", err, "backtest_id", id)
 	}
 
@@ -1128,7 +1204,7 @@ func (h *Handler) awaitBacktestResult(id uuid.UUID, resultCh <-chan types.Backte
 		} else {
 			evt.Payload = map[string]any{"error": evtErr}
 		}
-		h.publishEvent(h.service.BaseContext(), evt)
+		h.publishEvent(ctx, evt)
 	}
 
 	// Stop the batching writer's background ticker. The strategy engine
@@ -2511,19 +2587,19 @@ func (h *Handler) attachStateStore(strat strategycore.Strategy) {
 
 func defaultStrategies(
 	pricesHandler *prices.Handler,
+	candleFeed strategycore.CandleFeed,
 	tradesHistoryStore *copytrading.PGTradesHistoryStore,
 	tradeStream *streams.TradeStream,
-	historicalPriceStore breakout.HistoricalPriceStore,
-	tradeHistoryStore breakout.TradeHistoryStore,
+	tradeHistoryStore trades.TradeStore,
 	log *slog.Logger,
 ) map[string]StrategyDefinition {
 	defs := []StrategyDefinition{
-		newMeanReversionDefinition(pricesHandler, log),
+		newMeanReversionDefinition(pricesHandler, candleFeed, tradeStream, tradeHistoryStore, log),
 		newTWAPDefinition(log),
 		newCopyTradingDefinition(tradesHistoryStore, tradeStream),
-		newBreakoutDefinition(pricesHandler, tradeStream, historicalPriceStore, tradeHistoryStore, log),
+		newBreakoutDefinition(pricesHandler, candleFeed, tradeStream, tradeHistoryStore, log),
 		newVWAPDefinition(tradeHistoryStore, log),
-		newMomentumDefinition(pricesHandler, log),
+		newMomentumDefinition(pricesHandler, candleFeed, log),
 	}
 	out := make(map[string]StrategyDefinition, len(defs))
 	for _, def := range defs {
@@ -2532,7 +2608,14 @@ func defaultStrategies(
 	return out
 }
 
-func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger) StrategyDefinition {
+//nolint:funlen // config-fields table plus decoder wiring
+func newMeanReversionDefinition(
+	pricesHandler *prices.Handler,
+	candleFeed strategycore.CandleFeed,
+	tradeStream *streams.TradeStream,
+	tradeHistoryStore trades.TradeStore,
+	log *slog.Logger,
+) StrategyDefinition {
 	defaults := meanreversion.DefaultConfig()
 	return StrategyDefinition{
 		Type:        "mean_reversion",
@@ -2588,10 +2671,12 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 				Required:    false,
 			},
 			{
-				Name:        "tenor",
-				Type:        "string",
-				Description: "Benchmark Treasury tenor, for example 1M, 6M, 2Y, 5Y, 10Y, or 30Y.",
-				Required:    false,
+				Name: "tenor",
+				Type: "string",
+				Description: "Benchmark Treasury tenor the spread is computed against " +
+					"(for example 1M, 6M, 2Y, 5Y, 10Y, or 30Y). Required: " +
+					"mean-reversion is a spread strategy and cannot signal without it.",
+				Required: true,
 			},
 			{
 				Name:        "initial balance",
@@ -2606,6 +2691,29 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 				Description: "Leverage multiplier for live orders. Must be greater than 0.",
 				Required:    false,
 				Default:     mustFloat64(defaults.Leverage),
+			},
+			{
+				Name:          "resolution",
+				Type:          "string",
+				Description:   "Candle resolution for the signal series.",
+				Required:      false,
+				Default:       defaults.Resolution,
+				AllowedValues: []string{"1m", "5m", "15m", "1h", "4h", "1d"},
+			},
+			{
+				Name:        "imbalance_window",
+				Type:        "integer",
+				Description: "Number of recent tape trades for the imbalance entry gate. 0 disables the gate.",
+				Required:    false,
+				Default:     defaults.ImbalanceWindow,
+			},
+			{
+				Name: "imbalance_threshold",
+				Type: "number",
+				Description: "Net opposing signed quantity (last imbalance_window trades) that blocks an entry. " +
+					"Must be non-negative; 0 blocks on any net opposing flow.",
+				Required: false,
+				Default:  mustFloat64(defaults.ImbalanceThreshold),
 			},
 		},
 		SupportsRun:      true,
@@ -2622,6 +2730,15 @@ func newMeanReversionDefinition(pricesHandler *prices.Handler, log *slog.Logger)
 			}
 			opts := []func(*meanreversion.Strategy){
 				meanreversion.WithLogger(log),
+				meanreversion.WithCandleFeed(candleFeed),
+			}
+			if cfg.ImbalanceWindow > 0 {
+				if tradeStream != nil {
+					opts = append(opts, meanreversion.WithTradeStream(tradeStream))
+				}
+				if tradeHistoryStore != nil {
+					opts = append(opts, meanreversion.WithTradeHistoryStore(tradeHistoryStore))
+				}
 			}
 			if tradeWriter != nil {
 				opts = append(opts, meanreversion.WithBacktestWriter(tradeWriter))
@@ -2692,7 +2809,7 @@ func newTWAPDefinition(log *slog.Logger) StrategyDefinition {
 	}
 }
 
-func newVWAPDefinition(tradeHistoryStore breakout.TradeHistoryStore, log *slog.Logger) StrategyDefinition {
+func newVWAPDefinition(tradeHistoryStore trades.TradeStore, log *slog.Logger) StrategyDefinition {
 	defaults := vwap.DefaultConfig()
 	return StrategyDefinition{
 		Type:             "vwap",
@@ -2840,16 +2957,19 @@ func newCopyTradingDefinition(tradesHistoryStore *copytrading.PGTradesHistorySto
 }
 
 type meanReversionConfigPayload struct {
-	LookbackWindow  int      `json:"lookback_window"`
-	EntryZScore     float64  `json:"entry_z_score"`
-	ExitZScore      float64  `json:"exit_z_score"`
-	StopLossZScore  float64  `json:"stop_loss_z_score"`
-	MinStdDev       float64  `json:"min_std_dev"`
-	MaxPositionSize float64  `json:"max_position_size"`
-	OrderBookID     string   `json:"order_book_id,omitempty"`
-	Tenor           string   `json:"tenor,omitempty"`
-	InitialBalance  *float64 `json:"initial_balance,omitempty"`
-	Leverage        *float64 `json:"leverage,omitempty"`
+	LookbackWindow     int      `json:"lookback_window"`
+	Resolution         string   `json:"resolution,omitempty"`
+	EntryZScore        float64  `json:"entry_z_score"`
+	ExitZScore         float64  `json:"exit_z_score"`
+	StopLossZScore     float64  `json:"stop_loss_z_score"`
+	MinStdDev          float64  `json:"min_std_dev"`
+	MaxPositionSize    float64  `json:"max_position_size"`
+	OrderBookID        string   `json:"order_book_id,omitempty"`
+	Tenor              string   `json:"tenor,omitempty"`
+	InitialBalance     *float64 `json:"initial_balance,omitempty"`
+	Leverage           *float64 `json:"leverage,omitempty"`
+	ImbalanceWindow    *int     `json:"imbalance_window,omitempty"`
+	ImbalanceThreshold float64  `json:"imbalance_threshold"`
 }
 
 type breakoutConfigPayload struct {
@@ -2865,6 +2985,7 @@ type breakoutConfigPayload struct {
 
 	OBVTrendThreshold float64 `json:"obv_trend_threshold"`
 	OBVWindow         int     `json:"obv_window"`
+	Resolution        string  `json:"resolution,omitempty"`
 	OrderBookID       string  `json:"order_book_id,omitempty"`
 
 	InitialBalance *float64 `json:"initial_balance,omitempty"`
@@ -2872,17 +2993,20 @@ type breakoutConfigPayload struct {
 }
 
 type momentumConfigPayload struct {
-	SignalSource    string   `json:"signal_source"`
-	FastWindow      *int     `json:"fast_window,omitempty"`
-	SlowWindow      *int     `json:"slow_window,omitempty"`
-	ATRWindow       *int     `json:"atr_window,omitempty"`
-	StopLossATR     *float64 `json:"stop_loss_atr,omitempty"`
-	TakeProfitATR   *float64 `json:"take_profit_atr,omitempty"`
-	MinOrderSize    float64  `json:"min_order_size"`
-	MaxOrderSize    float64  `json:"max_order_size"`
-	MaxPositionSize *float64 `json:"max_position_size,omitempty"`
-	Tenor           string   `json:"tenor,omitempty"`
-	OrderBookID     string   `json:"order_book_id,omitempty"`
+	SignalSource         string   `json:"signal_source"`
+	FastWindow           *int     `json:"fast_window,omitempty"`
+	SlowWindow           *int     `json:"slow_window,omitempty"`
+	ATRWindow            *int     `json:"atr_window,omitempty"`
+	Resolution           string   `json:"resolution,omitempty"`
+	VolumeAvgWindow      *int     `json:"volume_avg_window,omitempty"`
+	VolumeRatioThreshold *float64 `json:"volume_ratio_threshold,omitempty"`
+	StopLossATR          *float64 `json:"stop_loss_atr,omitempty"`
+	TakeProfitATR        *float64 `json:"take_profit_atr,omitempty"`
+	MinOrderSize         float64  `json:"min_order_size"`
+	MaxOrderSize         float64  `json:"max_order_size"`
+	MaxPositionSize      *float64 `json:"max_position_size,omitempty"`
+	Tenor                string   `json:"tenor,omitempty"`
+	OrderBookID          string   `json:"order_book_id,omitempty"`
 
 	InitialBalance *float64 `json:"initial_balance,omitempty"`
 	Leverage       *float64 `json:"leverage,omitempty"`
@@ -2891,9 +3015,9 @@ type momentumConfigPayload struct {
 //nolint:funlen // strategy definition with 12 config fields
 func newBreakoutDefinition(
 	pricesHandler *prices.Handler,
+	candleFeed strategycore.CandleFeed,
 	tradeStream *streams.TradeStream,
-	historicalStore breakout.HistoricalPriceStore,
-	tradeHistoryStore breakout.TradeHistoryStore,
+	tradeHistoryStore trades.TradeStore,
 	log *slog.Logger,
 ) StrategyDefinition {
 	defaults := breakout.DefaultConfig()
@@ -2982,6 +3106,14 @@ func newBreakoutDefinition(
 				Default:     defaults.OBVWindow,
 			},
 			{
+				Name:          "resolution",
+				Type:          "string",
+				Description:   "Candle resolution for the signal series (default 5m).",
+				Required:      false,
+				Default:       defaults.Resolution,
+				AllowedValues: []string{"1m", "5m", "15m", "1h", "4h", "1d"},
+			},
+			{
 				Name:        "order_book_id",
 				Type:        "string(uuid)",
 				Description: "Order book UUID used to locate the traded asset and place orders.",
@@ -3026,12 +3158,9 @@ func newBreakoutDefinition(
 			if cfg.OBVWindow > 0 && tradeStream != nil {
 				opts = append(opts, breakout.WithTradeStream(tradeStream))
 			}
-			// Wire the historical price store so Strategy.Backtest can
-			// read candles_history. May be nil if no DB is configured;
-			// Backtest will then return an error.
-			if historicalStore != nil {
-				opts = append(opts, breakout.WithHistoricalStore(historicalStore))
-			}
+			// Closed bars are the signal source for live runs. May be nil;
+			// Run fails fast when no feed is configured.
+			opts = append(opts, breakout.WithCandleFeed(candleFeed))
 			// Wire the historical trade store so the backtester can
 			// compute OBV for the volume confirmation filter. May be
 			// nil if no DB is configured; the backtester simply skips
@@ -3064,6 +3193,14 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 	}
 	if payload.ConfirmationBars == 0 {
 		payload.ConfirmationBars = defaults.ConfirmationBars
+	}
+	payload.Resolution = strings.TrimSpace(payload.Resolution)
+	if payload.Resolution == "" {
+		payload.Resolution = string(defaults.Resolution)
+	}
+	res, err := candles.ParseResolution(payload.Resolution)
+	if err != nil {
+		return breakout.Config{}, nil, fmt.Errorf("config.resolution: %w", err)
 	}
 	if payload.ShortVolWindow < 2 { //nolint:mnd
 		return breakout.Config{}, nil, fmt.Errorf("config.short_vol_window must be at least 2")
@@ -3205,6 +3342,7 @@ func decodeBreakoutConfig(raw json.RawMessage, forRun bool) (breakout.Config, js
 		MinLongVolFloor:      minFloor,
 		OBVTrendThreshold:    obvThreshold,
 		OBVWindow:            payload.OBVWindow,
+		Resolution:           res,
 		OrderBookID:          orderBookID,
 		InitialBalance:       amount,
 		Leverage:             leverage,
@@ -3233,6 +3371,28 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 	atrWindow := defaults.ATRWindow
 	if payload.ATRWindow != nil {
 		atrWindow = *payload.ATRWindow
+	}
+	payload.Resolution = strings.TrimSpace(payload.Resolution)
+	if payload.Resolution == "" {
+		payload.Resolution = string(defaults.Resolution)
+	}
+	res, err := candles.ParseResolution(payload.Resolution)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.resolution: %w", err)
+	}
+	volumeAvgWindow := defaults.VolumeAvgWindow
+	if payload.VolumeAvgWindow != nil {
+		if *payload.VolumeAvgWindow < 0 {
+			return momentum.Config{}, nil, fmt.Errorf("config.volume_avg_window must be non-negative")
+		}
+		volumeAvgWindow = *payload.VolumeAvgWindow
+	}
+	volumeRatioThreshold := mustFloat64(defaults.VolumeRatioThreshold)
+	if payload.VolumeRatioThreshold != nil {
+		if *payload.VolumeRatioThreshold < 0 {
+			return momentum.Config{}, nil, fmt.Errorf("config.volume_ratio_threshold must be non-negative")
+		}
+		volumeRatioThreshold = *payload.VolumeRatioThreshold
 	}
 	maxPositionSize := mustFloat64(defaults.MaxPositionSize)
 	if payload.MaxPositionSize != nil {
@@ -3305,6 +3465,10 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 	if err != nil {
 		return momentum.Config{}, nil, fmt.Errorf("config.max_position_size: %w", err)
 	}
+	volumeRatio, err := decimal.NewFromFloat64(volumeRatioThreshold)
+	if err != nil {
+		return momentum.Config{}, nil, fmt.Errorf("config.volume_ratio_threshold: %w", err)
+	}
 
 	amount := defaults.InitialBalance
 	if payload.InitialBalance != nil {
@@ -3359,43 +3523,49 @@ func decodeMomentumConfig(raw json.RawMessage, forRun bool) (momentum.Config, js
 	}
 
 	out, err := json.Marshal(map[string]any{
-		"signal_source":     payload.SignalSource,
-		"fast_window":       fastWindow,
-		"slow_window":       slowWindow,
-		"atr_window":        atrWindow,
-		"stop_loss_atr":     mustFloat64(stopLoss),
-		"take_profit_atr":   mustFloat64(takeProfit),
-		"min_order_size":    mustFloat64(minOrder),
-		"max_order_size":    mustFloat64(maxOrder),
-		"max_position_size": maxPositionSize,
-		"tenor":             payload.Tenor,
-		"order_book_id":     payload.OrderBookID,
-		"initial_balance":   mustFloat64(amount),
-		"leverage":          mustFloat64(leverage),
+		"signal_source":          payload.SignalSource,
+		"fast_window":            fastWindow,
+		"slow_window":            slowWindow,
+		"atr_window":             atrWindow,
+		"resolution":             payload.Resolution,
+		"volume_avg_window":      volumeAvgWindow,
+		"volume_ratio_threshold": volumeRatioThreshold,
+		"stop_loss_atr":          mustFloat64(stopLoss),
+		"take_profit_atr":        mustFloat64(takeProfit),
+		"min_order_size":         mustFloat64(minOrder),
+		"max_order_size":         mustFloat64(maxOrder),
+		"max_position_size":      maxPositionSize,
+		"tenor":                  payload.Tenor,
+		"order_book_id":          payload.OrderBookID,
+		"initial_balance":        mustFloat64(amount),
+		"leverage":               mustFloat64(leverage),
 	})
 	if err != nil {
 		return momentum.Config{}, nil, fmt.Errorf("marshal momentum config: %w", err)
 	}
 
 	return momentum.Config{
-		SignalSource:    payload.SignalSource,
-		FastWindow:      fastWindow,
-		SlowWindow:      slowWindow,
-		ATRWindow:       atrWindow,
-		StopLossATR:     stopLoss,
-		TakeProfitATR:   takeProfit,
-		MinOrderSize:    minOrder,
-		MaxOrderSize:    maxOrder,
-		MaxPositionSize: maxPosition,
-		Tenor:           payload.Tenor,
-		OrderBookID:     orderBookID,
-		InitialBalance:  amount,
-		Leverage:        leverage,
+		SignalSource:         payload.SignalSource,
+		FastWindow:           fastWindow,
+		SlowWindow:           slowWindow,
+		ATRWindow:            atrWindow,
+		Resolution:           res,
+		VolumeAvgWindow:      volumeAvgWindow,
+		VolumeRatioThreshold: volumeRatio,
+		StopLossATR:          stopLoss,
+		TakeProfitATR:        takeProfit,
+		MinOrderSize:         minOrder,
+		MaxOrderSize:         maxOrder,
+		MaxPositionSize:      maxPosition,
+		Tenor:                payload.Tenor,
+		OrderBookID:          orderBookID,
+		InitialBalance:       amount,
+		Leverage:             leverage,
 	}, out, nil
 }
 
-//nolint:funlen // strategy definition with 13 config fields
-func newMomentumDefinition(pricesHandler *prices.Handler, log *slog.Logger) StrategyDefinition {
+//nolint:funlen // strategy definition with 16 config fields
+func newMomentumDefinition(pricesHandler *prices.Handler, candleFeed strategycore.CandleFeed, log *slog.Logger) StrategyDefinition {
 	defaults := momentum.DefaultConfig()
 	return StrategyDefinition{
 		Type:             momentum.StrategyType,
@@ -3495,6 +3665,28 @@ func newMomentumDefinition(pricesHandler *prices.Handler, log *slog.Logger) Stra
 				Required:    false,
 				Default:     mustFloat64(defaults.Leverage),
 			},
+			{
+				Name:          "resolution",
+				Type:          "string",
+				Description:   "Candle resolution for the signal series (default 15m).",
+				Required:      false,
+				Default:       defaults.Resolution,
+				AllowedValues: []string{"1m", "5m", "15m", "1h", "4h", "1d"},
+			},
+			{
+				Name:        "volume_avg_window",
+				Type:        "integer",
+				Description: "Bars in the rolling mean-volume window confirming entries; 0 disables the volume gate.",
+				Required:    false,
+				Default:     defaults.VolumeAvgWindow,
+			},
+			{
+				Name:        "volume_ratio_threshold",
+				Type:        "number",
+				Description: "Entry requires bar volume ≥ this × mean volume.",
+				Required:    false,
+				Default:     mustFloat64(defaults.VolumeRatioThreshold),
+			},
 		},
 		DecodeConfig: func(
 			raw json.RawMessage,
@@ -3508,6 +3700,7 @@ func newMomentumDefinition(pricesHandler *prices.Handler, log *slog.Logger) Stra
 			}
 			opts := []func(*momentum.Strategy){
 				momentum.WithLogger(log),
+				momentum.WithCandleFeed(candleFeed),
 			}
 			if tradeWriter != nil {
 				opts = append(opts, momentum.WithBacktestWriter(tradeWriter))
@@ -3529,6 +3722,24 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 	}
 	if payload.LookbackWindow < 2 { //nolint:mnd
 		return meanreversion.Config{}, nil, fmt.Errorf("config.lookback_window must be at least 2")
+	}
+	// Absent imbalance_window defaults to 100; an explicit 0 disables the
+	// imbalance gate (pointer field so 0 is distinguishable from absent).
+	imbalanceWindow := defaults.ImbalanceWindow
+	if payload.ImbalanceWindow != nil {
+		if *payload.ImbalanceWindow < 0 {
+			return meanreversion.Config{}, nil, fmt.Errorf("config.imbalance_window must be non-negative")
+		}
+		imbalanceWindow = *payload.ImbalanceWindow
+	} else {
+		payload.ImbalanceWindow = &imbalanceWindow
+	}
+	if payload.ImbalanceThreshold < 0 {
+		return meanreversion.Config{}, nil, fmt.Errorf("config.imbalance_threshold must be non-negative")
+	}
+	imbalanceThreshold, err := decimal.NewFromFloat64(payload.ImbalanceThreshold)
+	if err != nil {
+		return meanreversion.Config{}, nil, fmt.Errorf("config.imbalance_threshold: %w", err)
 	}
 	if payload.EntryZScore == 0 {
 		payload.EntryZScore = mustFloat64(defaults.EntryZScore)
@@ -3559,6 +3770,17 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 	}
 	if payload.MaxPositionSize <= 0 || payload.MaxPositionSize > 1 {
 		return meanreversion.Config{}, nil, fmt.Errorf("config.max_position_size must be in (0,1]")
+	}
+	// Mean-reversion is a spread strategy (bond YTM − benchmark): it can
+	// never compute a signal without a tenor, so unlike momentum's
+	// conditional check, tenor is required for every config and validated
+	// here at the trust boundary rather than failing later in getBars or
+	// getBenchmarkYield.
+	if payload.Tenor == "" {
+		return meanreversion.Config{}, nil, fmt.Errorf("config.tenor is required for mean_reversion")
+	}
+	if _, err := fred.ParseBenchmarkTenor(payload.Tenor); err != nil {
+		return meanreversion.Config{}, nil, fmt.Errorf("config.tenor: %w", err)
 	}
 
 	entry, err := decimal.NewFromFloat64(payload.EntryZScore)
@@ -3620,6 +3842,14 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 	}
 
 	payload.Tenor = strings.TrimSpace(payload.Tenor)
+	payload.Resolution = strings.TrimSpace(payload.Resolution)
+	if payload.Resolution == "" {
+		payload.Resolution = string(defaults.Resolution)
+	}
+	res, err := candles.ParseResolution(payload.Resolution)
+	if err != nil {
+		return meanreversion.Config{}, nil, fmt.Errorf("config.resolution: %w", err)
+	}
 
 	normalised, err := json.Marshal(payload)
 	if err != nil {
@@ -3627,16 +3857,19 @@ func decodeMeanReversionConfig(raw json.RawMessage, forRun bool) (meanreversion.
 	}
 
 	return meanreversion.Config{
-		LookbackWindow:  payload.LookbackWindow,
-		EntryZScore:     entry,
-		ExitZScore:      exit,
-		StopLossZScore:  stopLoss,
-		MinStdDev:       minStdDev,
-		MaxPositionSize: maxPositionSize,
-		OrderBookID:     orderBookID,
-		Tenor:           payload.Tenor,
-		InitialBalance:  amount,
-		Leverage:        leverage,
+		LookbackWindow:     payload.LookbackWindow,
+		EntryZScore:        entry,
+		ExitZScore:         exit,
+		StopLossZScore:     stopLoss,
+		MinStdDev:          minStdDev,
+		MaxPositionSize:    maxPositionSize,
+		OrderBookID:        orderBookID,
+		Tenor:              payload.Tenor,
+		Resolution:         res,
+		InitialBalance:     amount,
+		Leverage:           leverage,
+		ImbalanceWindow:    imbalanceWindow,
+		ImbalanceThreshold: imbalanceThreshold,
 	}, normalised, nil
 }
 

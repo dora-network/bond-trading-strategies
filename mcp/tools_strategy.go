@@ -123,23 +123,38 @@ func configProperties() map[string]any {
 			"items":       map[string]any{"type": "string", "format": "uuid"},
 		},
 		// mean_reversion
-		"lookback_window":   map[string]any{"type": "integer", "description": "Rolling observation window. Must be at least 2.", "minimum": 2},
+		"lookback_window": map[string]any{
+			"type":        "integer",
+			"description": "Rolling observation window, in bars of the configured resolution. Must be at least 2.",
+			"minimum":     2,
+		},
 		"entry_z_score":     posNum("Entry z-score threshold. Must be greater than 0."),
 		"exit_z_score":      num("Exit z-score threshold. Must be non-negative."),
 		"stop_loss_z_score": num("Stop-loss z-score threshold. Must be non-negative."),
 		"min_std_dev":       num("Minimum spread volatility required before trading. Must be non-negative."),
 		"max_position_size": fraction("Maximum fraction of capital allocated per trade, in (0,1]."),
 		"order_book_id":     map[string]any{"type": "string", "format": "uuid", "description": "DORA order book UUID."},
-		"tenor":             map[string]any{"type": "string", "description": "Benchmark tenor code (e.g. 10Y)."},
+		"tenor": map[string]any{
+			"type": "string",
+			//nolint:lll // spans two strategies' rules
+			"description": "Benchmark tenor code (e.g. 10Y). REQUIRED for mean_reversion (the strategy signals on the bond-vs-benchmark spread and cannot run without it); required for momentum only when signal_source is spread.",
+		},
 		//nolint:lll // description spans two strategies' rules
 		"initial_balance": num("Starting capital allocated to the strategy. Omit or 0 uses the default (10000 for copytrading); must be > 0 for mean_reversion."),
+		"resolution": map[string]any{
+			"type":        "string",
+			"description": "Candle resolution for the signal series (mean_reversion, breakout, momentum).",
+			"enum":        []string{"1m", "5m", "15m", "1h", "4h", "1d"},
+		},
+		"imbalance_window":    intMin(0, "Mean reversion: recent tape trades for the imbalance entry gate. 0 disables the gate."),
+		"imbalance_threshold": nonNegNum("Mean reversion: net opposing signed quantity that blocks an entry. 0 blocks on any net opposing flow."),
 		// breakout
-		"short_vol_window":      intMin(2, "Short-window price volatility count. Must be at least 2."),        //nolint:mnd
-		"long_vol_window":       intMin(3, "Long-window price volatility count. Must be > short_vol_window."), //nolint:mnd
+		"short_vol_window":      intMin(2, "Short-window price volatility count, in bars. Must be at least 2."),        //nolint:mnd
+		"long_vol_window":       intMin(3, "Long-window price volatility count, in bars. Must be > short_vol_window."), //nolint:mnd
 		"compression_threshold": ratio("ShortVol/LongVol ratio below which the strategy arms for a breakout, in (0,1]."),
-		"atr_window":            intMin(2, "Rolling-mean window for ATR. Must be at least 2."), //nolint:mnd
+		"atr_window":            intMin(2, "Rolling window for ATR over bars. Must be at least 2."), //nolint:mnd
 		"breakout_atr_multiple": nonNegNum("ATR units above/below the most recent close that defines the trigger band."),
-		"confirmation_bars":     intMin(1, "Consecutive closes beyond the trigger band required to fire. Must be at least 1."),
+		"confirmation_bars":     intMin(1, "Consecutive bar closes beyond the trigger band required to fire. Must be at least 1."),
 		"stop_loss_atr":         num("Stop-loss distance in ATR units. 0 disables."),
 		"take_profit_atr":       num("Take-profit distance in ATR units from entry. 0 disables."),
 		"obv_trend_threshold":   num("OBV threshold for the volume confirmation filter. Direction-mapped."),
@@ -155,8 +170,10 @@ func configProperties() map[string]any {
 			"description": "Momentum: series the MA crossover runs on — price, ytm, or spread. spread requires tenor.",
 			"enum":        []string{"price", "ytm", "spread"},
 		},
-		"fast_window": intMin(2, "Momentum: fast-MA tick window. Must be at least 2."),               //nolint:mnd
-		"slow_window": intMin(3, "Momentum: slow-MA tick window. Must be greater than fast_window."), //nolint:mnd
+		"fast_window":            intMin(2, "Momentum: fast-MA window, in bars. Must be at least 2."),               //nolint:mnd
+		"slow_window":            intMin(3, "Momentum: slow-MA window, in bars. Must be greater than fast_window."), //nolint:mnd
+		"volume_avg_window":      intMin(0, "Momentum: bars in the rolling mean-volume window confirming entries; 0 disables the volume gate."),
+		"volume_ratio_threshold": nonNegNum("Momentum: entry requires bar volume ≥ this × mean volume of the last volume_avg_window bars."),
 		// atr_window is already declared above for breakout with the same
 		// semantics (integer ≥ 2). Momentum reuses it.
 	}

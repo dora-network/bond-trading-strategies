@@ -7,14 +7,18 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/prices"
+	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/streams"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
+
+	"github.com/dora-network/bond-trading-strategies/trades"
 )
 
-// Backtester replays a slice of historical YieldObservations through a
+// Backtester replays a slice of historical closed bars through a
 // Strategy and records every simulated trade and its PnL.
 //
 // The simulation is deliberately simple — one open position at a time,
@@ -23,8 +27,8 @@ import (
 // characteristics before live deployment.
 //
 // Exit logic: a position is closed when the strategy emits the opposite
-// signal (a BUY is closed by a SELL and vice versa), or when the price
-// crosses the stop-loss or take-profit band (StopLossATR / TakeProfitATR
+// signal (a BUY is closed by a SELL and vice versa), or when the bar's
+// extremes cross the stop-loss or take-profit band (StopLossATR /
 // units from entry). Stop-loss has priority over reversal when both fire
 // on the same bar. Positions still open at end of history are
 // strategy-exited at the last observation's price (ExitReasonStrategyExit).
@@ -34,6 +38,10 @@ import (
 type Backtester struct {
 	strategy *Strategy
 	writer   stats.BacktestTradeWriter
+	// ticks are the price_history ticks covering the bar window, in
+	// chronological order. Empty disables tick replay: intrabar exits
+	// fall back to the bar-extreme approximation.
+	ticks []prices.AssetPrice
 }
 
 // NewBacktester creates a Backtester wrapping the given Strategy. The
@@ -43,10 +51,9 @@ func NewBacktester(s *Strategy, writer stats.BacktestTradeWriter) *Backtester {
 	return &Backtester{strategy: s, writer: writer}
 }
 
-// Run replays obs in chronological order and returns a BacktestResult.
+// Run replays bars in chronological order and returns a BacktestResult.
 //
-// obs must all belong to the same bond (same BondID). For multi-bond
-// backtests, call Run once per bond and aggregate the results externally.
+// bars must all belong to the same bond (same BondID). For multi-bond
 //
 // Position sizing uses the bond price from each observation:
 //
@@ -58,8 +65,8 @@ func NewBacktester(s *Strategy, writer stats.BacktestTradeWriter) *Backtester {
 // capital constraint.
 //
 //nolint:funlen // backtest simulation with multiple phases
-func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (BacktestResult, error) {
-	if len(obs) == 0 {
+func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult, error) {
+	if len(bars) == 0 {
 		return BacktestResult{}, nil
 	}
 
@@ -80,10 +87,19 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 	// volume confirmation is enabled. The backtest clock advances with
 	// each observation; trades are ingested in chronological order so
 	// OBV is correct at every signal point.
-	trades := b.loadTrades(ctx, obs)
+	trades := b.loadTrades(ctx, bars)
 	tradeIdx := 0
+	// Bar.Time is the bar START; the decision happens at the bar CLOSE
+	// (bar.Time+res). Trades during the signal bar must fold into OBV
+	// before that bar's gate evaluation, so the cutoff is the close.
+	res := strategy.ResolutionDuration(b.strategy.cfg.Resolution)
+	tickIdx := 0
+	// prevWindowHadTicks records whether the window (close_{i-1}, close_i]
+	// contained ticks; when it did, those ticks already drove the intrabar
+	// band checks, so bar i's extreme check is skipped (no double-fire).
+	prevWindowHadTicks := false
 
-	for _, o := range obs {
+	for i, bar := range bars {
 		select {
 		case <-ctx.Done():
 			return BacktestResult{}, errors.New("backtest cancelled by user")
@@ -91,21 +107,44 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 			// Apply any trades with time <= current observation before
 			// updating the strategy so OBV reflects all activity up to
 			// this point.
-			tradeIdx = b.ingestTradesUpTo(trades, tradeIdx, o.Time)
-			decision, err := b.strategy.Update(o)
+			tradeIdx = b.ingestTradesUpTo(trades, tradeIdx, bar.Time.Add(res))
+			decision, err := b.strategy.Update(bar)
 			if err != nil {
 				return BacktestResult{}, err
 			}
 			lastDecision = decision
 
 			if openTrade != nil {
-				// Priority: stop-loss > take-profit > opposite-signal
-				// reversal > hold. SL/TP are evaluated first because a
-				// fast move against the position can blow past both the
-				// SL threshold and the opposite-signal trigger in the
-				// same bar; the SL/PnL outcome is materially worse, so
-				// we want to record that explicitly.
-				if reason, ok := checkStopLossTakeProfit(openTrade, decision.Price(), b.strategy.cfg); ok {
+				var (
+					exit   bool
+					reason string
+				)
+				if prevWindowHadTicks {
+					// Ticks already drove the intrabar band checks for
+					// this bar's formation window; only the reversal
+					// close-decision remains.
+					if isReversal(openTrade.Signal, decision.Signal()) {
+						exit, reason = true, ExitReasonReversal
+					}
+				} else {
+					exit, reason = b.exitForBar(openTrade, bar, decision)
+				}
+				if exit {
+					if reason == ExitReasonReversal {
+						// Persist the exit row so /trades shows a matched
+						// pair (mirrors the pre-cutover behaviour; band exits
+						// record only the ClosedTrade).
+						tradeRecords = append(tradeRecords, TradeRecord{
+							Time:             decision.Time(),
+							BondID:           openTrade.BondID,
+							Signal:           openTrade.Signal,
+							Price:            decision.Price(),
+							Quantity:         openTrade.Quantity,
+							PositionSize:     openTrade.Quantity,
+							CompressionRatio: openTrade.CompressionRatio,
+							EntryATR:         openTrade.EntryATR,
+						})
+					}
 					ct, newBalance, err := b.closeAtPrice(openTrade, decision, remainingBalance, reason)
 					if err != nil {
 						return BacktestResult{}, err
@@ -113,128 +152,89 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 					remainingBalance = newBalance
 					closedTrades = append(closedTrades, ct)
 					openTrade = nil
+				}
+			} else if decision.Signal() != types.SignalHold {
+				// Flat — open on a fresh entry signal.
+				entryPrice := decision.Price()
+				budget, err := remainingBalance.Mul(decision.PositionSize())
+				if err != nil {
+					return BacktestResult{}, err
+				}
+				qty, err := budget.Quo(entryPrice)
+				if err != nil {
+					return BacktestResult{}, err
+				}
+				qty = qty.Floor(0)
+				if qty.IsZero() {
+					// Budget too small to buy even one bond; skip.
 					continue
 				}
-				// Exit on opposite signal.
-				if isReversal(openTrade.Signal, decision.Signal()) {
-					exitPrice := decision.Price()
-					exitQty := openTrade.Quantity
+				tradeRecords = append(tradeRecords, TradeRecord{
+					Time:     decision.Time(),
+					BondID:   decision.BondID(),
+					Signal:   decision.Signal(),
+					Price:    entryPrice,
+					Quantity: qty,
+					// PositionSize holds the computed bond quantity so the
+					// API consumer sees the actual order size, not the
+					// fraction of capital deployed.
+					PositionSize:     qty,
+					CompressionRatio: decision.ArmedCompressionRatio,
+					EntryATR:         decision.ATR,
+				})
+				openTrade = &tradeRecords[len(tradeRecords)-1]
 
-					tradeRecords = append(tradeRecords, TradeRecord{
-						Time:         decision.Time(),
-						BondID:       openTrade.BondID,
-						Signal:       openTrade.Signal,
-						Price:        exitPrice,
-						Quantity:     exitQty,
-						PositionSize: exitQty,
-						// ArmedCompressionRatio is only set on the entry tick;
-						// carry the entry's recorded ratio so exit rows don't
-						// show 0 on HOLD ticks.
-						CompressionRatio: openTrade.CompressionRatio,
-					})
-
-					// Cash flow: opposite of entry.
-					cashFlow, err := exitPrice.Mul(exitQty)
-					if err != nil {
-						return BacktestResult{}, err
-					}
-					switch openTrade.Signal {
-					case types.SignalBuy:
-						// Close long: receive proceeds.
-						remainingBalance, err = remainingBalance.Add(cashFlow)
-					case types.SignalSell:
-						// Close short: pay to buy back.
-						remainingBalance, err = remainingBalance.Sub(cashFlow)
-					default:
-						_ = remainingBalance
-					}
-					if err != nil {
-						return BacktestResult{}, err
-					}
-
-					ct := ClosedTrade{
-						BondID:                openTrade.BondID,
-						OpenTime:              openTrade.Time,
-						CloseTime:             decision.Time(),
-						Signal:                openTrade.Signal,
-						ExitSignal:            decision.Signal(),
-						EntryPrice:            openTrade.Price,
-						ExitPrice:             exitPrice,
-						Quantity:              exitQty,
-						PositionSize:          openTrade.PositionSize,
-						ExitReason:            ExitReasonReversal,
-						EntryCompressionRatio: openTrade.CompressionRatio,
-						ExitCompressionRatio:  decision.CompressionRatio,
-					}
-					pnl, err := computePnL(ct)
-					if err != nil {
-						return BacktestResult{}, err
-					}
-					ct.PnL = pnl
-					closedTrades = append(closedTrades, ct)
-					openTrade = nil
+				cashFlow, err := entryPrice.Mul(qty)
+				if err != nil {
+					return BacktestResult{}, err
 				}
-				// Whether we just closed or are still holding, do not open
-				// a new position in the same bar.
-				continue
+				switch decision.Signal() {
+				case types.SignalBuy:
+					remainingBalance, err = remainingBalance.Sub(cashFlow)
+				case types.SignalSell:
+					remainingBalance, err = remainingBalance.Add(cashFlow)
+				default:
+					_ = remainingBalance
+				}
+				if err != nil {
+					return BacktestResult{}, err
+				}
 			}
 
-			// Flat — check for a new entry signal.
-			if decision.Signal() == types.SignalHold {
-				continue
-			}
-
-			entryPrice := decision.Price()
-			budget, err := remainingBalance.Mul(decision.PositionSize())
-			if err != nil {
-				return BacktestResult{}, err
-			}
-			qty, err := budget.Quo(entryPrice)
-			if err != nil {
-				return BacktestResult{}, err
-			}
-			qty = qty.Floor(0)
-			if qty.IsZero() {
-				// Budget too small to buy even one bond; skip.
-				continue
-			}
-
-			tradeRecords = append(tradeRecords, TradeRecord{
-				Time:     decision.Time(),
-				BondID:   decision.BondID(),
-				Signal:   decision.Signal(),
-				Price:    entryPrice,
-				Quantity: qty,
-				// PositionSize holds the computed bond quantity so the
-				// API consumer sees the actual order size, not the
-				// fraction of capital deployed.
-				PositionSize:     qty,
-				CompressionRatio: decision.ArmedCompressionRatio,
-				EntryATR:         decision.ATR,
-			})
-			openTrade = &tradeRecords[len(tradeRecords)-1]
-
-			cashFlow, err := entryPrice.Mul(qty)
-			if err != nil {
-				return BacktestResult{}, err
-			}
-			switch decision.Signal() {
-			case types.SignalBuy:
-				remainingBalance, err = remainingBalance.Sub(cashFlow)
-			case types.SignalSell:
-				remainingBalance, err = remainingBalance.Add(cashFlow)
-			default:
-				_ = remainingBalance
-			}
-			if err != nil {
-				return BacktestResult{}, err
+			// Tick replay: any position open at bar i's close (held or
+			// freshly entered) sees the price_history ticks in
+			// (close_i, close_{i+1}] through the SAME liveCheckSLTP math
+			// the live run loop uses, exiting at the first crossing
+			// tick's price. Live consumes exactly these ticks between
+			// Update(bar i) and Update(bar i+1).
+			if openTrade != nil {
+				nextClose := bar.Time.Add(res * barsAhead)
+				if i+1 < len(bars) {
+					nextClose = bars[i+1].Time.Add(res)
+				}
+				window := b.tickWindow(&tickIdx, bar.Time.Add(res), nextClose)
+				prevWindowHadTicks = len(window) > 0
+				for _, tick := range window {
+					if reason, ok := liveCheckSLTP(openTrade.Signal, openTrade.Price, openTrade.EntryATR, tick.Price, b.strategy.cfg); ok {
+						d := decision
+						d.price, d.time = tick.Price, tick.Time
+						ct, newBalance, err := b.closeAtPrice(openTrade, d, remainingBalance, reason)
+						if err != nil {
+							return BacktestResult{}, err
+						}
+						remainingBalance = newBalance
+						closedTrades = append(closedTrades, ct)
+						openTrade = nil
+						break
+					}
+				}
 			}
 		}
 	}
 
 	// Force-close any position still open at end of history.
-	if openTrade != nil && len(obs) > 0 {
-		last := obs[len(obs)-1]
+	if openTrade != nil && len(bars) > 0 {
+		last := bars[len(bars)-1]
 		exitPrice := lastDecision.Price()
 		exitQty := openTrade.Quantity
 
@@ -297,7 +297,7 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 		}
 	}
 
-	start, end := obs[0].Time, obs[len(obs)-1].Time
+	start, end := bars[0].Time, bars[len(bars)-1].Time
 	metrics, err := computeSummary(closedTrades, start, end)
 	if err != nil {
 		return BacktestResult{}, fmt.Errorf("compute summary: %w", err)
@@ -313,6 +313,52 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 	}, nil
 }
 
+// barsAhead is the bar-duration count used to bound the final tick
+// window (the last bar has no successor close to anchor on).
+const barsAhead = 2
+
+// tickWindow advances the tick cursor, returning the ticks with
+// timestamps in (from, to]. Ticks at or before `from` are consumed
+// without evaluation (the position was flat or they predate the first
+// decision bar's close). Assumes ticks are sorted ascending.
+func (b *Backtester) tickWindow(idx *int, from, to time.Time) []prices.AssetPrice {
+	var out []prices.AssetPrice
+	for *idx < len(b.ticks) && !b.ticks[*idx].Time.After(to) {
+		if b.ticks[*idx].Time.After(from) {
+			out = append(out, b.ticks[*idx])
+		}
+		*idx++
+	}
+	return out
+}
+
+// exitForBar evaluates the open position's exits for one bar:
+// stop-loss against the bar's adverse extreme (Low for a long, High
+// for a short), take-profit against the favorable extreme, then the
+// opposite-signal reversal. Priority stop_loss > take_profit >
+// reversal, so a fast move that blows through both bands records the
+// worse outcome. Exit price is the bar's close (matches the live loop,
+// which acts on closed-bar decisions).
+func (b *Backtester) exitForBar(open *TradeRecord, bar types.Bar, decision Decision) (bool, string) {
+	adverse, favorable := bar.Low, bar.High
+	if open.Signal == types.SignalSell {
+		adverse, favorable = bar.High, bar.Low
+	}
+	// The adverse extreme can only cross the stop band (the TP
+	// threshold lies beyond the favorable extreme); likewise the
+	// favorable extreme can only cross take-profit.
+	if reason, ok := checkStopLossTakeProfit(open, adverse, b.strategy.cfg); ok {
+		return true, reason
+	}
+	if reason, ok := checkStopLossTakeProfit(open, favorable, b.strategy.cfg); ok {
+		return true, reason
+	}
+	if isReversal(open.Signal, decision.Signal()) {
+		return true, ExitReasonReversal
+	}
+	return false, ""
+}
+
 // loadTrades loads all trades for the backtest date range into a sorted
 // slice when volume confirmation is enabled and a trade store is
 // configured. Returns nil when neither applies, so the backtest loop
@@ -320,24 +366,24 @@ func (b *Backtester) Run(ctx context.Context, obs []types.YieldObservation) (Bac
 
 func (b *Backtester) loadTrades(
 	ctx context.Context,
-	obs []types.YieldObservation,
-) []Trade {
+	bars []types.Bar,
+) []trades.Trade {
 	if b.strategy.cfg.OBVWindow == 0 || b.strategy.tradeHistoryStore == nil {
 		b.strategy.logger().Info("backtest trade history NOT wired",
 			"obvWindow", b.strategy.cfg.OBVWindow,
 			"storeNil", b.strategy.tradeHistoryStore == nil)
 		return nil
 	}
-	if len(obs) == 0 {
+	if len(bars) == 0 {
 		return nil
 	}
 	b.strategy.logger().Info("backtest trade history wired, loading trades",
 		"orderBookID", b.strategy.cfg.OrderBookID,
-		"start", obs[0].Time, "end", obs[len(obs)-1].Time)
+		"start", bars[0].Time, "end", bars[len(bars)-1].Time)
 	ch, errCh := b.strategy.tradeHistoryStore.StreamTrades(
-		ctx, b.strategy.cfg.OrderBookID, obs[0].Time, obs[len(obs)-1].Time,
+		ctx, b.strategy.cfg.OrderBookID, bars[0].Time, bars[len(bars)-1].Time,
 	)
-	var trades []Trade
+	var trades []trades.Trade
 	chClosed := false
 	for !chClosed {
 		select {
@@ -369,7 +415,7 @@ func (b *Backtester) loadTrades(
 // applyTradeEvent. Returns the updated index. The store is assumed
 // to return trades in chronological order.
 func (b *Backtester) ingestTradesUpTo(
-	trades []Trade,
+	trades []trades.Trade,
 	idx int,
 	cutoff time.Time,
 ) int {

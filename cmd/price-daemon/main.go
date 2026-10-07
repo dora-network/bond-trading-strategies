@@ -202,9 +202,13 @@ func main() {
 			Since:        since,
 		}
 		candlesStore := candles.NewPGStore(pool)
-		candlesHandler := candles.New(candlesCfg, candlesStore, candles.WithMessageHook(func() {
+		candlesHandler, err := candles.New(candlesCfg, candlesStore, candles.WithMessageHook(func() {
 			checker.markCandleStream(time.Now())
 		}))
+		if err != nil {
+			slog.Error("failed to create candles handler", "err", err)
+			os.Exit(1)
+		}
 		// One global subscriber drains the fan-out into SaveCandles.
 		// Future strategy-server code can subscribe its own chans
 		// to the same handler.

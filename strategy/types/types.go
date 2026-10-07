@@ -9,6 +9,7 @@
 package types
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/govalues/decimal"
@@ -84,4 +85,49 @@ type Decision interface {
 	// "compression_breakout") that consumers (HTTP handler, persistence) use
 	// to interpret the decision without depending on a specific strategy.
 	Reason() string
+}
+
+// Bar is a closed candlestick observation consumed by the signal
+// strategies. Time is the bar's start timestamp (UTC). BenchmarkYield is
+// resolved by the strategy (spread modes) at evaluation time, not by the feed.
+type Bar struct {
+	Time           time.Time
+	Open           decimal.Decimal
+	High           decimal.Decimal
+	Low            decimal.Decimal
+	Close          decimal.Decimal
+	Volume         decimal.Decimal
+	OpenYTM        decimal.Decimal
+	HighYTM        decimal.Decimal
+	LowYTM         decimal.Decimal
+	CloseYTM       decimal.Decimal
+	BenchmarkYield decimal.Decimal
+}
+
+// TrueRange is max(H-L, |H-prevClose|, |L-prevClose|). A zero prevClose
+// (first bar) yields H-L.
+func (b Bar) TrueRange(prevClose decimal.Decimal) (decimal.Decimal, error) {
+	hl, err := b.High.Sub(b.Low)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("true range H-L: %w", err)
+	}
+	if prevClose.IsZero() {
+		return hl, nil
+	}
+	hp, err := b.High.Sub(prevClose)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("true range H-prev: %w", err)
+	}
+	lp, err := b.Low.Sub(prevClose)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("true range L-prev: %w", err)
+	}
+	m := hp.Abs()
+	if lp.Abs().Cmp(m) > 0 {
+		m = lp.Abs()
+	}
+	if m.Cmp(hl) > 0 {
+		return m, nil
+	}
+	return hl, nil
 }

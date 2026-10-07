@@ -13,20 +13,20 @@ import (
 
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy"
-	strategyfakes "github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
+	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/streams"
 )
 
-// runDrive seeds the strategy's per-tick state so a BUY would normally
-// fire (windows filled, compression armed), then starts runLoop in a
-// goroutine and returns the strategy + channels so tests can pump
-// messages / ticks and inspect state.
+// runDrive seeds the strategy's windows so a BUY would normally fire
+// (windows filled, compression armed), then starts runLoop with a bar
+// channel and returns the strategy + channels so tests can pump
+// messages / bars / ticks and inspect state.
 //
 // We bypass Run() because Run's subscribePrices requires a non-nil
 // pricesHandler; the actual logic we want to test lives in runLoop,
 // which is internal-test-accessible from this package.
-func runDrive(t *testing.T) (*Strategy, chan strategy.Message, chan map[uuid.UUID]prices.AssetPrice, func()) {
+func runDrive(t *testing.T) (*Strategy, chan strategy.Message, chan types.Bar, chan map[uuid.UUID]prices.AssetPrice, func()) {
 	t.Helper()
 
 	cfg := DefaultConfig()
@@ -52,23 +52,29 @@ func runDrive(t *testing.T) (*Strategy, chan strategy.Message, chan map[uuid.UUI
 		return "", nil
 	}
 
-	s := New(cfg, nil, WithMarketAPIClient(fake))
+	barsCh := make(chan types.Bar, 4)
+	feed := &strategyfakes.FakeCandleFeed{}
+	feed.SubscribeBarsReturns(barsCh, func() {}, nil)
+
+	s := New(cfg, nil, WithMarketAPIClient(fake), WithCandleFeed(feed))
 	// Bypassing Run means s.cancel is nil; runLoop calls s.cancel() on
-	// Stop, which would panic on a nil function. Set it to a no-op so the
-	// test drives the loop without a real cancellation chain.
+	// Stop, which would panic on a nil function. Set it to a no-op so
+	// the test drives the loop without a real cancellation chain.
 	s.cancel = func() {}
 
-	// Pre-fill: LongVolWindow flat ticks at 100. The long window reaches
+	// Pre-fill: LongVolWindow flat bars at 100. The long window reaches
 	// Ready on the last iteration; ratio = 0 (ShortVol = LongVol = 0) so
-	// compression arms. No jump tick — if we added one, evaluateBreakout
+	// compression arms. No jump bar — if we added one, evaluateBreakout
 	// would fire a BUY on the jump and resetArmed() would clear
-	// compressionArmed before any test tick can run.
+	// compressionArmed before any test bar can run.
 	flat := decimal.MustNew(100, 0)
-	for i := 0; i < cfg.LongVolWindow; i++ {
-		_, err := s.Update(types.YieldObservation{
-			Time:   time.Unix(int64(i), 0).UTC(),
-			BondID: "asset-A",
-			Price:  flat,
+	for i := range cfg.LongVolWindow {
+		_, err := s.Update(types.Bar{
+			Time:  time.Unix(int64(i), 0).UTC(),
+			Open:  flat,
+			High:  flat,
+			Low:   flat,
+			Close: flat,
 		})
 		require.NoError(t, err)
 	}
@@ -89,23 +95,17 @@ func runDrive(t *testing.T) (*Strategy, chan strategy.Message, chan map[uuid.UUI
 		time.Sleep(20 * time.Millisecond)
 		cancel()
 	}
-	return s, msgs, pricesCh, cleanup
+	return s, msgs, barsCh, pricesCh, cleanup
 }
 
-// sendTick fires a single tick through the prices channel.
-func sendTick(t *testing.T, ch chan map[uuid.UUID]prices.AssetPrice, assetID string, price decimal.Decimal) {
+// sendBar fires a single closed bar through the candle-feed channel.
+func sendBar(t *testing.T, ch chan types.Bar, minute int, price decimal.Decimal) {
 	t.Helper()
-	tick := map[uuid.UUID]prices.AssetPrice{
-		uuid.MustParse("33333333-3333-3333-3333-333333333333"): {
-			Time:    time.Now().UTC(),
-			AssetID: assetID,
-			Price:   price,
-		},
-	}
+	bar := types.Bar{Time: time.Unix(int64(minute), 0).UTC(), Open: price, High: price, Low: price, Close: price}
 	select {
-	case ch <- tick:
+	case ch <- bar:
 	case <-time.After(time.Second):
-		t.Fatalf("timed out sending tick")
+		t.Fatalf("timed out sending bar")
 	}
 }
 
@@ -128,11 +128,11 @@ func awaitOpen(t *testing.T, s *Strategy, want types.Signal) {
 	t.Fatalf("openSignal: want %v, got %v after timeout", want, got)
 }
 
-// TestRun_PauseDropTicks verifies that the strategy ignores price
-// updates while paused: a strong-breakout tick that would normally open
+// TestRun_PauseDropsBarDispatch verifies that the strategy ignores bar
+// dispatch while paused: a strong-breakout bar that would normally open
 // a BUY has no effect when preceded by strategy.Pause.
-func TestRun_PauseDropTicks(t *testing.T) {
-	s, msgs, pricesCh, cleanup := runDrive(t)
+func TestRun_PauseDropBar(t *testing.T) {
+	s, msgs, barsCh, _, cleanup := runDrive(t)
 	defer cleanup()
 
 	msgs <- strategy.Pause
@@ -140,42 +140,42 @@ func TestRun_PauseDropTicks(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	require.True(t, s.IsPaused(), "IsPaused should be true after Pause")
 
-	// A clear breakout price while paused: should be dropped on the floor.
-	sendTick(t, pricesCh, "asset-A", decimal.MustNew(115, 0))
+	// A clear breakout bar while paused: should be dropped on the floor.
+	sendBar(t, barsCh, 100, decimal.MustNew(115, 0))
 
-	// Give the goroutine time to process the tick (and verify it didn't).
-	time.Sleep(50 * time.Millisecond)
-
-	// Still flat — the paused tick must not have produced an entry.
+	// Give the goroutine time to process the bar (and verify it didn't).
+	// Still flat — the paused bar must not have produced an entry.
 	s.mu.RLock()
 	got := s.openSignal
 	s.mu.RUnlock()
 	assert.Equal(t, types.SignalHold, got,
-		"paused tick should not have produced an entry; openSignal=%v", got)
+		"paused bar should not have produced an entry; openSignal=%v", got)
 }
 
-// TestRun_ResumeOpensAfterPause verifies that a tick after Resume opens
+// TestRun_ResumeOpensAfterPause verifies that a bar after Resume opens
 // a position normally.
 func TestRun_ResumeOpensAfterPause(t *testing.T) {
-	s, msgs, pricesCh, cleanup := runDrive(t)
+	s, msgs, barsCh, _, cleanup := runDrive(t)
 	defer cleanup()
 
 	msgs <- strategy.Pause
 	time.Sleep(50 * time.Millisecond)
 	require.True(t, s.IsPaused())
 
-	// Paused tick — must be dropped.
-	sendTick(t, pricesCh, "asset-A", decimal.MustNew(115, 0))
+	// Paused bar — dropped for dispatch. Flat price so the fixture state
+	// (compression armed, counters at zero) survives the pause: a signal
+	// evaluated while paused is discarded, not deferred.
+	sendBar(t, barsCh, 100, decimal.MustNew(100, 0))
 	time.Sleep(50 * time.Millisecond)
 	s.mu.RLock()
 	assert.Equal(t, types.SignalHold, s.openSignal)
 	s.mu.RUnlock()
 
-	// Resume, then a fresh tick that should trigger a BUY.
+	// Resume, then a fresh bar that should trigger a BUY.
 	msgs <- strategy.Resume
 	time.Sleep(50 * time.Millisecond)
 	require.False(t, s.IsPaused(), "IsPaused should be false after Resume")
 
-	sendTick(t, pricesCh, "asset-A", decimal.MustNew(120, 0))
+	sendBar(t, barsCh, 101, decimal.MustNew(120, 0))
 	awaitOpen(t, s, types.SignalBuy)
 }

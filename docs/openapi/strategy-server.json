@@ -2638,7 +2638,8 @@
           "lookback_window": {
             "type": "integer",
             "minimum": 2,
-            "default": 20
+            "default": 24,
+            "description": "Rolling observation window, in bars of the configured resolution."
           },
           "entry_z_score": {
             "type": "number",
@@ -2673,7 +2674,7 @@
           },
           "tenor": {
             "type": "string",
-            "description": "Benchmark Treasury tenor, e.g. 1M, 6M, 2Y, 5Y, 10Y, 30Y."
+            "description": "Benchmark Treasury tenor, e.g. 1M, 6M, 2Y, 5Y, 10Y, 30Y. Required: mean-reversion signals on the bond-vs-benchmark spread and cannot run without it."
           },
           "initial_balance": {
             "type": "number",
@@ -2686,6 +2687,31 @@
             "exclusiveMinimum": 0,
             "default": 1.0,
             "description": "Leverage multiplier for live orders."
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "1m",
+              "5m",
+              "15m",
+              "1h",
+              "4h",
+              "1d"
+            ],
+            "default": "1h",
+            "description": "Candle resolution for the signal series."
+          },
+          "imbalance_window": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 100,
+            "description": "Number of recent tape trades for the imbalance entry gate. 0 disables the gate."
+          },
+          "imbalance_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "default": 0.0,
+            "description": "Net opposing signed quantity (last imbalance_window trades) that blocks an entry. 0 blocks on any net opposing flow."
           }
         }
       },
@@ -2696,14 +2722,14 @@
           "short_vol_window": {
             "type": "integer",
             "minimum": 2,
-            "default": 240,
-            "description": "Short-window price-volatility observation count."
+            "default": 12,
+            "description": "Short-window price-volatility observation count, in bars."
           },
           "long_vol_window": {
             "type": "integer",
             "minimum": 3,
-            "default": 1440,
-            "description": "Long-window price-volatility observation count. Must be greater than short_vol_window."
+            "default": 96,
+            "description": "Long-window price-volatility observation count, in bars. Must be greater than short_vol_window."
           },
           "compression_threshold": {
             "type": "number",
@@ -2715,8 +2741,8 @@
           "atr_window": {
             "type": "integer",
             "minimum": 2,
-            "default": 240,
-            "description": "Rolling-mean window for ATR (mean absolute price diff)."
+            "default": 12,
+            "description": "Rolling window for ATR (true range) over bars."
           },
           "breakout_atr_multiple": {
             "type": "number",
@@ -2727,8 +2753,8 @@
           "confirmation_bars": {
             "type": "integer",
             "minimum": 1,
-            "default": 5,
-            "description": "Number of consecutive closes beyond the trigger band required to fire."
+            "default": 3,
+            "description": "Number of consecutive bar closes beyond the trigger band required to fire."
           },
           "stop_loss_atr": {
             "type": "number",
@@ -2776,6 +2802,19 @@
             "exclusiveMinimum": 0,
             "default": 1.0,
             "description": "Leverage multiplier for live orders."
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "1m",
+              "5m",
+              "15m",
+              "1h",
+              "4h",
+              "1d"
+            ],
+            "default": "5m",
+            "description": "Candle resolution for the signal series."
           }
         }
       },
@@ -2796,20 +2835,20 @@
           "fast_window": {
             "type": "integer",
             "minimum": 2,
-            "default": 240,
-            "description": "Fast-MA tick window."
+            "default": 8,
+            "description": "Fast-MA window, in bars."
           },
           "slow_window": {
             "type": "integer",
             "minimum": 3,
-            "default": 1440,
-            "description": "Slow-MA tick window. Must be greater than fast_window."
+            "default": 96,
+            "description": "Slow-MA window, in bars. Must be greater than fast_window."
           },
           "atr_window": {
             "type": "integer",
             "minimum": 2,
-            "default": 240,
-            "description": "Mean-absolute-price-diff window for exits."
+            "default": 24,
+            "description": "True-range ATR window (in bars) for exits."
           },
           "stop_loss_atr": {
             "type": "number",
@@ -2862,6 +2901,31 @@
             "exclusiveMinimum": 0,
             "default": 1.0,
             "description": "Leverage multiplier for live orders."
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "1m",
+              "5m",
+              "15m",
+              "1h",
+              "4h",
+              "1d"
+            ],
+            "default": "15m",
+            "description": "Candle resolution for the signal series."
+          },
+          "volume_avg_window": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 20,
+            "description": "Bars in the rolling mean-volume window confirming entries; 0 disables the volume gate."
+          },
+          "volume_ratio_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1.0,
+            "description": "Entry requires bar volume ≥ this × mean volume of the last volume_avg_window bars."
           }
         }
       },

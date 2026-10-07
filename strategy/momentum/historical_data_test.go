@@ -6,370 +6,262 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/candles"
+	"github.com/dora-network/bond-trading-strategies/fred"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
+	"github.com/dora-network/bond-trading-strategies/strategy/momentum/momentumfakes"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/dora-network/bond-trading-strategies/fred"
-	"github.com/dora-network/bond-trading-strategies/prices"
-	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
-	"github.com/dora-network/bond-trading-strategies/strategy/momentum/momentumfakes"
-	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 )
 
-// newSpreadStrategy builds a momentum.Strategy wired for spread mode
-// against the supplied fakes. Other modes only need a price store.
-func newSpreadStrategy(t *testing.T, lookup *strategyfakes.FakeMarketAPIClient, history *momentumfakes.FakeHistoricalPriceStore, benchmark *momentumfakes.FakeBenchmarkYieldClient) *momentum.Strategy {
-	t.Helper()
+var (
+	btStart = time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	btEnd   = time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC)
+)
+
+// barTestConfig returns a candle-backed momentum config with a 1h
+// resolution and SlowWindow 3, so the warmup prefix getBars requires is
+// (3+1)×1h = 4h before start.
+func barTestConfig(source string) momentum.Config {
 	cfg := momentum.DefaultConfig()
-	cfg.SignalSource = momentum.SignalSourceSpread
+	cfg.SignalSource = source
+	cfg.OrderBookID = uuid.Must(uuid.NewV7())
 	cfg.Tenor = "10Y"
-	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	s := momentum.New(cfg, nil)
-	momentum.SetLookupClient(s, lookup)
-	momentum.SetHistoricalPriceStore(s, history)
-	momentum.SetBenchmarkYieldClient(s, benchmark)
-	return s
+	cfg.Resolution = "1h"
+	cfg.SlowWindow = 3
+	return cfg
 }
 
-// TestGetObservations_SpreadMode_AttachesBenchmarkYield verifies that
-// spread mode attaches a benchmark yield (stored as a decimal
-// fraction, the same unit as YTM) to every observation and drops rows
-// without one.
-func TestGetObservations_SpreadMode_AttachesBenchmarkYield(t *testing.T) {
-	lookup := &strategyfakes.FakeMarketAPIClient{}
-	lookup.BaseAssetIDReturns("asset-123", nil)
+// dataStart is the warmup-inclusive window start for barTestConfig.
+func dataStart() time.Time { return btStart.Add(-4 * time.Hour) }
 
-	ytmA := decimal.MustNew(52, 3)   // 0.052
-	ytmMid := decimal.MustNew(53, 3) // 0.053 (was nil, now required by store contract)
-	ytmB := decimal.MustNew(54, 3)   // 0.054
-	history := &momentumfakes.FakeHistoricalPriceStore{}
-	history.LoadHistoricalPricesReturns([]prices.AssetPrice{
-		// Jan 1 precedes the first benchmark observation (Jan 2), so
-		// this row must be DROPPED — cachedBenchmarkYield returns
-		// ok=false for any ts before the cache's earliest date.
-		{AssetID: "asset-123", YTM: &ytmA, Time: time.Date(2024, 1, 1, 15, 0, 0, 0, time.UTC)},
-		{AssetID: "asset-123", YTM: &ytmA, Time: time.Date(2024, 1, 2, 15, 0, 0, 0, time.UTC)},
-		{AssetID: "asset-123", YTM: &ytmMid, Time: time.Date(2024, 1, 3, 15, 0, 0, 0, time.UTC)},
-		{AssetID: "asset-123", YTM: &ytmB, Time: time.Date(2024, 1, 4, 15, 0, 0, 0, time.UTC)},
-	}, nil)
-
-	benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
-	benchmark.FetchHistoricalYieldsReturns([]fred.Observation{
-		{Date: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(45, 3)},
-		{Date: time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(47, 3)},
-	}, nil)
-
-	s := newSpreadStrategy(t, lookup, history, benchmark)
-	obs, err := momentum.GetObservations(context.Background(), s,
-		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
-
-	require.NoError(t, err)
-	// The Jan 1 row (pre-benchmark) is dropped; Jan 2-4 survive with
-	// non-nil YTM and the LATEST cached benchmark yield <= their
-	// timestamp. Jan 2 gets 0.045 (its own date), Jan 3 gets 0.045
-	// (LATEST <= 3 is Jan 2), Jan 4 gets 0.047 (its own date).
-	require.Len(t, obs, 3, "the pre-benchmark Jan 1 row must be dropped")
-	assert.True(t, obs[0].BenchmarkYield.Equal(decimal.MustNew(45, 3)),
-		"obs[0].BenchmarkYield = %s, want 0.045", obs[0].BenchmarkYield.String())
-	assert.True(t, obs[1].BenchmarkYield.Equal(decimal.MustNew(45, 3)),
-		"obs[1].BenchmarkYield = %s, want 0.045 (LATEST <= Jan 3)", obs[1].BenchmarkYield.String())
-	assert.True(t, obs[2].BenchmarkYield.Equal(decimal.MustNew(47, 3)),
-		"obs[2].BenchmarkYield = %s, want 0.047", obs[2].BenchmarkYield.String())
-	// FRED client fetched once for the price-history window.
-	assert.Equal(t, 1, benchmark.FetchHistoricalYieldsCallCount())
+func coveredStore(lo, hi time.Time) *momentumfakes.FakeCandleHistoryStore {
+	store := &momentumfakes.FakeCandleHistoryStore{}
+	loC, hiC := lo, hi
+	store.CandleRangeReturns(&loC, &hiC, nil)
+	return store
 }
 
-// TestGetObservations_NilYTM_ReturnsContractError verifies that nil
-// YTM is a contract violation, not silently dropped. The PG store
-// filters ytm IS NOT NULL on insert (prices/store.go:LoadHistoricalPrices
-// / LoadLastPrices), so a nil here means the upstream schema changed
-// or a test fake drifted - we surface the error rather than masking it.
-func TestGetObservations_NilYTM_ReturnsContractError(t *testing.T) {
-	cfg := momentum.DefaultConfig()
-	cfg.SignalSource = momentum.SignalSourcePrice
-	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	s := momentum.New(cfg, nil)
+func TestStrategyGetBars(t *testing.T) {
+	t.Parallel()
 
-	lookup := &strategyfakes.FakeMarketAPIClient{}
-	lookup.BaseAssetIDReturns("asset-123", nil)
-	momentum.SetLookupClient(s, lookup)
+	t.Run("spread mode loads bucketed bars with warmup and fills benchmark yields", func(t *testing.T) {
+		cfg := barTestConfig(momentum.SignalSourceSpread)
+		s := momentum.New(cfg, nil)
 
-	history := &momentumfakes.FakeHistoricalPriceStore{}
-	history.LoadHistoricalPricesReturns([]prices.AssetPrice{
-		{AssetID: "asset-123", YTM: nil, Time: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Price: decimal.MustNew(101, 0)},
-	}, nil)
-	momentum.SetHistoricalPriceStore(s, history)
-
-	_, err := momentum.GetObservations(context.Background(), s,
-		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "store contract violation")
-}
-
-// TestGetObservations_SpreadMode_PropagatesErrors covers the error
-// paths: bad tenor, missing price store, FRED failure.
-func TestGetObservations_SpreadMode_PropagatesErrors(t *testing.T) {
-	t.Run("historical price store error", func(t *testing.T) {
-		lookup := &strategyfakes.FakeMarketAPIClient{}
-		lookup.BaseAssetIDReturns("asset-123", nil)
-		history := &momentumfakes.FakeHistoricalPriceStore{}
-		history.LoadHistoricalPricesReturns(nil, errors.New("history failed"))
-		benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
-		s := newSpreadStrategy(t, lookup, history, benchmark)
-
-		_, err := momentum.GetObservations(context.Background(), s,
-			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
-		require.ErrorContains(t, err, "history failed")
-	})
-
-	t.Run("fred fetch error", func(t *testing.T) {
-		lookup := &strategyfakes.FakeMarketAPIClient{}
-		lookup.BaseAssetIDReturns("asset-123", nil)
-		ytm := decimal.MustNew(52, 3)
-		history := &momentumfakes.FakeHistoricalPriceStore{}
-		history.LoadHistoricalPricesReturns([]prices.AssetPrice{
-			{AssetID: "asset-123", YTM: &ytm, Time: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)},
-		}, nil)
-		benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
-		benchmark.FetchHistoricalYieldsReturns(nil, errors.New("fred failed"))
-		s := newSpreadStrategy(t, lookup, history, benchmark)
-
-		_, err := momentum.GetObservations(context.Background(), s,
-			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
-		require.ErrorContains(t, err, "fred failed")
-	})
-
-	t.Run("lookup asset ID error", func(t *testing.T) {
-		lookup := &strategyfakes.FakeMarketAPIClient{}
-		lookup.BaseAssetIDReturns("", errors.New("asset lookup failed"))
-		history := &momentumfakes.FakeHistoricalPriceStore{}
-		benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
-		s := newSpreadStrategy(t, lookup, history, benchmark)
-
-		_, err := momentum.GetObservations(context.Background(), s,
-			time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-			time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC))
-		require.ErrorContains(t, err, "asset lookup failed")
-	})
-}
-
-// TestMergeBenchmarkObservations_DedupsByDate verifies that
-// re-merging an obs with a date already in the cache leaves the
-// original entry intact (the dedup-by-date contract).
-func TestMergeBenchmarkObservations_DedupsByDate(t *testing.T) {
-	cfg := momentum.DefaultConfig()
-	s := momentum.New(cfg, nil)
-
-	obs1 := []fred.Observation{
-		{Date: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(45, 3)},
-		{Date: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(46, 3)},
-	}
-	obs2 := []fred.Observation{
-		{Date: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(99, 3)}, // dup
-		{Date: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(47, 3)}, // new
-	}
-
-	momentum.MergeBenchmarkObservations(s, obs1)
-	momentum.MergeBenchmarkObservations(s, obs2)
-
-	// Query for the duplicated date: original yield (0.046) wins,
-	// not the second-pass 0.099.
-	got, ok := momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 2, 12, 0, 0, 0, time.UTC))
-	assert.True(t, ok)
-	assert.True(t, got.Equal(decimal.MustNew(46, 3)),
-		"duplicated-date entry should keep its original yield (0.046), got %s",
-		got.String())
-
-	// And the new date is present.
-	got, ok = momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 3, 12, 0, 0, 0, time.UTC))
-	assert.True(t, ok)
-	assert.True(t, got.Equal(decimal.MustNew(47, 3)),
-		"new date should be present with 0.047, got %s", got.String())
-}
-
-// TestCachedBenchmarkYield_BinarySearchNearest verifies that
-// cachedBenchmarkYield returns the most recent entry whose date is
-// <= the query ts (binary search semantics). Empty cache returns
-// decimal.Zero.
-func TestCachedBenchmarkYield_BinarySearchNearest(t *testing.T) {
-	cfg := momentum.DefaultConfig()
-	s := momentum.New(cfg, nil)
-	momentum.MergeBenchmarkObservations(s, []fred.Observation{
-		{Date: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(45, 3)},
-		{Date: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(46, 3)},
-		{Date: time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(47, 3)},
-	})
-
-	// Query exactly on a cached date: returns it.
-	got, ok := momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 2, 12, 0, 0, 0, time.UTC))
-	assert.True(t, ok, "cached date should satisfy the request")
-	assert.True(t, got.Equal(decimal.MustNew(46, 3)))
-
-	// Query between cached dates: returns the LATEST <= query.
-	got, ok = momentum.GetBenchmarkYield(context.Background(), s, time.Date(2024, 1, 3, 12, 0, 0, 0, time.UTC))
-	assert.True(t, ok)
-	assert.True(t, got.Equal(decimal.MustNew(46, 3)),
-		"query between dates should return the LATEST <= query (0.046 from Jan 2), got %s", got.String())
-
-	// Empty cache: no benchmark available (ok=false — callers must
-	// skip the tick, not evaluate a spread against zero).
-	cfg2 := momentum.DefaultConfig()
-	s2 := momentum.New(cfg2, nil)
-	got, ok = momentum.GetBenchmarkYield(context.Background(), s2, time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
-	assert.False(t, ok, "empty cache must report no benchmark available")
-	assert.True(t, got.IsZero())
-}
-
-// TestPrefillWindow_FillsWindowsFromHistory verifies that prefillWindow
-// loads SlowWindow*2 prices from the historical price store and feeds
-// them through Update, populating the rolling windows.
-func TestPrefillWindow_FillsWindowsFromHistory(t *testing.T) {
-	cfg := momentum.DefaultConfig()
-	cfg.SignalSource = momentum.SignalSourcePrice
-	cfg.FastWindow = 3
-	cfg.SlowWindow = 5
-	cfg.ATRWindow = 3
-	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	s := momentum.New(cfg, nil)
-
-	lookup := &strategyfakes.FakeMarketAPIClient{}
-	lookup.BaseAssetIDReturns("asset-123", nil)
-	momentum.SetLookupClient(s, lookup)
-
-	// SlowWindow=5, so prefillWindow loads 10 prices. Each row needs
-	// a non-nil YTM to satisfy the store contract (PG filters
-	// ytm IS NOT NULL on load).
-	ytm := decimal.MustNew(50, 3) // 0.05 fixed
-	obsPrices := make([]prices.AssetPrice, 10)
-	for i := range obsPrices {
-		obsPrices[i] = prices.AssetPrice{
-			AssetID: "asset-123",
-			YTM:     &ytm,
-			Time:    time.Date(2024, 1, i+1, 0, 0, 0, 0, time.UTC),
-			Price:   decimal.MustNew(int64(100+i), 0),
+		obTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+		store := coveredStore(dataStart(), btEnd)
+		store.LoadCandlesBucketedStub = func(
+			_ context.Context, orderBookID string, resolution candles.Resolution, since, _ time.Time,
+		) ([]candles.Candle, error) {
+			assert.Equal(t, cfg.OrderBookID.String(), orderBookID)
+			assert.Equal(t, candles.Resolution1h, resolution)
+			assert.Equal(t, dataStart(), since, "warmup must be (SlowWindow+1) bars before start")
+			return []candles.Candle{
+				{
+					OrderBookID: orderBookID, StartTimestamp: obTime,
+					CloseYTM: decimal.MustNew(52, 3), Close: decimal.MustNew(99, 0),
+					HighYTM: decimal.MustNew(53, 3), LowYTM: decimal.MustNew(51, 3),
+				},
+				{
+					OrderBookID: orderBookID, StartTimestamp: obTime.Add(24 * time.Hour),
+					CloseYTM: decimal.MustNew(54, 3), Close: decimal.MustNew(98, 0),
+					HighYTM: decimal.MustNew(55, 3), LowYTM: decimal.MustNew(53, 3),
+				},
+			}, nil
 		}
-	}
-	history := &momentumfakes.FakeHistoricalPriceStore{}
-	history.LoadLastPricesReturns(obsPrices, nil)
-	momentum.SetHistoricalPriceStore(s, history)
+		momentum.SetCandleHistoryStore(s, store)
 
-	err := momentum.PrefillWindow(context.Background(), s, "asset-123")
-	require.NoError(t, err)
-	assert.Equal(t, 1, history.LoadLastPricesCallCount())
-	_, _, limit := history.LoadLastPricesArgsForCall(0)
-	assert.Equal(t, 10, limit, "prefillWindow must request SlowWindow*2 prices")
-	// Population assertion (round-4 gap): the 10 prices must have
-	// flowed through Update — all three windows ready. Empty or
-	// short-fed windows would read not-ready.
-	assert.True(t, momentum.WindowsReady(s),
-		"prefilled prices must populate the fast/slow/ATR windows")
-}
+		benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
+		benchmark.FetchHistoricalYieldsReturns([]fred.Observation{
+			{Date: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(45, 3)},
+			{Date: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(47, 3)},
+		}, nil)
+		momentum.SetBenchmarkYieldClient(s, benchmark)
 
-// TestPrefillWindow_SpreadMode_PopulatesWindowsAndFetchesBenchmarks
-// covers the spread-mode prefill path: benchmark yields are fetched for
-// the history window, rows before the first benchmark observation are
-// skipped (not fed into Update), and the surviving rows populate the
-// windows.
-func TestPrefillWindow_SpreadMode_PopulatesWindowsAndFetchesBenchmarks(t *testing.T) {
-	cfg := momentum.DefaultConfig()
-	cfg.SignalSource = momentum.SignalSourceSpread
-	cfg.Tenor = "10Y"
-	cfg.FastWindow = 3
-	cfg.SlowWindow = 5
-	cfg.ATRWindow = 3
-	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	s := momentum.New(cfg, nil)
+		bars, err := momentum.GetBars(context.Background(), s, btStart, btEnd)
 
-	lookup := &strategyfakes.FakeMarketAPIClient{}
-	lookup.BaseAssetIDReturns("asset-123", nil)
-	momentum.SetLookupClient(s, lookup)
-
-	// Jan 1-2 precede the first benchmark observation (Jan 3) and
-	// must be skipped; Jan 3-10 (8 rows ≥ SlowWindow) populate the
-	// windows.
-	pricesRows := make([]prices.AssetPrice, 0, 10)
-	for i := range 10 {
-		ytm := decimal.MustNew(int64(50+i), 3) // rising spread vs flat benchmark
-		pricesRows = append(pricesRows, prices.AssetPrice{
-			AssetID: "asset-123",
-			YTM:     &ytm,
-			Time:    time.Date(2024, 1, i+1, 0, 0, 0, 0, time.UTC),
-			Price:   decimal.MustNew(int64(100+i), 0),
-		})
-	}
-	history := &momentumfakes.FakeHistoricalPriceStore{}
-	history.LoadLastPricesReturns(pricesRows, nil)
-	momentum.SetHistoricalPriceStore(s, history)
-
-	benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
-	benchmark.FetchHistoricalYieldsReturns([]fred.Observation{
-		{Date: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(45, 3)},
-	}, nil)
-	momentum.SetBenchmarkYieldClient(s, benchmark)
-
-	require.NoError(t, momentum.PrefillWindow(context.Background(), s, "asset-123"))
-
-	// Benchmark fetch spans the full history window, first-to-last.
-	require.Equal(t, 1, benchmark.FetchHistoricalYieldsCallCount())
-	_, tenor, start, end := benchmark.FetchHistoricalYieldsArgsForCall(0)
-	assert.Equal(t, fred.Tenor10Year, tenor)
-	assert.True(t, start.Equal(pricesRows[0].Time), "fetch start must be history[0].Time")
-	assert.True(t, end.Equal(pricesRows[9].Time), "fetch end must be history[last].Time")
-	// The 8 post-benchmark rows (Jan 3-10) still fill all windows.
-	assert.True(t, momentum.WindowsReady(s),
-		"spread-mode prefill must populate windows from post-benchmark rows only")
-}
-
-// TestPrefillWindow_NilYTM_ReturnsContractError pins the prefill-side
-// nil-YTM contract: a store row without YTM aborts the prefill with the
-// store-contract error instead of silently poisoning the windows.
-func TestPrefillWindow_NilYTM_ReturnsContractError(t *testing.T) {
-	cfg := momentum.DefaultConfig()
-	cfg.SignalSource = momentum.SignalSourcePrice
-	cfg.OrderBookID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	s := momentum.New(cfg, nil)
-
-	lookup := &strategyfakes.FakeMarketAPIClient{}
-	lookup.BaseAssetIDReturns("asset-123", nil)
-	momentum.SetLookupClient(s, lookup)
-
-	history := &momentumfakes.FakeHistoricalPriceStore{}
-	history.LoadLastPricesReturns([]prices.AssetPrice{
-		{AssetID: "asset-123", YTM: nil, Time: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Price: decimal.MustNew(101, 0)},
-	}, nil)
-	momentum.SetHistoricalPriceStore(s, history)
-
-	err := momentum.PrefillWindow(context.Background(), s, "asset-123")
-	require.Error(t, err)
-	require.ErrorContains(t, err, "store contract violation")
-	assert.False(t, momentum.WindowsReady(s), "failed prefill must leave windows unpopulated")
-}
-
-// TestLatestCachedBenchmarkDate_TracksMostRecent verifies that
-// latestCachedBenchmarkDate returns the cache's most recent date,
-// or ok=false when empty.
-func TestLatestCachedBenchmarkDate_TracksMostRecent(t *testing.T) {
-	cfg := momentum.DefaultConfig()
-	s := momentum.New(cfg, nil)
-
-	// Empty cache: returns false.
-	_, ok := momentum.LatestCachedBenchmarkDate(s)
-	assert.False(t, ok, "empty cache must return ok=false")
-
-	// Seed with two dates; query returns the LATEST.
-	momentum.MergeBenchmarkObservations(s, []fred.Observation{
-		{Date: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(45, 3)},
-		{Date: time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC), Yield: decimal.MustNew(48, 3)},
+		require.NoError(t, err)
+		require.Len(t, bars, 2)
+		// First bar closes Jan 1 13:00 → latest prior FRED date is Jan 1.
+		assert.True(t, bars[0].BenchmarkYield.Equal(decimal.MustNew(45, 3)))
+		// Second bar closes Jan 2 14:00 → latest prior FRED date is Jan 2.
+		assert.True(t, bars[1].BenchmarkYield.Equal(decimal.MustNew(47, 3)))
+		assert.True(t, bars[0].Time.Equal(obTime))
+		assert.True(t, bars[0].HighYTM.Equal(decimal.MustNew(53, 3)))
+		assert.Equal(t, 1, store.LoadCandlesBucketedCallCount())
+		_, tenor, _, _ := benchmark.FetchHistoricalYieldsArgsForCall(0)
+		assert.Equal(t, fred.Tenor10Year, tenor)
 	})
-	got, ok := momentum.LatestCachedBenchmarkDate(s)
-	require.True(t, ok)
-	assert.True(t, got.Equal(time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC)),
-		"latestCachedBenchmarkDate should return the most-recent date (Jan 5), got %s", got)
+
+	t.Run("price mode skips the benchmark entirely and keeps zero-YTM bars", func(t *testing.T) {
+		cfg := barTestConfig(momentum.SignalSourcePrice)
+		s := momentum.New(cfg, nil)
+
+		store := coveredStore(dataStart(), btEnd)
+		store.LoadCandlesBucketedReturns([]candles.Candle{
+			// Zero CloseYTM: a drop in ytm/spread modes, but price mode
+			// never reads the YTM so the bar survives.
+			{
+				OrderBookID: cfg.OrderBookID.String(), StartTimestamp: btStart,
+				Close: decimal.MustNew(99, 0),
+			},
+		}, nil)
+		momentum.SetCandleHistoryStore(s, store)
+		benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
+		momentum.SetBenchmarkYieldClient(s, benchmark)
+
+		bars, err := momentum.GetBars(context.Background(), s, btStart, btEnd)
+
+		require.NoError(t, err)
+		require.Len(t, bars, 1, "price mode must not drop zero-YTM bars")
+		assert.True(t, bars[0].BenchmarkYield.IsZero())
+		assert.Equal(t, 0, benchmark.FetchHistoricalYieldsCallCount(),
+			"price mode must not call FRED")
+	})
+
+	t.Run("no candles at all returns ErrNoCandleCoverage", func(t *testing.T) {
+		s := momentum.New(barTestConfig(momentum.SignalSourcePrice), nil)
+		store := &momentumfakes.FakeCandleHistoryStore{}
+		store.CandleRangeReturns(nil, nil, nil)
+		momentum.SetCandleHistoryStore(s, store)
+
+		_, err := momentum.GetBars(context.Background(), s, btStart, btEnd)
+
+		var cov *candles.ErrNoCandleCoverage
+		require.ErrorAs(t, err, &cov)
+		assert.Nil(t, cov.Available)
+		assert.Contains(t, err.Error(), "no candle data")
+	})
+
+	t.Run("partial coverage names the available range", func(t *testing.T) {
+		s := momentum.New(barTestConfig(momentum.SignalSourcePrice), nil)
+		lo := dataStart()
+		// Last bar starts two hours before end, so its close (hi+1h)
+		// is still one hour short of end.
+		hi := btEnd.Add(-2 * time.Hour)
+		store := coveredStore(lo, hi)
+		momentum.SetCandleHistoryStore(s, store)
+
+		_, err := momentum.GetBars(context.Background(), s, btStart, btEnd)
+
+		var cov *candles.ErrNoCandleCoverage
+		require.ErrorAs(t, err, &cov)
+		require.NotNil(t, cov.Available)
+		assert.True(t, cov.Available.Equal(lo))
+		assert.True(t, cov.Until.Equal(hi))
+		assert.Contains(t, err.Error(), "insufficient candle coverage")
+	})
+
+	t.Run("window ending at the close of the last bar is covered", func(t *testing.T) {
+		cfg := barTestConfig(momentum.SignalSourcePrice)
+		s := momentum.New(cfg, nil)
+		lo := dataStart()
+		// The last persisted bar starts at end−1h, closing exactly at
+		// end — sufficient; a bar starting at/after end is never loaded.
+		hi := btEnd.Add(-time.Hour)
+		store := coveredStore(lo, hi)
+		store.LoadCandlesBucketedStub = func(
+			_ context.Context, _ string, _ candles.Resolution, since, _ time.Time,
+		) ([]candles.Candle, error) {
+			assert.Equal(t, lo, since)
+			return []candles.Candle{{
+				OrderBookID: cfg.OrderBookID.String(), StartTimestamp: hi,
+				Close: decimal.MustNew(99, 0),
+			}}, nil
+		}
+		momentum.SetCandleHistoryStore(s, store)
+
+		bars, err := momentum.GetBars(context.Background(), s, btStart, btEnd)
+
+		require.NoError(t, err)
+		require.Len(t, bars, 1)
+		assert.True(t, bars[0].Time.Equal(hi), "the bar starting at hi is loaded")
+	})
+
+	t.Run("warmup gap before start is a coverage error", func(t *testing.T) {
+		s := momentum.New(barTestConfig(momentum.SignalSourcePrice), nil)
+		// Coverage starts one hour after the required warmup start.
+		store := coveredStore(dataStart().Add(time.Hour), btEnd)
+		momentum.SetCandleHistoryStore(s, store)
+
+		_, err := momentum.GetBars(context.Background(), s, btStart, btEnd)
+
+		var cov *candles.ErrNoCandleCoverage
+		require.ErrorAs(t, err, &cov)
+	})
+
+	t.Run("all bars unusable names both zero-YTM and benchmark causes", func(t *testing.T) {
+		cfg := barTestConfig(momentum.SignalSourceSpread)
+		s := momentum.New(cfg, nil)
+		store := coveredStore(dataStart(), btEnd)
+		store.LoadCandlesBucketedReturns([]candles.Candle{
+			{OrderBookID: cfg.OrderBookID.String(), StartTimestamp: btStart, Close: decimal.MustNew(99, 0)},
+			{OrderBookID: cfg.OrderBookID.String(), StartTimestamp: btStart.Add(time.Hour),
+				CloseYTM: decimal.MustNew(52, 3), Close: decimal.MustNew(99, 0)},
+		}, nil)
+		momentum.SetCandleHistoryStore(s, store)
+		// No FRED observations: the one bar with a YTM has no prior
+		// benchmark and is dropped for that reason.
+		benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
+		momentum.SetBenchmarkYieldClient(s, benchmark)
+
+		_, err := momentum.GetBars(context.Background(), s, btStart, btEnd)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "zero close YTM", "error must name the zero-YTM cause")
+		assert.Contains(t, err.Error(), "no prior benchmark yield", "error must name the benchmark cause")
+	})
+
+	t.Run("propagates load and benchmark errors", func(t *testing.T) {
+		t.Run("load candles", func(t *testing.T) {
+			s := momentum.New(barTestConfig(momentum.SignalSourcePrice), nil)
+			store := coveredStore(dataStart(), btEnd)
+			store.LoadCandlesBucketedReturns(nil, errors.New("db down"))
+			momentum.SetCandleHistoryStore(s, store)
+
+			_, err := momentum.GetBars(context.Background(), s, btStart, btEnd)
+
+			require.ErrorContains(t, err, "load candles")
+		})
+
+		t.Run("benchmark client", func(t *testing.T) {
+			s := momentum.New(barTestConfig(momentum.SignalSourceSpread), nil)
+			store := coveredStore(dataStart(), btEnd)
+			momentum.SetCandleHistoryStore(s, store)
+			benchmark := &momentumfakes.FakeBenchmarkYieldClient{}
+			benchmark.FetchHistoricalYieldsReturns(nil, errors.New("fred failed"))
+			momentum.SetBenchmarkYieldClient(s, benchmark)
+
+			_, err := momentum.GetBars(context.Background(), s, btStart, btEnd)
+
+			require.ErrorContains(t, err, "fetch historical benchmark yields")
+		})
+	})
+}
+
+// TestPreflightBacktest mirrors meanreversion's: coverage-only, no bar
+// loading, and a no-op without an injected store.
+func TestPreflightBacktest(t *testing.T) {
+	t.Parallel()
+
+	t.Run("coverage gap surfaces without loading bars", func(t *testing.T) {
+		s := momentum.New(barTestConfig(momentum.SignalSourcePrice), nil)
+		store := coveredStore(btStart, btEnd) // no warmup coverage
+		momentum.SetCandleHistoryStore(s, store)
+
+		err := momentum.PreflightBacktest(context.Background(), s, btStart, btEnd)
+
+		var cov *candles.ErrNoCandleCoverage
+		require.ErrorAs(t, err, &cov)
+		assert.Equal(t, 0, store.LoadCandlesBucketedCallCount())
+	})
+
+	t.Run("no injected store is a no-op", func(t *testing.T) {
+		s := momentum.New(barTestConfig(momentum.SignalSourcePrice), nil)
+
+		require.NoError(t, momentum.PreflightBacktest(context.Background(), s, btStart, btEnd))
+	})
 }

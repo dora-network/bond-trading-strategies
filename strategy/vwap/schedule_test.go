@@ -10,17 +10,17 @@ import (
 
 	"github.com/govalues/decimal"
 
-	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
+	"github.com/dora-network/bond-trading-strategies/trades"
 )
 
-// fakeStore implements TradeVolumeStore for tests.
+// fakeStore implements trades.TradeStore for tests.
 type fakeStore struct {
-	trades []breakout.Trade
+	trades []trades.Trade
 	err    error
 }
 
-func (f *fakeStore) StreamTrades(_ context.Context, _ uuid.UUID, _, _ time.Time) (<-chan breakout.Trade, <-chan error) {
-	tCh := make(chan breakout.Trade, len(f.trades))
+func (f *fakeStore) StreamTrades(_ context.Context, _ uuid.UUID, _, _ time.Time) (<-chan trades.Trade, <-chan error) {
+	tCh := make(chan trades.Trade, len(f.trades))
 	eCh := make(chan error, 1)
 	for _, t := range f.trades {
 		tCh <- t
@@ -55,7 +55,7 @@ func TestBuildSchedule_AllocatesProportionallyToADV(t *testing.T) {
 	// has ADV. Scale = 1000 / 6.67 ≈ 150. First bucket ≈ 1000.5; the
 	// last bucket absorbs the rounding remainder so the total equals
 	// 1000 exactly.
-	store := &fakeStore{trades: []breakout.Trade{
+	store := &fakeStore{trades: []trades.Trade{
 		{Time: time.Date(2025, 1, 1, 9, 2, 0, 0, time.UTC), Quantity: decimal.MustNew(100, 0)},
 		{Time: time.Date(2025, 1, 2, 9, 3, 0, 0, time.UTC), Quantity: decimal.MustNew(100, 0)},
 	}}
