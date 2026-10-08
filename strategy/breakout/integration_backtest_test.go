@@ -14,17 +14,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
+	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 )
 
-// Integration test for DORA-5874 — runs the breakout Backtester against
-// a real Postgres with synthetic ticks inserted into price_history, and
-// asserts the run produces a non-zero trade count, non-zero metrics, and
-// is byte-equal across two runs (reproducibility — no RNG used).
+// Integration test for the bar-driven breakout backtester — seeds
+// synthetic 1m bars into candles_history, runs Backtest against them,
+// and asserts the run produces a non-zero trade count, non-zero
+// metrics, and is byte-equal across two runs (reproducibility — no RNG).
 //
 // Gated by INTEGRATION=1 (or by building with `-tags integration`).
 // Skips fast unit-test runs.
-func TestIntegration_BacktestAgainstPriceHistory(t *testing.T) {
+func TestIntegration_BacktestAgainstCandleHistory(t *testing.T) {
 	if os.Getenv("INTEGRATION") != "1" {
 		t.Skip("INTEGRATION=1 not set; skipping")
 	}
@@ -39,49 +41,59 @@ func TestIntegration_BacktestAgainstPriceHistory(t *testing.T) {
 	require.NoError(t, err)
 	defer pool.Close()
 
-	assetID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
-	const q = `INSERT INTO price_history
-		(asset_id, price, ytm, timestamp)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (asset_id, timestamp) DO NOTHING`
+	obID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	// Truncate to the minute: Postgres timestamps keep microsecond
+	// precision, so sub-µs nanos in `start` would make the coverage
+	// boundary check fail by a fraction of a nanosecond.
+	start := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Hour)
+	const q = `INSERT INTO candles_history
+		(order_book_id, start_timestamp, open, high, low, close, volume,
+		 open_ytm, high_ytm, low_ytm, close_ytm)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (order_book_id, start_timestamp) DO NOTHING`
 
-	// Synthetic series:
-	// - 30 flat ticks at price=100, ytm=0.05 (fills long window, arms
-	//   compression; both ShortVol and LongVol → 0 → ratio → 0 → arms)
-	// - 1 jump to 110 (BUY on the breakout)
-	// - 10 flat ticks at 110 (holds the position; force-closes at end
+	// Synthetic 1m series (O=H=L=C per bar):
+	// - 30 flat bars at price=100 (fills the long window, arms
+	//   compression; ShortVol=LongVol=0 → ratio=0 → armed)
+	// - 1 jump to 110 (BUY on the breakout, ConfirmationBars=1)
+	// - 10 flat bars at 110 (holds the position; force-closes at end
 	//   of history, recording a strategy_exit ClosedTrade)
-	// Total 41 ticks.
-	insert := func(t *testing.T, ts time.Time, price int64) {
+	// Total 41 bars.
+	insert := func(t *testing.T, i int, price int64) {
 		t.Helper()
+		p := decimal.MustNew(price, 0)
+		ts := start.Add(time.Duration(i) * time.Minute)
 		_, err := pool.Exec(ctx, q,
-			assetID,
-			decimal.MustNew(price, 0),
-			decimal.MustNew(5, 2), // ytm = 0.05
-			ts.UTC(),
+			obID, ts.UTC(),
+			p, p, p, p, decimal.Zero,
+			decimal.MustNew(5, 2), decimal.MustNew(5, 2), decimal.MustNew(5, 2), decimal.MustNew(5, 2),
 		)
 		require.NoError(t, err)
 	}
-	start := time.Now().UTC().Add(-2 * time.Hour)
-	for i := 0; i < 30; i++ {
-		insert(t, start.Add(time.Duration(i)*time.Minute), 100)
+	// Warmup: LongVolWindow+1 = 31 bars before start (the coverage
+	// check requires them; they also fill the long window).
+	for i := -31; i < 0; i++ {
+		insert(t, i, 100)
 	}
-	insert(t, start.Add(30*time.Minute), 110)
-	for i := 0; i < 10; i++ {
-		insert(t, start.Add(time.Duration(31+i)*time.Minute), 110)
+	for i := range 30 {
+		insert(t, i, 100)
+	}
+	insert(t, 30, 110)
+	for i := range 10 {
+		// drift to 119 so the force-close at end-of-history records
+		// a non-zero exit PnL
+		insert(t, 31+i, 110+int64(i))
 	}
 
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(),
-			`DELETE FROM price_history WHERE asset_id = $1`,
-			assetID)
+			`DELETE FROM candles_history WHERE order_book_id = $1`,
+			obID)
 	})
 
-	// Build a strategy and drive Backtester.Run directly so we get the
-	// concrete breakout.BacktestResult (with .ClosedTrades / .TotalPnL /
-	// .SharpeRatio), not the strategycore.BacktestResult interface.
 	cfg := breakout.DefaultConfig()
-	cfg.OrderBookID = assetID
+	cfg.OrderBookID = obID
+	cfg.Resolution = "1m"
 	cfg.ShortVolWindow = 5
 	cfg.LongVolWindow = 30
 	cfg.ATRWindow = 14
@@ -89,27 +101,30 @@ func TestIntegration_BacktestAgainstPriceHistory(t *testing.T) {
 	cfg.InitialBalance = decimal.MustNew(1000, 0)
 	cfg.Leverage = decimal.One
 
-	store := breakout.NewPostgresHistoricalStore(pool)
-	obs, err := store.Observations(ctx, assetID.String(),
-		start, start.Add(41*time.Minute))
-	require.NoError(t, err)
-	require.NotEmpty(t, obs, "fixture ticks must be present in price_history")
+	store := candles.NewPGStore(pool)
+
+	// Stub the market API client so Backtest's lookupAssetID resolves
+	// without a live DORA dependency — keeps this test DB-only.
+	fake := &strategyfakes.FakeMarketAPIClient{}
+	fake.BaseAssetIDReturns("asset-A", nil)
 
 	run := func() breakout.BacktestResult {
-		s := breakout.New(cfg, nil)
-		bt := breakout.NewBacktester(s, nil)
-		r, err := bt.Run(ctx, obs)
+		s := breakout.New(cfg, nil,
+			breakout.WithCandleHistoryStore(store),
+			breakout.WithMarketAPIClient(fake),
+		)
+		r, err := s.Backtest(ctx, start, start.Add(41*time.Minute))
 		require.NoError(t, err)
-		return r
+		return r.(breakout.BacktestResult)
 	}
 
 	r1 := run()
 	require.NotEmpty(t, r1.ClosedTrades,
-		"expected at least one closed trade on a 30-flat + 1-jump + 10-flat series")
+		"expected at least one closed trade on the flat + jump + drift series")
 	require.False(t, r1.TotalPnL.IsZero(),
 		"TotalPnL must be non-zero on a successful breakout")
-	require.False(t, r1.SharpeRatio.IsZero(),
-		"SharpeRatio must be non-zero on a successful breakout (sanity)")
+	// SharpeRatio is annualised from daily-PnL dispersion; this
+	// single-day, single-trade fixture is mathematically Sharpe-0.
 
 	// Reproducibility: run a second time and assert byte-equal output.
 	r2 := run()

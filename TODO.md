@@ -535,3 +535,32 @@ re-deploy via the chatui. Mitigation: a one-time backfill job that
 re-runs the validate step against each pre-016 row's strategy source
 (producing a fresh `.wasm` blob) is the cleanest fix. Out of scope
 for this PR — document and defer.
+
+## TypeSafe classify-hop refactor (analysis 2026-09-21)
+
+Replace the prompt-and-parse LLM classifier in
+`internal/agent/sanitize/classify.go` with a TypeSafe System One request,
+per the [guardrails cookbook](https://docs.typesafe.ai/cookbooks/llm_guardrails.md).
+Today ~150 lines exist to extract a 3-way verdict (`ok|off_topic|adversarial`)
+from a generative LLM: sealed JSON prompt, stream accumulation, `fenceRE`
+fence-stripping regex, `json.Unmarshal`, closed-set validation, and the
+"could not classify the message" error path (which has required repeated
+patches — see the fence-strip and truncated-JSON-repair session notes).
+
+TypeSafe shape: state = `{user_prompt, prior_assistant}`; one Choice over
+the existing three verdicts (or a Noul-per-hazard battery + severity Score);
+thresholds in code (`pass|review|block`). Deletes the fence regex, JSON
+parse, unknown-verdict switch wholesale. Low top-probability verdicts route
+to review instead of erroring (per the
+[choices consistency cookbook](https://docs.typesafe.ai/cookbooks/consistency_choice_cookbook.md)).
+
+- Integration: no Go SDK — use the
+  [HTTP evaluation endpoint](https://docs.typesafe.ai/api.md) behind the
+  existing `llm.Provider` seam in `internal/agent/`, so `Classifier` can
+  swap implementations.
+- Explicitly NOT candidates (stay deterministic): `sanitize/filter.go`,
+  `safety/caps.go`, `fred/tenor.go`, and the generate→validate→repair loop.
+- Optional, skip unless wanted: TypeSafe second-opinion Score over
+  `scan/scan.go` regex hits (validator allowlist is the real enforcement);
+  NL→typed-call front door over MCP tools via the
+  [function calling cookbook](https://docs.typesafe.ai/cookbooks/function_calling.md).

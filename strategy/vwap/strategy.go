@@ -13,6 +13,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/exec"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/trades"
 )
 
 // StrategyType is the constant strategy name used in decisions and persistence.
@@ -31,7 +32,7 @@ type Strategy struct {
 	paused   bool
 	cancel   context.CancelFunc
 	schedule Schedule
-	store    TradeVolumeStore
+	store    trades.TradeStore
 	updates  <-chan OrderFillEvent
 	state    RunState
 	decSeq   int64
@@ -49,7 +50,7 @@ func New(cfg Config, log *slog.Logger, opts ...func(*Strategy)) *Strategy {
 	return s
 }
 
-func WithTradeHistoryStore(store TradeVolumeStore) func(*Strategy) {
+func WithTradeHistoryStore(store trades.TradeStore) func(*Strategy) {
 	return func(s *Strategy) { s.store = store }
 }
 
@@ -63,10 +64,6 @@ func WithDecisionStore(rec strategy.DecisionRecorder) func(*Strategy) {
 
 func WithStateStore(store strategy.StateStore) func(*Strategy) {
 	return func(s *Strategy) { s.exec.Store = store }
-}
-
-func WithOrderUpdates(ch <-chan OrderFillEvent) func(*Strategy) {
-	return func(s *Strategy) { s.updates = ch }
 }
 
 // SetOrderUpdatesChannel lets the handler inject the channel after

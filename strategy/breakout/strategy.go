@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/config"
@@ -15,6 +17,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
 	"github.com/dora-network/bond-trading-strategies/streams"
+	"github.com/dora-network/bond-trading-strategies/trades"
 	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
@@ -25,31 +28,24 @@ import (
 type Config struct {
 	config.Config
 
-	// ShortVolWindow is the number of ticks used for the short-window
-	// price volatility. Calibrated for a continuously trading bond
-	// market where the price daemon emits many updates per second;
-	// typical values: 240 (a few minutes of ticks) to 1440 (about an
-	// hour of ticks). 5/60-style daily-bar values would collapse to
-	// seconds/minutes on a CLOB and yield a meaningless variance ratio.
+	// ShortVolWindow is the number of closed bars used for the
+	// short-window price volatility (σ of closes). At the default 5m
+	// resolution, 12 bars ≈ 1 hour.
 	ShortVolWindow int
 
-	// LongVolWindow is the number of ticks used for the long-window
-	// price volatility baseline. Calibrated for a continuously trading
-	// bond market; typical values: 1440 (about an hour) to 10080
-	// (a full trading day). Must be greater than ShortVolWindow.
+	// LongVolWindow is the number of closed bars used for the
+	// long-window price-volatility baseline (σ of closes). At the
+	// default 5m resolution, 96 bars ≈ 8 hours. Must be greater than
+	// ShortVolWindow.
 	LongVolWindow int
 
 	// CompressionThreshold is the ShortVol/LongVol ratio below which the
 	// strategy considers the market "compressed" and arms for a breakout.
 	// Typical values: 0.3-0.6 (lower = stricter).
 	CompressionThreshold decimal.Decimal
-
-	// ATRWindow is the number of ticks used for the rolling average
-	// true range (here: mean absolute price diff, since we only have close
-	// prices from YieldObservation). Calibrated for a continuously
-	// trading bond market; typical values: 240 (a few minutes of ticks)
-	// to 1440 (about an hour of ticks). 14-style daily-bar values would
-	// collapse to seconds/minutes on a CLOB and yield a noisy average.
+	// ATRWindow is the number of closed bars used for the rolling
+	// average true range. At the default 5m resolution, 12 bars ≈ 1
+	// hour.
 	ATRWindow int
 
 	// BreakoutATRMultiple is the number of ATR units above/below the most
@@ -57,13 +53,11 @@ type Config struct {
 	// 1.0-2.0.
 	BreakoutATRMultiple decimal.Decimal
 
-	// ConfirmationBars is the number of consecutive closes that must exceed
-	// the trigger level before a signal is emitted. Calibrated for a
-	// continuously trading bond market where the price feed ticks at
-	// 0.1-5 Hz per active name; 2 consecutive closes (= 0.4-20 s) would
-	// not filter a flash-spike. Typical values: 5-30 (a sustained move
-	// rather than a single-tick blip). The test fixtures use 1 to make
-	// deterministic single-jump triggers explicit.
+	// ConfirmationBars is the number of consecutive bar closes that
+	// must exceed the trigger level before a signal is emitted.
+	// Typical values: 2-5 (a sustained move rather than a single-bar
+	// spike). The test fixtures use 1 to make deterministic
+	// single-jump triggers explicit.
 	ConfirmationBars int
 
 	// StopLossATR is the number of ATR units from entry at which an open
@@ -95,7 +89,19 @@ type Config struct {
 	// volume shifts, which gave misleading signals in testing.
 	// Recommended: match ShortVolWindow so the volume check uses
 	// the same recent-trades scope as the volatility check.
+	// OBVWindow is the number of recent trades to include in the
+	// windowed On-Balance Volume used by the volume confirmation
+	// filter. OBVWindow = 0 disables the filter ("do not need to
+	// verify volume"); OBVWindow > 0 verifies with the windowed OBV
+	// (sum of signed quantities in the last OBVWindow trades).
+	// Cumulative OBV (the full trade history) is not supported
+	// because it reflects long-term positioning rather than recent
+	// volume shifts, which gave misleading signals in testing.
 	OBVWindow int
+
+	// Resolution is the candle resolution the strategy subscribes to.
+	// Defaults to 5m.
+	Resolution candles.Resolution
 
 	// OrderBookID is the ID of the DORA order book to place orders on.
 	OrderBookID uuid.UUID
@@ -112,25 +118,20 @@ type Config struct {
 // small values for fast rolling-window fill.
 func DefaultConfig() Config {
 	return Config{
-		// Continuous-market defaults: ~5-20 min of ticks for the short
-		// window, ~1-2 hr of ticks for the long. The ShortVolWindow /
-		// LongVolWindow ratio is roughly 1:6, similar to the daily-bar
-		// 5:60 ratio but with far more data points under each.
-		ShortVolWindow:       240,
-		LongVolWindow:        1440,
+		// Bar defaults at 5m resolution: short ≈ 1h, long ≈ 8h, ATR ≈ 1h.
+		ShortVolWindow:       12,
+		LongVolWindow:        96,
 		CompressionThreshold: decimal.MustNew(3, 1), //nolint:mnd // 0.3
-		// ATR window matches ShortVolWindow at 240 ticks (~5-20 min of
-		// CLOB activity) so the average is statistically meaningful on
-		// a continuously trading market.
-		ATRWindow:           240,
-		BreakoutATRMultiple: decimal.MustNew(15, 1), //nolint:mnd // 1.5
-		ConfirmationBars:    5,
-		StopLossATR:         decimal.MustNew(20, 0), //nolint:mnd // 20x — wider stop for higher-volatility regimes
-		TakeProfitATR:       decimal.Zero,           // disabled by default
-		MinLongVolFloor:     decimal.Zero,
-		OBVTrendThreshold:   decimal.Zero, // disabled by default
-		InitialBalance:      decimal.One,
-		Leverage:            decimal.One,
+		ATRWindow:            12,
+		BreakoutATRMultiple:  decimal.MustNew(15, 1), //nolint:mnd // 1.5
+		ConfirmationBars:     3,
+		StopLossATR:          decimal.MustNew(20, 0), //nolint:mnd // 20x — wider stop for higher-volatility regimes
+		TakeProfitATR:        decimal.Zero,           // disabled by default
+		MinLongVolFloor:      decimal.Zero,
+		OBVTrendThreshold:    decimal.Zero, // disabled by default
+		Resolution:           candles.Resolution5m,
+		InitialBalance:       decimal.One,
+		Leverage:             decimal.One,
 	}
 }
 
@@ -155,10 +156,20 @@ type Strategy struct {
 	decisionSeq           int64
 	pricesHandler         *prices.Handler
 	marketAPIClient       strategy.MarketAPIClient
-	historicalStore       HistoricalPriceStore
-	backtestWriter        stats.BacktestTradeWriter
-	tradeStream           *streams.TradeStream
-	tradeHistoryStore     TradeHistoryStore
+	candleFeed            strategy.CandleFeed
+	candleStore           candleHistoryStore
+	// priceHistoryStore reads tick history (price_history) for backtest
+	// tick replay. nil self-wires from DATABASE_URL (best-effort).
+	priceHistoryStore priceHistorySource
+	backtestWriter    stats.BacktestTradeWriter
+	tradeStream       *streams.TradeStream
+	tradeHistoryStore trades.TradeStore
+
+	// baseAssetID is the order book's BASE ASSET UUID — distinct from
+	// the order book ID. Resolved once per run/backtest via
+	// lookupAssetID and stamped onto every Decision as bondID.
+	// Protected by mu.
+	baseAssetID string
 
 	// Live-run state (set in Run, used by executeDecision / closePosition).
 	runID               uuid.UUID
@@ -202,11 +213,11 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		cfg.Leverage = decimal.One
 	}
 	s := &Strategy{
-		cfg:           cfg,
-		shortVolWin:   window.NewRollingWindow(cfg.ShortVolWindow),
-		longVolWin:    window.NewRollingWindow(cfg.LongVolWindow),
-		atrWin:        window.NewRollingWindow(cfg.ATRWindow),
-		pricesHandler: pricesHandler,
+		cfg:             cfg,
+		shortVolWin:     window.NewRollingWindow(cfg.ShortVolWindow),
+		longVolWin:      window.NewRollingWindow(cfg.LongVolWindow),
+		atrWin:          window.NewRollingWindow(cfg.ATRWindow),
+		marketAPIClient: strategy.NewDoraClientWithKey(os.Getenv("DORA_API_KEY")),
 	}
 	// Initialize the OBV ring buffer when windowed mode is requested.
 	// A nil obvWindow means cumulative OBV (price-comparison). A
@@ -237,11 +248,22 @@ func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 	return func(s *Strategy) { s.marketAPIClient = client }
 }
 
-// WithHistoricalStore injects the backtest's historical price source.
-// Required when Backtest() is called; the strategy will return an error
-// from Backtest() without it.
-func WithHistoricalStore(store HistoricalPriceStore) func(*Strategy) {
-	return func(s *Strategy) { s.historicalStore = store }
+// WithCandleFeed sets the bar source used by the live run loop. Required
+// for Run: the loop fails fast when no feed is configured.
+func WithCandleFeed(f strategy.CandleFeed) func(*Strategy) {
+	return func(s *Strategy) { s.candleFeed = f }
+}
+
+// WithCandleHistoryStore sets the candle history store used by backtests.
+// When unset, the strategy self-wires from DATABASE_URL.
+func WithCandleHistoryStore(store candleHistoryStore) func(*Strategy) {
+	return func(s *Strategy) { s.candleStore = store }
+}
+
+// WithPriceHistoryStore sets the tick history source used by backtest
+// tick replay. When unset, the strategy self-wires from DATABASE_URL.
+func WithPriceHistoryStore(store priceHistorySource) func(*Strategy) {
+	return func(s *Strategy) { s.priceHistoryStore = store }
 }
 
 // WithTradeStream injects the live trade stream. When set, the Run
@@ -265,7 +287,7 @@ func WithBacktestWriter(w stats.BacktestTradeWriter) func(*Strategy) {
 // store and interleaves them with the observation stream by timestamp
 // so OBV is correct at every signal point. When OBVWindow == 0 the
 // store is ignored.
-func WithTradeHistoryStore(store TradeHistoryStore) func(*Strategy) {
+func WithTradeHistoryStore(store trades.TradeStore) func(*Strategy) {
 	return func(s *Strategy) { s.tradeHistoryStore = store }
 }
 
@@ -364,13 +386,14 @@ func (s *Strategy) applyTradeEvent(ev streams.TradeEvent) {
 	s.obvPrevPrice = ev.Price
 }
 
-// Update advances the strategy with one price observation and returns
-// the resulting Decision.
+// Update advances the strategy with one closed bar and returns the
+// resulting Decision.
 //
 // The algorithm:
-//  1. Append |Δprice| (vs. previous tick) to the ATR window, skipping the
-//     very first observation where there is no prior price.
-//  2. Append the current price to the short and long volatility windows.
+//  1. Append the bar's true range — max(H-L, |H-prevClose|, |L-prevClose|),
+//     seeded by the previous bar's close (H-L on the first bar) — to the
+//     ATR window.
+//  2. Append the bar's close to the short and long volatility windows.
 //  3. If the long window is not yet full, return HOLD with Reason
 //     "warming_up" — there is not enough history to characterise volatility.
 //  4. Compute ShortVol = σ(shortVolWin), LongVol = σ(longVolWin), ATR = mean
@@ -380,29 +403,33 @@ func (s *Strategy) applyTradeEvent(ev streams.TradeEvent) {
 //     CompressionThreshold, set compressionArmed=true. A zero LongVol is
 //     treated as ratio=0 (maximum compression) so a perfectly flat
 //     baseline correctly arms a flag.
-//  6. With compression armed, compute triggerHigh/Low = prevPrice ± k·ATR.
+//  6. With compression armed, compute triggerHigh/Low = prevBarClose ± k·ATR.
 //     A close above triggerHigh increments barsAboveTrigger; a close below
 //     triggerLow increments barsBelowTrigger. When either reaches
 //     ConfirmationBars, emit SignalBuy or SignalSell with Reason
 //     "compression_breakout" and reset the armed flag + counters.
-func (s *Strategy) Update(o types.YieldObservation) (Decision, error) {
+//
+// Breakout is price-only: bars pass through regardless of CloseYTM.
+func (s *Strategy) Update(bar types.Bar) (Decision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	cfg := s.cfg
 
-	// Capture the previous price before mutating any state — the breakout
-	// trigger is anchored to the most recent close, not the current one.
-	prevPrice := s.lastPrice
+	// Capture the previous bar's close before mutating any state — the
+	// breakout trigger is anchored to the most recent close, not the
+	// current one. Same deliberate ordering the tick path had, now
+	// per-bar.
+	prevClose := s.lastPrice
 
-	if err := s.ingestObservation(o, prevPrice); err != nil {
+	if err := s.ingestObservation(bar, prevClose); err != nil {
 		return Decision{}, err
 	}
 
 	d := Decision{
-		time:             o.Time,
-		bondID:           o.BondID,
-		price:            o.Price,
+		time:             bar.Time,
+		bondID:           s.baseAssetID,
+		price:            bar.Close,
 		CompressionArmed: s.compressionArmed,
 		BarsAboveTrigger: s.barsAboveTrigger,
 	}
@@ -447,7 +474,7 @@ func (s *Strategy) Update(o types.YieldObservation) (Decision, error) {
 		return d, nil
 	}
 
-	s.evaluateBreakout(&d, o.Price, prevPrice, atr)
+	s.evaluateBreakout(&d, bar.Close, prevClose, atr)
 	s.applyVolumeFilter(&d)
 	return d, nil
 }
@@ -484,26 +511,25 @@ func (s *Strategy) applyVolumeFilter(d *Decision) {
 	}
 }
 
-// ingestObservation updates the rolling windows with a new observation:
-// the ATR window gets |Δprice| (skipping the very first tick), and the
-// short/long volatility windows get the raw price.
-func (s *Strategy) ingestObservation(o types.YieldObservation, prevPrice decimal.Decimal) error {
-	if !prevPrice.IsZero() {
-		diff, err := o.Price.Sub(prevPrice)
-		if err != nil {
-			return err
-		}
-		if err := s.atrWin.Add(diff.Abs()); err != nil {
-			return err
-		}
-	}
-	if err := s.shortVolWin.Add(o.Price); err != nil {
+// ingestObservation updates the rolling windows with a new closed bar:
+// the ATR window gets the bar's true range (seeded by the previous
+// bar's close), and the short/long volatility windows get the bar's
+// close.
+func (s *Strategy) ingestObservation(bar types.Bar, prevClose decimal.Decimal) error {
+	tr, err := bar.TrueRange(prevClose)
+	if err != nil {
 		return err
 	}
-	if err := s.longVolWin.Add(o.Price); err != nil {
+	if err := s.atrWin.Add(tr); err != nil {
 		return err
 	}
-	s.lastPrice = o.Price
+	if err := s.shortVolWin.Add(bar.Close); err != nil {
+		return err
+	}
+	if err := s.longVolWin.Add(bar.Close); err != nil {
+		return err
+	}
+	s.lastPrice = bar.Close
 	return nil
 }
 
@@ -580,28 +606,43 @@ func (s *Strategy) resetArmed() {
 	s.barsBelowTrigger = 0
 }
 
-// Backtest runs the strategy against historical observations between start
-// and end. Delegates to a Backtester that reuses the live Update path.
+// Backtest is the strategy.Strategy entry point for a backtest run.
+// Validates the date range, loads the bar window (with LongVolWindow+1
+// bars of warmup) from candle history, and forwards to the backtester.
 func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
-	if s.historicalStore == nil {
-		return BacktestResult{}, errors.New("breakout: historical price store is not configured")
+	if end.UTC().Before(start.UTC()) {
+		return nil, errors.New("end date must be after start date")
+	}
+	now := time.Now().UTC()
+	if start.UTC().After(now) || end.UTC().After(now) {
+		return nil, errors.New("start and end date must be in the past")
+	}
+
+	bars, err := s.getBars(ctx, start, end)
+	if err != nil {
+		return nil, err
 	}
 	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
 	if err != nil {
-		return BacktestResult{}, fmt.Errorf("lookup asset ID: %w", err)
+		return nil, fmt.Errorf("backtest requires the order book's base asset: %w", err)
 	}
-	obs, err := s.historicalStore.Observations(ctx, assetID, start, end)
-	if err != nil {
-		return BacktestResult{}, fmt.Errorf("load historical observations: %w", err)
-	}
-	return NewBacktester(s, s.backtestWriter).Run(ctx, obs)
+	s.mu.Lock()
+	s.baseAssetID = assetID
+	s.mu.Unlock()
+	bt := NewBacktester(s, s.backtestWriter)
+	bt.ticks = s.loadTicks(ctx, assetID, bars)
+	// Pin the trading window so warmup bars (the pre-`start` slice
+	// getBars returns) only seed indicators; entries and reporting
+	// stay restricted to [start, end].
+	bt.TradeFrom = start
+	bt.TradeTo = end
+	return bt.Run(ctx, bars)
 }
 
-// Run starts the live breakout loop. It subscribes to prices, processes
-// ticks through Update(), and places market orders on every non-HOLD
-// signal. The opposite-signal pattern closes the open position; this
-// mirrors meanreversion.Strategy.Run with breakout-specific simplifications
-// (no benchmark yield, no window prefill).
+// Run starts the live breakout loop. Closed bars are the signal source
+// (the candle feed bootstraps history back to `since` for a warm
+// start); ticks only drive intrabar stop-loss/take-profit exits. The
+// opposite-signal pattern closes the open position.
 func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
 	s.mu.Lock()
 	if s.isRunning {
@@ -638,6 +679,8 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 // runLoop is the inner select that drives the live strategy. Extracted so
 // Run() stays small and the live loop itself can be tested in isolation
 // via dependency-injected channels.
+//
+//nolint:funlen // main run loop with setup and teardown
 func (s *Strategy) runLoop(
 	ctx context.Context,
 	msgs <-chan strategy.Message,
@@ -648,6 +691,27 @@ func (s *Strategy) runLoop(
 	if err != nil {
 		return fmt.Errorf("lookup asset ID: %w", err)
 	}
+
+	s.mu.Lock()
+	s.baseAssetID = assetID
+	s.mu.Unlock()
+
+	// Bars are the signal source: the feed bootstraps history back to
+	// `since` (the volatility-baseline warm start, replacing the old
+	// cold start) and then streams closed bars.
+	if s.candleFeed == nil {
+		return errors.New("candle feed not configured")
+	}
+	if err := s.requireCandleCoverage(ctx); err != nil {
+		return err
+	}
+	res := strategy.ResolutionDuration(s.cfg.Resolution)
+	warmup := time.Duration(s.cfg.LongVolWindow+1) * res
+	bars, cancelBars, err := s.candleFeed.SubscribeBars(ctx, s.cfg.OrderBookID, s.cfg.Resolution, time.Now().UTC().Add(-warmup))
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to bars: %w", err)
+	}
+	defer cancelBars()
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -668,12 +732,68 @@ func (s *Strategy) runLoop(
 				s.logger().Debug("breakout run resumed", "runID", s.runID)
 			}
 			s.mu.Unlock()
+		case bar := <-bars:
+			// Snapshot state under the lock; Update() re-acquires the
+			// lock so we must release before calling it.
+			s.mu.RLock()
+			paused := s.paused
+			openSig := s.openSignal
+			s.mu.RUnlock()
+
+			decision, err := s.Update(bar)
+			if err != nil {
+				s.logger().Error("update strategy failed", "runID", s.runID, "assetID", assetID, "err", err)
+				continue
+			}
+			if paused {
+				continue
+			}
+
+			if openSig != types.SignalHold {
+				// Opposite-signal reversal closes the position. (Bar-close
+				// SL/TP is not evaluated here — the backtester evaluates
+				// exits at bar extremes; live SL/TP runs on ticks below.)
+				if isReversal(openSig, decision.Signal()) {
+					if err := s.closePosition(ctx, assetID, DecisionReasonReversal); err != nil {
+						s.logger().Error("close position failed", "runID", s.runID, "assetID", assetID, "err", err)
+						s.recordErr(err)
+					}
+				}
+				continue
+			}
+
+			// Flat: open a position on a fresh signal.
+			if decision.Signal() != types.SignalHold {
+				if _, err := s.executeDecision(ctx, decision, assetID); err != nil {
+					s.logger().Error("execute decision failed", "runID", s.runID, "assetID", assetID, "err", err)
+					s.recordErr(err)
+				}
+			}
 		case pxs := <-prices:
+			// Ticks no longer drive entries or the rolling windows; they
+			// only provide intrabar stop-loss / take-profit exits.
 			for _, px := range pxs {
 				if px.AssetID != assetID {
 					continue
 				}
-				s.handleTick(ctx, px, assetID)
+				s.mu.RLock()
+				openSig := s.openSignal
+				paused := s.paused
+				entryPrice := s.entryPrice
+				entryATR := s.entryATR
+				s.mu.RUnlock()
+				if paused || openSig == types.SignalHold {
+					// Paused means hands-off: take no action on ticks,
+					// mirroring the bar case.
+					continue
+				}
+				if reason, ok := liveCheckSLTP(openSig, entryPrice, entryATR, px.Price, s.cfg); ok {
+					s.logger().Info("exiting position intra-bar", "reason", reason, "runID", s.runID)
+					if err := s.closePosition(ctx, assetID, reason); err != nil {
+						s.logger().Error("close position failed", "runID", s.runID, "assetID", assetID, "err", err)
+						s.recordErr(err)
+					}
+				}
 			}
 		case ev, ok := <-trades:
 			if !ok {
@@ -687,78 +807,11 @@ func (s *Strategy) runLoop(
 	}
 }
 
-// handleTick processes a single price update through the Update() pipeline
-// and dispatches the resulting decision to executeDecision or closePosition.
-//
-// Paused ticks are dropped before any state mutation. snapshot openSig /
-// entryPrice / entryATR but DO NOT write s.lastPrice — Update's
-// ingestObservation sets lastPrice at the end, which means Update's
-// prevPrice read sees the previous tick's lastPrice (not the current
-// tick's), keeping |Δprice| ≥ 0 instead of 0 and the breakout trigger
-// above the current price on flat ticks.
-func (s *Strategy) handleTick(ctx context.Context, px prices.AssetPrice, assetID string) {
-	s.mu.RLock()
-	paused := s.paused
-	s.mu.RUnlock()
-	if paused {
-		s.logger().Debug("breakout run paused, dropping tick", "runID", s.runID, "assetID", assetID)
-		return
-	}
-
-	// Snapshot state under the lock; Update() re-acquires the lock so we
-	// must release before calling it. We do NOT set s.lastPrice here —
-	// Update's ingestObservation sets it from the obs.Price.
+// recordErr appends an error to the run's error log under the lock.
+func (s *Strategy) recordErr(err error) {
 	s.mu.Lock()
-	openSig := s.openSignal
-	entryPrice := s.entryPrice
-	entryATR := s.entryATR
-	s.mu.Unlock()
-
-	obs := types.YieldObservation{
-		Time:   px.Time,
-		BondID: px.AssetID,
-		Price:  px.Price,
-	}
-
-	decision, err := s.Update(obs)
-	if err != nil {
-		s.logger().Error("update strategy failed", "runID", s.runID, "assetID", assetID, "err", err)
-		return
-	}
-
-	// Already in a position: check SL/TP first (priority over reversal).
-	if openSig != types.SignalHold {
-		if reason, ok := liveCheckSLTP(openSig, entryPrice, entryATR, px.Price, s.cfg); ok {
-			if err := s.closePosition(ctx, assetID, reason); err != nil {
-				s.logger().Error("close position failed", "runID", s.runID, "assetID", assetID, "err", err)
-				s.mu.Lock()
-				s.errs = append(s.errs, err)
-				s.mu.Unlock()
-			}
-			return
-		}
-		// Then: opposite-signal reversal.
-		if isReversal(openSig, decision.Signal()) {
-			if err := s.closePosition(ctx, assetID, DecisionReasonReversal); err != nil {
-				s.logger().Error("close position failed", "runID", s.runID, "assetID", assetID, "err", err)
-				s.mu.Lock()
-				s.errs = append(s.errs, err)
-				s.mu.Unlock()
-			}
-			return
-		}
-		return
-	}
-
-	// Flat: open a position on a fresh signal.
-	if openSig == types.SignalHold && decision.Signal() != types.SignalHold {
-		if _, err := s.executeDecision(ctx, decision, assetID); err != nil {
-			s.logger().Error("execute decision failed", "runID", s.runID, "assetID", assetID, "err", err)
-			s.mu.Lock()
-			s.errs = append(s.errs, err)
-			s.mu.Unlock()
-		}
-	}
+	defer s.mu.Unlock()
+	s.errs = append(s.errs, err)
 }
 
 // subscribePrices opens a price subscription for this run.
@@ -981,9 +1034,10 @@ func (s *Strategy) closePosition(ctx context.Context, assetID, reason string) er
 	return nil
 }
 
-// liveCheckSLTP is the live-loop equivalent of the backtest's
-// checkStopLossTakeProfit. Returns the exit reason and true if the
-// current price has crossed the SL or TP band, ("", false) otherwise.
+// liveCheckSLTP is the live-loop counterpart of the backtest's band
+// checks, sharing bandLevel's entry ± multiplier×ATR math. Returns the
+// exit reason and true if the current price has crossed the SL or TP
+// band, ("", false) otherwise.
 // Stops at the first hit (SL first, then TP) so a single fast move
 // records the worse outcome.
 func liveCheckSLTP(openSig types.Signal, entryPrice, entryATR, currentPrice decimal.Decimal, cfg Config) (string, bool) {

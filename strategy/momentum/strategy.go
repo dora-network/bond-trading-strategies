@@ -29,9 +29,13 @@ type Strategy struct {
 	fastWin *window.Rolling
 	slowWin *window.Rolling
 	atrWin  *window.Rolling
+	// volWin is the rolling mean-volume window behind the entry
+	// volume gate. nil when VolumeAvgWindow == 0 (gate disabled).
+	volWin *window.Rolling
 
-	// lastPrice is the previous clean price (for ATR abs-diff). Zero
-	// until the second tick.
+	// lastPrice is the previous bar's close (the TrueRange seed).
+	// Zero until the first bar. NOT updated by ticks — ticks only
+	// drive intrabar exits.
 	lastPrice decimal.Decimal
 
 	// sourceSign applies the bond-specific direction mapping: +1 for
@@ -43,16 +47,29 @@ type Strategy struct {
 	// backtests and signal-only callers.
 	marketAPIClient strategy.MarketAPIClient
 
+	// candleFeed streams closed bars for the live run loop. Required
+	// for Run: the loop fails fast when it is nil.
+	candleFeed strategy.CandleFeed
+
+	// baseAssetID is the order book's BASE ASSET UUID — distinct from
+	// the order book ID. Resolved once per run/backtest via
+	// lookupAssetID and stamped onto every Decision as bondID.
+	// Protected by mu.
+	baseAssetID string
+
 	// collateralWeight is the collateral weight of the base asset
 	// fetched from DORA during the live run. Defaults to 1.0 in
 	// backtests and signal-only callers.
 	collateralWeight decimal.Decimal
 
-	// historyStore / benchmarkClient are the historical data surfaces
-	// used by getObservations / prefillWindow (spread mode only for
-	// the FRED client). Defined in historical_data.go.
-	historyStore    historicalPriceStore
-	benchmarkClient benchmarkYieldClient
+	// candleStore / benchmarkClient are the historical data surfaces
+	// used by getBars (spread mode only for the FRED client).
+	// Defined in historical_data.go.
+	candleStore candleHistoryStore
+	// priceHistoryStore reads tick history (price_history) for backtest
+	// tick replay. nil self-wires from DATABASE_URL (best-effort).
+	priceHistoryStore priceHistorySource
+	benchmarkClient   benchmarkYieldClient
 
 	// benchmarkObservations caches FRED yields for spread mode.
 	benchmarkObservations []fred.Observation
@@ -100,6 +117,11 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		marketAPIClient:  strategy.NewDoraClientWithKey(os.Getenv("DORA_API_KEY")),
 		errs:             make([]error, 0),
 	}
+	if cfg.VolumeAvgWindow > 0 {
+		// window.NewRollingWindow clamps sizes below 2, so an explicit
+		// 0 (gate disabled) must be represented by a nil window.
+		s.volWin = window.NewRollingWindow(cfg.VolumeAvgWindow)
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -116,6 +138,26 @@ func sourceSign(source string) decimal.Decimal {
 // WithLogger sets the logger on a momentum Strategy.
 func WithLogger(log *slog.Logger) func(*Strategy) {
 	return func(s *Strategy) { s.log = log }
+}
+
+// WithCandleFeed sets the bar source used by the live run loop. Required
+// for Run: the loop fails fast when no feed is configured.
+func WithCandleFeed(f strategy.CandleFeed) func(*Strategy) {
+	return func(s *Strategy) { s.candleFeed = f }
+}
+
+// WithCandleHistoryStore sets the candle history store used by backtests.
+// When unset, the strategy self-wires from DATABASE_URL.
+func WithCandleHistoryStore(store candleHistoryStore) func(*Strategy) {
+	return func(s *Strategy) { s.candleStore = store }
+}
+
+// WithPriceHistoryStore sets the tick history source used by backtest
+// tick replay. When unset, the strategy self-wires from DATABASE_URL.
+func WithPriceHistoryStore(store priceHistorySource) func(*Strategy) {
+	return func(s *Strategy) {
+		s.priceHistoryStore = store
+	}
 }
 
 // WithMarketAPIClient sets the market API client on a momentum Strategy.
@@ -234,8 +276,8 @@ func (s *Strategy) lookupAssetID(ctx context.Context, orderBookID uuid.UUID) (st
 }
 
 // Backtest is the strategy.Strategy entry point for a backtest run.
-// Validates the date range, loads the observation window, and forwards
-// to the backtester.
+// Validates the date range, loads the bar window (with slow-window
+// warmup) from candle history, and forwards to the backtester.
 func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.BacktestResult, error) {
 	if end.UTC().Before(start.UTC()) {
 		return BacktestResult{}, errors.New("end date must be after start date")
@@ -244,12 +286,25 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (types.Ba
 	if start.UTC().After(now) || end.UTC().After(now) {
 		return BacktestResult{}, errors.New("start and end date must be in the past")
 	}
-	obs, err := s.getObservations(ctx, start, end)
+	bars, err := s.getBars(ctx, start, end)
 	if err != nil {
 		return nil, err
 	}
+	assetID, err := s.lookupAssetID(ctx, s.cfg.OrderBookID)
+	if err != nil {
+		return BacktestResult{}, fmt.Errorf("backtest requires the order book's base asset: %w", err)
+	}
+	s.mu.Lock()
+	s.baseAssetID = assetID
+	s.mu.Unlock()
 	bt := NewBacktester(s, s.backtestWriter)
-	return bt.Run(ctx, obs)
+	bt.ticks = s.loadTicks(ctx, assetID, bars)
+	// Pin the trading window so warmup bars (the pre-`start` slice
+	// getBars returns) only seed indicators; entries and reporting
+	// stay restricted to [start, end].
+	bt.TradeFrom = start
+	bt.TradeTo = end
+	return bt.Run(ctx, bars)
 }
 
 // NewExitDecision builds a Decision carrying only the fields ShouldExit
@@ -259,50 +314,95 @@ func NewExitDecision(signal types.Signal, price decimal.Decimal) Decision {
 	return Decision{signal: signal, price: price}
 }
 
+// bandExit evaluates the entry-anchored stop-loss / take-profit price
+// bands for a position. It is shared by ShouldExit (bar-close decisions)
+// and the live run loop's intrabar tick check so both use identical
+// thresholds. Returns the exit reason and whether to exit.
+func (s *Strategy) bandExit(
+	openSignal types.Signal,
+	entryPrice, entryATR, price decimal.Decimal,
+) (string, bool) {
+	stop, tp, hasStop, hasTP := s.bandLevels(openSignal, entryPrice, entryATR)
+	if hasStop {
+		switch openSignal { //nolint:exhaustive // SignalHold means flat — no stop check
+		case types.SignalBuy:
+			if price.Cmp(stop) <= 0 {
+				return ExitReasonStopLoss, true
+			}
+		case types.SignalSell:
+			if price.Cmp(stop) >= 0 {
+				return ExitReasonStopLoss, true
+			}
+		}
+	}
+	if hasTP {
+		switch openSignal { //nolint:exhaustive // SignalHold means flat — no take-profit check
+		case types.SignalBuy:
+			if price.Cmp(tp) >= 0 {
+				return ExitReasonTakeProfit, true
+			}
+		case types.SignalSell:
+			if price.Cmp(tp) <= 0 {
+				return ExitReasonTakeProfit, true
+			}
+		}
+	}
+	return "", false
+}
+
+// bandLevels returns the entry-anchored stop and take-profit price
+// levels for the open position. Single source of truth: bandExit (close
+// decisions, live tick check) and the bar-extreme backtest helper share
+// this math so the levels can never drift.
+func (s *Strategy) bandLevels(
+	openSignal types.Signal,
+	entryPrice, entryATR decimal.Decimal,
+) (stop, tp decimal.Decimal, hasStop, hasTP bool) {
+	cfg := s.cfg
+	if !entryATR.IsPos() {
+		return stop, tp, false, false
+	}
+	if cfg.StopLossATR.IsPos() {
+		stopDist, err := cfg.StopLossATR.Mul(entryATR)
+		if err != nil {
+			return stop, tp, false, false
+		}
+		switch openSignal { //nolint:exhaustive // SignalHold means flat
+		case types.SignalBuy:
+			stop, err = entryPrice.Sub(stopDist)
+		case types.SignalSell:
+			stop, err = entryPrice.Add(stopDist)
+		}
+		if err == nil {
+			hasStop = true
+		}
+	}
+	if cfg.TakeProfitATR.IsPos() {
+		tpDist, err := cfg.TakeProfitATR.Mul(entryATR)
+		if err != nil {
+			return stop, tp, hasStop, false
+		}
+		switch openSignal { //nolint:exhaustive // SignalHold means flat
+		case types.SignalBuy:
+			tp, err = entryPrice.Add(tpDist)
+		case types.SignalSell:
+			tp, err = entryPrice.Sub(tpDist)
+		}
+		if err == nil {
+			hasTP = true
+		}
+	}
+	return stop, tp, hasStop, hasTP
+}
+
 // ShouldExit reports whether an open position should close, and why.
 // Priority: stop_loss > take_profit > reversal. Stop/TP are price-based
 // and entry-anchored (stable for the position's life). Reversal fires
 // when the current decision's signal opposes the open position.
 func (s *Strategy) ShouldExit(openSignal types.Signal, d Decision, entryPrice, entryATR decimal.Decimal) (bool, string) {
-	price := d.Price()
-	cfg := s.cfg
-
-	if cfg.StopLossATR.IsPos() && entryATR.IsPos() {
-		stopDist, err := cfg.StopLossATR.Mul(entryATR)
-		if err == nil {
-			switch openSignal { //nolint:exhaustive // SignalHold means flat — no stop check
-			case types.SignalBuy:
-				threshold, err := entryPrice.Sub(stopDist)
-				if err == nil && price.Cmp(threshold) <= 0 {
-					return true, ExitReasonStopLoss
-				}
-			case types.SignalSell:
-				threshold, err := entryPrice.Add(stopDist)
-				if err == nil && price.Cmp(threshold) >= 0 {
-					return true, ExitReasonStopLoss
-				}
-			}
-		}
+	if reason, exit := s.bandExit(openSignal, entryPrice, entryATR, d.Price()); exit {
+		return true, reason
 	}
-
-	if cfg.TakeProfitATR.IsPos() && entryATR.IsPos() {
-		tpDist, err := cfg.TakeProfitATR.Mul(entryATR)
-		if err == nil {
-			switch openSignal { //nolint:exhaustive // SignalHold means flat — no take-profit check
-			case types.SignalBuy:
-				threshold, err := entryPrice.Add(tpDist)
-				if err == nil && price.Cmp(threshold) >= 0 {
-					return true, ExitReasonTakeProfit
-				}
-			case types.SignalSell:
-				threshold, err := entryPrice.Sub(tpDist)
-				if err == nil && price.Cmp(threshold) <= 0 {
-					return true, ExitReasonTakeProfit
-				}
-			}
-		}
-	}
-
 	// Reversal: current signal opposes the open position.
 	if openSignal == types.SignalBuy && d.Signal() == types.SignalSell {
 		return true, ExitReasonReversal
@@ -313,57 +413,52 @@ func (s *Strategy) ShouldExit(openSignal types.Signal, d Decision, entryPrice, e
 	return false, ""
 }
 
-// seriesValue selects the configured series value from the observation.
-// ok is false when the tick must be dropped entirely (zero YTM in
+// seriesValue selects the configured series value from a closed bar.
+// ok is false when the bar must be dropped entirely (zero close YTM in
 // ytm/spread modes). price mode never drops.
-func (s *Strategy) seriesValue(o types.YieldObservation) (decimal.Decimal, bool, error) {
+func (s *Strategy) seriesValue(bar types.Bar) (decimal.Decimal, bool, error) {
 	switch s.cfg.SignalSource {
 	case SignalSourcePrice:
-		return o.Price, true, nil
+		return bar.Close, true, nil
 	case SignalSourceYTM:
-		if o.YTM.IsZero() {
+		if bar.CloseYTM.IsZero() {
 			return decimal.Zero, false, nil
 		}
-		return o.YTM, true, nil
+		return bar.CloseYTM, true, nil
 	default: // spread
-		if o.YTM.IsZero() {
+		if bar.CloseYTM.IsZero() {
 			return decimal.Zero, false, nil
 		}
-		spread, err := o.Spread()
+		spread, err := bar.CloseYTM.Sub(bar.BenchmarkYield)
 		return spread, true, err
 	}
 }
 
-// Update ingests one observation and returns the resulting Decision.
-func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
+// Update ingests one closed bar and returns the resulting Decision.
+func (s *Strategy) Update(bar types.Bar) (Decision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	prevPrice := s.lastPrice
-	s.lastPrice = obs.Price
+	prevClose := s.lastPrice
 
-	value, ok, err := s.seriesValue(obs)
+	value, ok, err := s.seriesValue(bar)
 	if err != nil {
 		return Decision{}, err
 	}
 	if !ok {
-		// Drop the tick entirely (no window updates, no signal).
+		// Drop the bar entirely (no window updates, no signal).
 		return Decision{
-			time: obs.Time, bondID: obs.BondID, price: obs.Price,
+			time: bar.Time, price: bar.Close,
 			signal: types.SignalHold, reason: DecisionReasonWarmingUp,
 		}, nil
 	}
 
-	// ATR = mean absolute price diff.
-	var absDiff decimal.Decimal
-	if !prevPrice.IsZero() {
-		d, err := obs.Price.Sub(prevPrice)
-		if err != nil {
-			return Decision{}, err
-		}
-		absDiff = d.Abs()
+	// ATR = mean true range, seeded by the previous bar's close.
+	tr, err := bar.TrueRange(prevClose)
+	if err != nil {
+		return Decision{}, err
 	}
-	if err := s.atrWin.Add(absDiff); err != nil {
+	if err := s.atrWin.Add(tr); err != nil {
 		return Decision{}, err
 	}
 	if err := s.fastWin.Add(value); err != nil {
@@ -372,6 +467,12 @@ func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
 	if err := s.slowWin.Add(value); err != nil {
 		return Decision{}, err
 	}
+	if s.volWin != nil {
+		if err := s.volWin.Add(bar.Volume); err != nil {
+			return Decision{}, err
+		}
+	}
+	s.lastPrice = bar.Close
 
 	fastMA := s.fastWin.Mean()
 	slowMA := s.slowWin.Mean()
@@ -387,8 +488,9 @@ func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
 	}
 
 	d := Decision{
-		time: obs.Time, bondID: obs.BondID, price: obs.Price,
+		time: bar.Time, price: bar.Close,
 		FastMA: fastMA, SlowMA: slowMA, ATR: atr, SeriesValue: value,
+		bondID: s.baseAssetID,
 		signal: types.SignalHold, reason: DecisionReasonWarmingUp,
 		positionSize: s.cfg.MaxPositionSize,
 	}
@@ -406,6 +508,21 @@ func (s *Strategy) Update(obs types.YieldObservation) (Decision, error) {
 		d.signal = types.SignalSell
 		d.Trend = "down"
 		d.reason = DecisionReasonMACrossoverDown
+	}
+
+	// Volume gate: a directional signal must be confirmed by bar volume
+	// >= VolumeRatioThreshold × the rolling mean volume. Gate disabled
+	// (nil window) or not yet ready allows the entry, mirroring the
+	// meanreversion imbalance gate's pass-through semantics.
+	if d.signal != types.SignalHold && s.volWin != nil && s.volWin.Ready() {
+		threshold, err := s.cfg.VolumeRatioThreshold.Mul(s.volWin.Mean())
+		if err == nil && bar.Volume.Cmp(threshold) < 0 {
+			d.signal = types.SignalHold
+			d.Trend = ""
+			d.reason = DecisionReasonVolumeNotConfirmed
+		} else if err != nil {
+			s.logger().Warn("volume gate comparison failed, allowing entry", "err", err)
+		}
 	}
 	return d, nil
 }
@@ -536,20 +653,24 @@ func (s *Strategy) initializeBalances(ctx context.Context, baseAssetID string) {
 	s.mu.Unlock()
 }
 
-// seedResumeAnchor restores an exit anchor for a position that already
-// exists when the run starts (server restart with an open position, or
-// a run inheriting an exchange position). Without it entryPrice and
-// entryATR stay zero and ShouldExit's stop-loss/take-profit branches —
-// both gated on entryATR.IsPos() — never fire, leaving the position
-// protected only by opposite-signal reversal. The anchor is approximate:
-// the last clean price and the current ATR window mean, not the true
-// entry values, which trades exact stop placement for having a stop.
+// seedResumeAnchor restores an exit anchor for an INHERITED position —
+// one that exists when the run starts (server restart with an open
+// position, or a run inheriting an exchange position) and therefore has
+// a zero entryPrice. Without it entryPrice and entryATR stay zero and
+// ShouldExit's stop-loss/take-profit branches — both gated on
+// entryATR.IsPos() — never fire, leaving the position protected only by
+// opposite-signal reversal. The anchor is approximate: the last bar
+// close and the current true-range ATR mean, not the true entry values,
+// which trades exact stop placement for having a stop. A real entry
+// always sets entryPrice, so the entryPrice.IsZero() guard keeps the
+// per-bar invocation in the run loop from re-anchoring (and drifting) a
+// live position's stop bands.
 // ponytail: approximate re-derivation; upgrade to StateStore-persisted
 // anchors (twap/vwap pattern) if exact entry prices ever matter.
 func (s *Strategy) seedResumeAnchor() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.openSignal == types.SignalHold || s.entryATR.IsPos() {
+	if s.openSignal == types.SignalHold || !s.entryPrice.IsZero() || s.entryATR.IsPos() {
 		return
 	}
 	if s.lastPrice.IsZero() || !s.atrWin.Ready() {
@@ -758,9 +879,10 @@ func (s *Strategy) executeDecision(ctx context.Context, decision Decision, asset
 	return true, nil
 }
 
-// run is the per-tick loop. Mirrors meanreversion/breakout but builds
-// the observation source-aware (spread mode fetches FRED, ytm/spread
-// skip ticks with nil YTM).
+// run is the live loop. Closed bars are the signal source (the candle
+// feed bootstraps history back to `since` for a warm start); ticks only
+// update intrabar exits. Spread mode resolves the benchmark at bar
+// close time.
 //
 //nolint:funlen // main run loop with setup and teardown
 func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, pricesCh <-chan map[uuid.UUID]prices.AssetPrice) error {
@@ -776,6 +898,9 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 		return fmt.Errorf("error looking up asset ID: %w", err)
 	}
 
+	s.mu.Lock()
+	s.baseAssetID = assetID
+	s.mu.Unlock()
 	collateralWeight, err := s.marketAPIClient.AssetCollateralWeight(ctx, assetID)
 	if err != nil {
 		s.logger().Warn("collateral weight lookup failed, defaulting to 1.0", "assetID", assetID, "err", err)
@@ -785,10 +910,22 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 		s.mu.Unlock()
 	}
 
-	s.logger().Info("prefilling window with historical data", "runID", s.runID)
-	if err := s.prefillWindow(ctx, assetID); err != nil {
-		s.recordErr(fmt.Errorf("prefill window (non-fatal): %w", err))
+	// Bars are the signal source: the feed bootstraps history back to
+	// `since` (warm start, replacing the old prefillWindow) and then
+	// streams closed bars.
+	if s.candleFeed == nil {
+		return fmt.Errorf("candle feed not configured")
 	}
+	if err := s.requireCandleCoverage(ctx); err != nil {
+		return err
+	}
+	res := strategy.ResolutionDuration(s.cfg.Resolution)
+	warmup := time.Duration(s.cfg.SlowWindow+1) * res
+	bars, cancelBars, err := s.candleFeed.SubscribeBars(ctx, s.cfg.OrderBookID, s.cfg.Resolution, time.Now().UTC().Add(-warmup))
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to bars: %w", err)
+	}
+	defer cancelBars()
 
 	s.logger().Info("initialising balances", "runID", s.runID, "assetID", assetID)
 	s.initializeBalances(ctx, assetID)
@@ -811,87 +948,91 @@ func (s *Strategy) run(ctx context.Context, msgs <-chan strategy.Message, prices
 				s.cancel()
 			}
 			s.mu.Unlock()
+		case bar := <-bars:
+			// Resolve the benchmark at the bar's close time. This may
+			// make a FRED API call, so it runs without holding s.mu.
+			if s.cfg.SignalSource == SignalSourceSpread {
+				bench, benchOK := s.getBenchmarkYield(ctx, bar.Time.Add(res))
+				if !benchOK {
+					// No benchmark available (FRED down, empty cache):
+					// skip the bar rather than evaluate a spread against
+					// zero. The failed fetch is already logged (throttled).
+					continue
+				}
+				bar.BenchmarkYield = bench
+			}
+			// Snapshot state under the lock; Update() re-acquires s.mu
+			// so we must release before calling it (sync.RWMutex is not
+			// reentrant). Same pattern as the tick case.
+			s.mu.Lock()
+			windowReadyBeforeUpdate := s.fastWin.Ready() && s.slowWin.Ready()
+			paused := s.paused
+			currentOpenSignal := s.openSignal
+			entryPrice := s.entryPrice
+			entryATR := s.entryATR
+			s.mu.Unlock()
+
+			decision, err := s.Update(bar)
+			if err != nil {
+				s.logger().Error("failed to update strategy", "runID", s.runID, "err", err)
+				continue
+			}
+			// An inherited position anchors its exit bands once the
+			// warm-up bars have filled the windows (no-op once the
+			// anchor exists or the strategy is flat).
+			s.seedResumeAnchor()
+			if paused {
+				continue
+			}
+
+			if currentOpenSignal != types.SignalHold {
+				// On the bar that makes a window full, the MAs are
+				// still based on incomplete data. Skip exit evaluation
+				// on that bar to avoid acting on a stale signal.
+				if windowReadyBeforeUpdate {
+					if shouldExit, reason := s.ShouldExit(currentOpenSignal, decision, entryPrice, entryATR); shouldExit {
+						s.logger().Info("exiting position", "reason", reason, "runID", s.runID)
+						if err := s.closePosition(ctx, assetID); err != nil {
+							s.logger().Error("failed to close position", "runID", s.runID, "err", err)
+							s.recordErr(err)
+						}
+					}
+				}
+				continue
+			}
+
+			if decision.Signal() == types.SignalHold {
+				continue
+			}
+
+			if _, err := s.executeDecision(ctx, decision, assetID); err != nil {
+				s.logger().Error("failed to execute decision", "runID", s.runID, "err", err)
+				s.recordErr(err)
+			}
 		case pxs := <-pricesCh:
+			// Ticks no longer drive entries or the rolling windows; they
+			// only provide intrabar stop-loss / take-profit exits.
 			for _, px := range pxs {
 				if px.AssetID != assetID {
 					continue
 				}
-				// The price stream never emits nil YTM (prices/store.go
-				// filters ytm IS NOT NULL on insert, so live prices inherit
-				// the same guarantee). Surface the contract violation
-				// rather than silently dropping the tick.
-				if px.YTM == nil {
-					s.recordErr(fmt.Errorf("live tick asset %s at %s has nil YTM (store contract violation)",
-						px.AssetID, px.Time.UTC().Format(time.RFC3339)))
-					continue
-				}
-
-				var benchmarkYield decimal.Decimal
-				if s.cfg.SignalSource == SignalSourceSpread {
-					var benchOK bool
-					benchmarkYield, benchOK = s.getBenchmarkYield(ctx, px.Time)
-					if !benchOK {
-						// No benchmark available (FRED down, empty cache):
-						// skip the tick rather than evaluate YTM - 0. The
-						// failed fetch is already logged (throttled).
-						continue
-					}
-				}
-
-				// Snapshot state under the lock; Update() re-acquires
-				// s.mu so we must release before calling it. Same pattern
-				// as breakout.handleTick. Without this the run goroutine
-				// deadlocks on the first matching price tick because
-				// sync.RWMutex is not reentrant.
-				s.mu.Lock()
-				obs := types.YieldObservation{
-					Time:   px.Time,
-					BondID: px.AssetID,
-					Price:  px.Price,
-					YTM:    *px.YTM,
-				}
-				if s.cfg.SignalSource == SignalSourceSpread {
-					obs.BenchmarkYield = benchmarkYield
-				}
-				// On the tick that makes a window full, the MAs are
-				// still based on incomplete data. Skip exit evaluation
-				// on that tick to avoid acting on a stale signal.
-				windowReadyBeforeUpdate := s.fastWin.Ready() && s.slowWin.Ready()
+				s.mu.RLock()
+				open := s.openSignal
 				paused := s.paused
-				currentOpenSignal := s.openSignal
 				entryPrice := s.entryPrice
 				entryATR := s.entryATR
-				s.mu.Unlock()
-
-				decision, err := s.Update(obs)
-				if err != nil {
-					s.logger().Error("failed to update strategy", "runID", s.runID, "err", err)
+				s.mu.RUnlock()
+				if paused || open == types.SignalHold {
+					// Paused means hands-off: take no action on ticks,
+					// mirroring the bar case.
 					continue
 				}
-				if paused {
-					continue
-				}
-
-				if currentOpenSignal != types.SignalHold {
-					if windowReadyBeforeUpdate {
-						if shouldExit, reason := s.ShouldExit(currentOpenSignal, decision, entryPrice, entryATR); shouldExit {
-							s.logger().Info("exiting position", "reason", reason, "runID", s.runID)
-							if err := s.closePosition(ctx, px.AssetID); err != nil {
-								s.logger().Error("failed to close position", "runID", s.runID, "err", err)
-								s.recordErr(err)
-							}
-						}
+				if reason, exit := s.bandExit(open, entryPrice, entryATR, px.Price); exit {
+					s.logger().Info("exiting position intra-bar", "reason", reason, "runID", s.runID)
+					if err := s.closePosition(ctx, assetID); err != nil {
+						s.logger().Error("failed to close position", "runID", s.runID, "err", err)
+						s.recordErr(err)
 					}
-					continue
-				}
-
-				if decision.Signal() == types.SignalHold {
-					continue
-				}
-
-				if _, err := s.executeDecision(ctx, decision, px.AssetID); err != nil {
-					s.logger().Error("failed to execute decision", "runID", s.runID, "err", err)
-					s.recordErr(err)
 				}
 			}
 		case <-ticker.C:

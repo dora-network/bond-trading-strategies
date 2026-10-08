@@ -2,18 +2,13 @@ package meanreversion_test
 
 import (
 	"context"
-	"errors"
-	"log/slog"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/dora-network/bond-trading-strategies/prices"
-	"github.com/dora-network/bond-trading-strategies/strategy"
+	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion/meanreversionfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
-	"github.com/dora-network/dora-client-go/doraclient"
 	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/assert"
@@ -24,6 +19,7 @@ import (
 
 var (
 	epoch   = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	hEpoch  = time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	timeout = 10 * time.Second
 )
 
@@ -46,6 +42,7 @@ func bondPriceFromYTM(ytm decimal.Decimal) decimal.Decimal {
 
 func defaultConfig() meanreversion.Config {
 	return meanreversion.Config{
+		Tenor:           "2Y",
 		LookbackWindow:  20,
 		EntryZScore:     decimal.Two,
 		ExitZScore:      decimal.MustNew(5, 1),
@@ -56,25 +53,63 @@ func defaultConfig() meanreversion.Config {
 	}
 }
 
-func obs(i int, ytm, bench decimal.Decimal) types.YieldObservation {
-	return types.YieldObservation{
-		Time:           epoch.Add(time.Duration(i) * 24 * time.Hour),
-		BondID:         "BOND-TEST",
-		YTM:            ytm,
+func bar(i int, ytm, bench decimal.Decimal) types.Bar {
+	return types.Bar{
+		Time:           epoch.Add(time.Duration(i) * time.Hour),
+		Close:          bondPriceFromYTM(ytm),
+		CloseYTM:       ytm,
 		BenchmarkYield: bench,
-		Price:          bondPriceFromYTM(ytm),
 	}
 }
 
-// makeObs returns n observations with a constant spread centred at meanSpread.
-func makeObs(n int, meanSpread decimal.Decimal) []types.YieldObservation {
+// makeBars returns n bars with a constant spread centred at meanSpread.
+func makeBars(n int, meanSpread decimal.Decimal) []types.Bar {
 	bench := decimal.MustNew(5, 2) // 0.05
 	ytm, _ := bench.Add(meanSpread)
-	o := make([]types.YieldObservation, n)
-	for i := range o {
-		o[i] = obs(i, ytm, bench)
+	b := make([]types.Bar, n)
+	for i := range b {
+		b[i] = bar(i, ytm, bench)
 	}
-	return o
+	return b
+}
+
+func TestDefaultConfigResolutionAndLookback(t *testing.T) {
+	t.Parallel()
+	cfg := meanreversion.DefaultConfig()
+	assert.Equal(t, candles.Resolution1h, cfg.Resolution)
+	assert.Equal(t, 24, cfg.LookbackWindow)
+}
+
+// TestStrategy_IntrabarNoiseInvariance verifies the z-score depends only on
+// the bar close: two bars with identical Close/CloseYTM but different
+// High/Low produce identical decisions.
+func TestStrategy_IntrabarNoiseInvariance(t *testing.T) {
+	t.Parallel()
+	newWarm := func() *meanreversion.Strategy {
+		s := meanreversion.New(defaultConfig(), nil)
+		for i, b := range makeBars(20, decimal.MustNew(1, 2)) {
+			b.Time = epoch.Add(time.Duration(i) * time.Hour)
+			_, err := s.Update(b)
+			require.NoError(t, err)
+		}
+		return s
+	}
+
+	quiet := bar(20, decimal.MustNew(1, 1), decimal.MustNew(5, 2))
+	noisy := quiet
+	noisy.High = decimal.MustNew(2, 1)
+	noisy.Low = decimal.MustNew(4, 2)
+	noisy.HighYTM = decimal.MustNew(2, 1)
+	noisy.LowYTM = decimal.MustNew(4, 2)
+	noisy.Volume = decimal.MustNew(999, 0)
+
+	d1, err := newWarm().Update(quiet)
+	require.NoError(t, err)
+	d2, err := newWarm().Update(noisy)
+	require.NoError(t, err)
+	assert.True(t, d1.ZScore.Equal(d2.ZScore), "z must ignore intra-bar noise")
+	assert.Equal(t, d1.Signal(), d2.Signal())
+	assert.True(t, d1.Spread.Equal(d2.Spread))
 }
 
 func TestRollingWindow_NotReadyUntilFull(t *testing.T) {
@@ -162,7 +197,7 @@ func TestStrategy_HoldBeforeWindowFull(t *testing.T) {
 	s := meanreversion.New(cfg, nil)
 
 	for i := range cfg.LookbackWindow - 1 {
-		d, err := s.Update(obs(i, decimal.MustNew(55, 3), decimal.MustNew(5, 2)))
+		d, err := s.Update(bar(i, decimal.MustNew(55, 3), decimal.MustNew(5, 2)))
 		require.NoError(t, err)
 		assert.Equal(t, types.SignalHold, d.Signal(),
 			"should be HOLD before window is full (step %d)", i)
@@ -172,9 +207,8 @@ func TestStrategy_HoldBeforeWindowFull(t *testing.T) {
 func TestStrategy_BuySignalOnWideSpread(t *testing.T) {
 	cfg := defaultConfig()
 	s := meanreversion.New(cfg, nil)
-
 	for i := range 20 {
-		_, err := s.Update(obs(i, decimal.MustNew(6, 2), decimal.MustNew(5, 2)))
+		_, err := s.Update(bar(i, decimal.MustNew(6, 2), decimal.MustNew(5, 2)))
 		require.NoError(t, err)
 	}
 
@@ -191,11 +225,11 @@ func TestStrategy_BuySignalOnWideSpread(t *testing.T) {
 			spread = decimal.MustNew(12, 3)
 		}
 		ytm, _ := base.Add(spread)
-		_, err := s2.Update(obs(i, ytm, base))
+		_, err := s2.Update(bar(i, ytm, base))
 		require.NoError(t, err)
 	}
 
-	d, err := s2.Update(obs(10, decimal.MustNew(1, 1), decimal.MustNew(5, 2)))
+	d, err := s2.Update(bar(10, decimal.MustNew(1, 1), decimal.MustNew(5, 2)))
 	require.NoError(t, err)
 	assert.Equal(t, types.SignalBuy, d.Signal())
 	assert.True(t, d.PositionSize().IsPos())
@@ -216,11 +250,11 @@ func TestStrategy_SellSignalOnTightSpread(t *testing.T) {
 			spread = decimal.MustNew(12, 3)
 		}
 		ytm, _ := base.Add(spread)
-		_, err := s.Update(obs(i, ytm, base))
+		_, err := s.Update(bar(i, ytm, base))
 		require.NoError(t, err)
 	}
 
-	d, err := s.Update(obs(10, decimal.MustNew(2, 2), decimal.MustNew(5, 2)))
+	d, err := s.Update(bar(10, decimal.MustNew(2, 2), decimal.MustNew(5, 2)))
 	require.NoError(t, err)
 	assert.Equal(t, types.SignalSell, d.Signal())
 	assert.True(t, d.ZScore.Cmp(cfg.EntryZScore.Neg()) < 0)
@@ -240,11 +274,11 @@ func TestStrategy_HoldWithinNeutralBand(t *testing.T) {
 			spread = decimal.MustNew(12, 3)
 		}
 		ytm, _ := base.Add(spread)
-		_, err := s.Update(obs(i, ytm, base))
+		_, err := s.Update(bar(i, ytm, base))
 		require.NoError(t, err)
 	}
 
-	d, err := s.Update(obs(10, decimal.MustNew(61, 3), decimal.MustNew(5, 2)))
+	d, err := s.Update(bar(10, decimal.MustNew(61, 3), decimal.MustNew(5, 2)))
 	require.NoError(t, err)
 	assert.Equal(t, types.SignalHold, d.Signal())
 }
@@ -319,142 +353,6 @@ func TestStrategy_LastStopLossTrigger(t *testing.T) {
 	assert.True(t, pnl.IsZero())
 }
 
-func TestBacktester_NoTradesBeforeWindowFull(t *testing.T) {
-	s := meanreversion.New(defaultConfig(), nil)
-	bt := meanreversion.NewBacktester(s, nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	result, err := bt.Run(ctx, makeObs(19, decimal.MustNew(1, 2)))
-	require.NoError(t, err)
-	assert.Empty(t, result.ClosedTrades)
-	assert.True(t, result.TotalPnL.IsZero())
-}
-
-func TestBacktester_ProfitableReversion(t *testing.T) {
-	cfg := defaultConfig()
-	cfg.LookbackWindow = 20
-	cfg.MinStdDev = decimal.MustNew(1, 4)
-	cfg.InitialBalance = decimal.MustNew(10000, 0)
-	s := meanreversion.New(cfg, nil)
-	bt := meanreversion.NewBacktester(s, nil)
-
-	var observations []types.YieldObservation
-	t0 := epoch
-	base := decimal.MustNew(5, 2)
-
-	for i := range 20 {
-		var sp decimal.Decimal
-		switch i % 3 {
-		case 0:
-			sp = decimal.MustNew(9, 3)
-		case 1:
-			sp = decimal.MustNew(10, 3)
-		case 2:
-			sp = decimal.MustNew(11, 3)
-		}
-		ytm, _ := base.Add(sp)
-		observations = append(observations, types.YieldObservation{
-			Time: t0.Add(time.Duration(i) * 24 * time.Hour), BondID: "B1",
-			YTM: ytm, BenchmarkYield: base, Price: bondPriceFromYTM(ytm),
-		})
-	}
-
-	obs20YTM := decimal.MustNew(13, 2)
-	observations = append(observations, types.YieldObservation{
-		Time: t0.Add(20 * 24 * time.Hour), BondID: "B1",
-		YTM: obs20YTM, BenchmarkYield: decimal.MustNew(5, 2),
-		Price: bondPriceFromYTM(obs20YTM),
-	})
-
-	for i := range 10 {
-		obsExitYTM := decimal.MustNew(6, 2)
-		observations = append(observations, types.YieldObservation{
-			Time:           t0.Add(time.Duration(21+i) * 24 * time.Hour),
-			BondID:         "B1",
-			YTM:            obsExitYTM,
-			BenchmarkYield: decimal.MustNew(5, 2),
-			Price:          bondPriceFromYTM(obsExitYTM),
-		})
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	result, err := bt.Run(ctx, observations)
-	require.NoError(t, err)
-	require.NotEmpty(t, result.ClosedTrades, "should have at least one closed trade")
-	assert.True(t, result.TotalPnL.IsPos(), "reversion trade should be profitable")
-	assert.Greater(t, result.WinCount, 0)
-}
-
-func TestBacktester_LossingTradeForceClosedAtEnd(t *testing.T) {
-	cfg := defaultConfig()
-	cfg.LookbackWindow = 10
-	cfg.StopLossZScore = decimal.Zero
-	cfg.MinStdDev = decimal.MustNew(1, 4)
-	cfg.InitialBalance = decimal.MustNew(10000, 0)
-	s := meanreversion.New(cfg, nil)
-	bt := meanreversion.NewBacktester(s, nil)
-
-	var observations []types.YieldObservation
-	t0 := epoch
-	base := decimal.MustNew(5, 2)
-
-	for i := range 10 {
-		var sp decimal.Decimal
-		switch i % 3 {
-		case 0:
-			sp = decimal.MustNew(9, 3)
-		case 1:
-			sp = decimal.MustNew(10, 3)
-		case 2:
-			sp = decimal.MustNew(11, 3)
-		}
-		ytm, _ := base.Add(sp)
-		observations = append(observations, types.YieldObservation{
-			Time: t0.Add(time.Duration(i) * 24 * time.Hour), BondID: "B2",
-			YTM: ytm, BenchmarkYield: base, Price: bondPriceFromYTM(ytm),
-		})
-	}
-
-	for i := range 5 {
-		obsYTM := decimal.MustNew(13, 2)
-		observations = append(observations, types.YieldObservation{
-			Time:           t0.Add(time.Duration(10+i) * 24 * time.Hour),
-			BondID:         "B2",
-			YTM:            obsYTM,
-			BenchmarkYield: decimal.MustNew(5, 2),
-			Price:          bondPriceFromYTM(obsYTM),
-		})
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	result, err := bt.Run(ctx, observations)
-	require.NoError(t, err)
-	require.NotEmpty(t, result.ClosedTrades)
-	assert.Equal(t, 1, len(result.ClosedTrades))
-}
-
-func TestBacktestResult_MaxDrawdown(t *testing.T) {
-	cfg := defaultConfig()
-	cfg.InitialBalance = decimal.MustNew(10000, 0)
-	s := meanreversion.New(cfg, nil)
-	bt := meanreversion.NewBacktester(s, nil)
-
-	observations := makeObs(50, decimal.MustNew(1, 2))
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	result, err := bt.Run(ctx, observations)
-	require.NoError(t, err)
-	assert.True(t, !result.MaxDrawdown.IsNeg())
-}
-
 func TestSignalString(t *testing.T) {
 	assert.Equal(t, "BUY", types.SignalBuy.String())
 	assert.Equal(t, "SELL", types.SignalSell.String())
@@ -502,339 +400,6 @@ func TestInitializeBalances_SetsOpenSignalFromDORAPosition(t *testing.T) {
 			assert.Equal(t, tc.wantSignal, meanreversion.OpenSignal(s))
 		})
 	}
-}
-
-// TestRunLoop_NoNewEntryWhenPositionOpen verifies that when the strategy
-// already holds a position (openSignal != Hold, set from bondQty after
-// initializeBalances) it does not place another entry order — even when
-// Update returns an entry signal on the next price tick. This is the core
-// restart-safety guarantee.
-func TestRunLoop_NoNewEntryWhenPositionOpen(t *testing.T) {
-	t.Parallel()
-
-	orderBookID := uuid.Must(uuid.NewV7())
-	// Small window so it fills quickly and produces measurable variance.
-	cfg := defaultConfig()
-	cfg.LookbackWindow = 10
-	cfg.OrderBookID = orderBookID
-	cfg.InitialBalance = decimal.MustNew(10, 0)
-
-	log := slog.Default()
-
-	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
-	client := &meanreversionfakes.FakeMarketAPIClient{}
-	client.BaseAssetIDReturns("bond-id", nil)
-	client.QuoteAssetIDReturns("usd-id", nil)
-	// Simulate an existing long position fetched from DORA on startup.
-	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
-		if assetID == "bond-id" {
-			return decimal.MustNew(5, 0), decimal.Zero, nil
-		}
-		return decimal.MustNew(50, 0), decimal.Zero, nil // USD
-	}
-	meanreversion.SetLookupClient(s, client)
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	msgCh := make(chan strategy.Message)
-	defer close(msgCh)
-
-	// Build observations:
-	// - 10 window-fill ticks alternating 4 % / 6 % YTM (benchmark = 0,
-	//   so spread == YTM). This gives mean ≈ 5 %, stddev ≈ 1 %.
-	// - 5 entry-signal ticks at 8 % YTM: z ≈ (8-5)/1 = 3 >> entry (2.0),
-	//   so Update returns SignalBuy. The position guard must suppress the order.
-	var priceUpdates []map[uuid.UUID]prices.AssetPrice
-	for i := range 10 {
-		var ytm decimal.Decimal
-		if i%2 == 0 {
-			ytm = decimal.MustNew(4, 2)
-		} else {
-			ytm = decimal.MustNew(6, 2)
-		}
-		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
-			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: bondPriceFromYTM(ytm), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
-		})
-	}
-	for i := 10; i < 15; i++ {
-		ytm := decimal.MustNew(8, 2) // wide spread → z >> entry → SignalBuy
-		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
-			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: bondPriceFromYTM(ytm), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
-		})
-	}
-
-	priceCh := make(chan map[uuid.UUID]prices.AssetPrice, len(priceUpdates))
-	for _, u := range priceUpdates {
-		priceCh <- u
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = meanreversion.RunWithPrices(ctx, s, msgCh, priceCh)
-	}()
-
-	// Give the run loop time to process all updates.
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-	<-done
-
-	// initializeBalances fetched bondQty = 5 → openSignal = Buy. Every
-	// subsequent price tick must skip entry logic and never call CreateMarketOrder.
-	assert.Zero(t, client.CreateMarketOrderCallCount(),
-		"expected no new entry order while a position is already open")
-}
-
-// TestRunLoop_ClosesPositionOnShouldExit verifies that the run loop calls
-// closePosition (placing an opposing market order) when ShouldExit returns
-// true for the current open position.
-func TestRunLoop_ClosesPositionOnShouldExit(t *testing.T) {
-	t.Parallel()
-
-	orderBookID := uuid.Must(uuid.NewV7())
-	cfg := defaultConfig()
-	cfg.LookbackWindow = 10
-	cfg.OrderBookID = orderBookID
-	cfg.InitialBalance = decimal.MustNew(10, 0)
-
-	log := slog.Default()
-
-	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
-	client := &meanreversionfakes.FakeMarketAPIClient{}
-	client.BaseAssetIDReturns("bond-id", nil)
-	client.QuoteAssetIDReturns("usd-id", nil)
-	// Existing long position (5 bonds) from a prior run.
-	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
-		if assetID == "bond-id" {
-			return decimal.MustNew(5, 0), decimal.Zero, nil
-		}
-		return decimal.MustNew(50, 0), decimal.Zero, nil
-	}
-	meanreversion.SetLookupClient(s, client)
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	msgCh := make(chan strategy.Message)
-	defer close(msgCh)
-
-	// Build observations:
-	// - 10 window-fill ticks alternating 6 % / 8 % YTM: mean ≈ 7 %, stddev ≈ 1 %.
-	// - 5 reversion ticks at 4 % YTM: z ≈ (4-7)/1 = -3 ≤ ExitZScore (0.5)
-	//   for a Buy position → ShouldExit returns true → closePosition is called.
-	var priceUpdates []map[uuid.UUID]prices.AssetPrice
-	for i := range 10 {
-		var ytm decimal.Decimal
-		if i%2 == 0 {
-			ytm = decimal.MustNew(6, 2)
-		} else {
-			ytm = decimal.MustNew(8, 2)
-		}
-		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
-			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: bondPriceFromYTM(ytm), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
-		})
-	}
-	for i := 10; i < 15; i++ {
-		ytm := decimal.MustNew(4, 2) // z ≈ -3 ≤ ExitZScore → ShouldExit(Buy) = true
-		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
-			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: bondPriceFromYTM(ytm), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
-		})
-	}
-
-	priceCh := make(chan map[uuid.UUID]prices.AssetPrice, len(priceUpdates))
-	for _, u := range priceUpdates {
-		priceCh <- u
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = meanreversion.RunWithPrices(ctx, s, msgCh, priceCh)
-	}()
-
-	// Wait for the close order to be placed.
-	require.Eventually(t, func() bool {
-		return client.CreateMarketOrderCallCount() >= 1
-	}, timeout, 10*time.Millisecond, "expected close order to be placed")
-	cancel()
-	<-done
-
-	// Exactly one close order: a SELL to close the long for the full qty.
-	require.Equal(t, 1, client.CreateMarketOrderCallCount())
-	_, _, side, qty, invLev, fromGlobalPos, clientOrderID := client.CreateMarketOrderArgsForCall(0)
-	_ = invLev
-	_ = fromGlobalPos
-	_ = clientOrderID
-	assert.Equal(t, doraclient.SIDE_SELL, side)
-	assert.True(t, qty.Equal(decimal.MustNew(5, 0)), "should close full position quantity")
-	assert.Equal(t, types.SignalHold, meanreversion.OpenSignal(s))
-}
-
-func TestRunLoop_NoNewEntryWhenQuantityZero(t *testing.T) {
-	t.Parallel()
-
-	orderBookID := uuid.Must(uuid.NewV7())
-	cfg := defaultConfig()
-	cfg.LookbackWindow = 10
-	cfg.OrderBookID = orderBookID
-	// Small budget to ensure quantity calculation truncates to 0
-	cfg.InitialBalance = decimal.MustNew(1, 0) // Balance = $1
-
-	log := slog.Default()
-
-	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
-	client := &meanreversionfakes.FakeMarketAPIClient{}
-	client.BaseAssetIDReturns("bond-id", nil)
-	client.QuoteAssetIDReturns("usd-id", nil)
-	// Balance has no existing position, and tracking initialised
-	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
-		return decimal.Zero, decimal.Zero, nil
-	}
-	meanreversion.SetLookupClient(s, client)
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	msgCh := make(chan strategy.Message)
-	defer close(msgCh)
-
-	// Price of the bond is high, e.g., $100, which is greater than budget ($1).
-	// So capped quantity will be floor(1 * PositionSize / 100) = 0.
-	var priceUpdates []map[uuid.UUID]prices.AssetPrice
-	for i := range 10 {
-		var ytm decimal.Decimal
-		if i%2 == 0 {
-			ytm = decimal.MustNew(4, 2)
-		} else {
-			ytm = decimal.MustNew(6, 2)
-		}
-		// High price: $100
-		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
-			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: decimal.MustNew(100, 0), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
-		})
-	}
-	// Add an update that generates a buy signal (wide spread)
-	for i := 10; i < 15; i++ {
-		ytm := decimal.MustNew(8, 2) // wide spread → SignalBuy
-		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
-			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: decimal.MustNew(100, 0), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
-		})
-	}
-
-	priceCh := make(chan map[uuid.UUID]prices.AssetPrice, len(priceUpdates))
-	for _, u := range priceUpdates {
-		priceCh <- u
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = meanreversion.RunWithPrices(ctx, s, msgCh, priceCh)
-	}()
-
-	// Give the run loop time to process updates.
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-	<-done
-
-	// Verify no order was created because quantity was 0
-	assert.Zero(t, client.CreateMarketOrderCallCount(),
-		"expected no market order when quantity to order is 0")
-	// Verify that openSignal remains SignalHold (did not change to SignalBuy)
-	assert.Equal(t, types.SignalHold, meanreversion.OpenSignal(s),
-		"expected open signal to remain Hold when quantity is 0")
-}
-
-func TestRunLoop_SelfHealsWhenPositionDoesNotExistOnExchange(t *testing.T) {
-	t.Parallel()
-
-	orderBookID := uuid.Must(uuid.NewV7())
-	cfg := defaultConfig()
-	cfg.LookbackWindow = 10
-	cfg.OrderBookID = orderBookID
-	cfg.InitialBalance = decimal.MustNew(10, 0)
-
-	log := slog.Default()
-
-	s := meanreversion.New(cfg, nil, meanreversion.WithLogger(log))
-	client := &meanreversionfakes.FakeMarketAPIClient{}
-	client.BaseAssetIDReturns("bond-id", nil)
-	client.QuoteAssetIDReturns("usd-id", nil)
-
-	// Simulate initialization with an existing position of 5 bonds
-	var count int
-	var mu sync.Mutex
-	client.AssetPositionStub = func(_ context.Context, assetID string) (decimal.Decimal, decimal.Decimal, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if assetID == "bond-id" {
-			count++
-			if count == 1 {
-				return decimal.MustNew(5, 0), decimal.Zero, nil
-			}
-			return decimal.Zero, decimal.Zero, nil
-		}
-		return decimal.MustNew(50, 0), decimal.Zero, nil
-	}
-	client.CreateMarketOrderReturns("", errors.New("insufficient position to close"))
-	meanreversion.SetLookupClient(s, client)
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	msgCh := make(chan strategy.Message)
-	defer close(msgCh)
-
-	// Build observations to trigger a ShouldExit exit condition.
-	// - 10 window-fill ticks: alternating 6% / 8% YTM: mean = 7%
-	// - Then price ticks showing 4% YTM -> triggers ExitZScore -> ShouldExit returns true
-	var priceUpdates []map[uuid.UUID]prices.AssetPrice
-	for i := range 10 {
-		var ytm decimal.Decimal
-		if i%2 == 0 {
-			ytm = decimal.MustNew(6, 2)
-		} else {
-			ytm = decimal.MustNew(8, 2)
-		}
-		priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
-			uuid.New(): {AssetID: "bond-id", YTM: &ytm, Price: bondPriceFromYTM(ytm), Time: epoch.Add(time.Duration(i) * 24 * time.Hour)},
-		})
-	}
-
-	priceUpdates = append(priceUpdates, map[uuid.UUID]prices.AssetPrice{
-		uuid.New(): {
-			AssetID: "bond-id",
-			YTM:     func() *decimal.Decimal { d := decimal.MustNew(4, 2); return &d }(),
-			Price:   bondPriceFromYTM(decimal.MustNew(4, 2)),
-			Time:    epoch.Add(10 * 24 * time.Hour),
-		},
-	})
-
-	priceCh := make(chan map[uuid.UUID]prices.AssetPrice, len(priceUpdates))
-	for _, u := range priceUpdates {
-		priceCh <- u
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = meanreversion.RunWithPrices(ctx, s, msgCh, priceCh)
-	}()
-
-	// Give the run loop time to process the exit tick.
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-	<-done
-
-	// Verify that closePosition attempted the close order, saw the failure,
-	// and self-healed because the live position is actually 0.
-	assert.Equal(t, 1, client.CreateMarketOrderCallCount(),
-		"expected exactly 1 market order attempt")
-
-	// Verify that tracking is self-healed: openSignal is Hold and bondQty is 0.
-	assert.Equal(t, types.SignalHold, meanreversion.OpenSignal(s))
-	assert.True(t, meanreversion.BondQty(s).IsZero())
 }
 
 func TestStrategyTypeExported(t *testing.T) {

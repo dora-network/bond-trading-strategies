@@ -20,6 +20,7 @@ import (
 	flag "github.com/spf13/pflag"
 
 	"github.com/dora-network/bond-trading-strategies/authctx"
+	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/cors"
 	agentconfig "github.com/dora-network/bond-trading-strategies/internal/agent/config"
 	agenthttpapi "github.com/dora-network/bond-trading-strategies/internal/agent/httpapi"
@@ -37,28 +38,41 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/twap"
 	"github.com/dora-network/bond-trading-strategies/strategy/vwap"
 	"github.com/dora-network/bond-trading-strategies/streams"
+	"github.com/dora-network/bond-trading-strategies/trades"
 )
 
-// newBreakoutHistoricalStore wires a Postgres-backed
-// breakout.HistoricalPriceStore. Returns nil when pool is nil so a
-// missing DATABASE_URL leaves the backtest endpoint disabled rather
-// than crashing startup.
-func newBreakoutHistoricalStore(pool *pgxpool.Pool) breakout.HistoricalPriceStore {
-	if pool == nil {
-		return nil
-	}
-	return breakout.NewPostgresHistoricalStore(pool)
+// newCandleRegistry wires the live candle feed for candle-driven
+// strategies. The registry is a read-only consumer: it never persists
+// candles and must NOT carry a candles store, because a shared
+// candles_history table would hand the stream a resume cursor at ~now
+// (price-daemon writes continuously), silently defeating the
+// Config.Since warm start. A nil store becomes a no-op so Config.Since
+// governs bootstrap depth.
+func newCandleRegistry(wsBaseURL, apiKey string) *strategycore.CandleRegistry {
+	return strategycore.NewCandleRegistry(strategycore.CandleRegistryConfig{
+		WSBaseURL: wsBaseURL,
+		APIKey:    apiKey,
+	})
 }
 
-// newBreakoutTradeHistoryStore wires a Postgres-backed
-// breakout.TradeHistoryStore. Returns nil when pool is nil so a
-// missing DATABASE_URL leaves the OBV backtest feature disabled
-// rather than crashing startup.
-func newBreakoutTradeHistoryStore(pool *pgxpool.Pool) breakout.TradeHistoryStore {
+// newTradeHistoryStore wires a Postgres-backed trades.TradeStore for
+// the breakout / mean-reversion / VWAP backtest trade sources. Returns
+// nil when pool is nil so a missing DATABASE_URL leaves those features
+// disabled rather than crashing startup.
+func newTradeHistoryStore(pool *pgxpool.Pool) trades.TradeStore {
 	if pool == nil {
 		return nil
 	}
-	return breakout.NewPGTradeHistoryStore(pool)
+	return trades.NewPGStore(pool)
+}
+
+// newMRCandleStore wires the candle-history store for mean-reversion
+// backtests. nil when pool is nil (no DATABASE_URL).
+func newMRCandleStore(pool *pgxpool.Pool) *candles.PGStore {
+	if pool == nil {
+		return nil
+	}
+	return candles.NewPGStore(pool)
 }
 
 //nolint:funlen, mnd // main function with flag setup and orchestration
@@ -228,6 +242,8 @@ func main() {
 
 	decisionStore := strategyhttp.NewPGDecisionStore(pool)
 
+	candleReg := newCandleRegistry(*wsURL, *apiKey)
+
 	handlerImpl := strategyhttp.NewHandler(
 		service,
 		strategyhttp.WithRunStore(runStore),
@@ -240,11 +256,15 @@ func main() {
 		strategyhttp.WithTradesHistoryStore(copytrading.NewPGTradesHistoryStore(pool)),
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithTradeStream(tradeStream),
-		// Wire the breakout backtest data source from candles_history.
-		// nil-safe: an empty pool (no DATABASE_URL) leaves the breakout
-		// Backtest disabled rather than crashing startup.
-		strategyhttp.WithHistoricalPriceStore(newBreakoutHistoricalStore(pool)),
-		strategyhttp.WithTradeHistoryStore(newBreakoutTradeHistoryStore(pool)),
+		strategyhttp.WithCandleFeed(candleReg),
+		// Breakout backtests read the same candles_history surface.
+		strategyhttp.WithBreakoutCandleStore(newMRCandleStore(pool)),
+		strategyhttp.WithTradeHistoryStore(newTradeHistoryStore(pool)),
+		// Wire the mean-reversion backtest candle source; nil (no
+		// DATABASE_URL) leaves the strategy to self-wire/fail per request.
+		strategyhttp.WithMeanReversionCandleStore(newMRCandleStore(pool)),
+		// Momentum backtests read the same candles_history surface.
+		strategyhttp.WithMomentumCandleStore(newMRCandleStore(pool)),
 		strategyhttp.WithLogger(log),
 		strategyhttp.WithEncryptionKey(encryptionKey),
 		strategyhttp.WithNotifier(notifier),

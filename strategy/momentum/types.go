@@ -3,6 +3,7 @@ package momentum
 import (
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/strategy/config"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/google/uuid"
@@ -30,11 +31,11 @@ const (
 
 // Decision reason codes surfaced through types.Decision.Reason().
 const (
-	DecisionReasonWarmingUp         = "warming_up"
-	DecisionReasonFlat              = "flat"
-	DecisionReasonMACrossoverUp     = "ma_crossover_up"
-	DecisionReasonMACrossoverDown   = "ma_crossover_down"
-	DecisionReasonBelowMinOrderSize = "below_min_order_size"
+	DecisionReasonWarmingUp          = "warming_up"
+	DecisionReasonFlat               = "flat"
+	DecisionReasonMACrossoverUp      = "ma_crossover_up"
+	DecisionReasonMACrossoverDown    = "ma_crossover_down"
+	DecisionReasonVolumeNotConfirmed = "volume_not_confirmed"
 )
 
 // Config holds all tunable parameters for the momentum strategy.
@@ -45,12 +46,24 @@ type Config struct {
 	// One of SignalSourcePrice, SignalSourceYTM, SignalSourceSpread.
 	SignalSource string
 
-	// FastWindow / SlowWindow are the fast/slow MA tick windows.
+	// FastWindow / SlowWindow are the fast/slow MA bar windows.
 	FastWindow int
 	SlowWindow int
 
-	// ATRWindow is the mean-absolute-price-diff window used for exits.
+	// Resolution is the candle resolution of the bar series (candles
+	// enum: 1m, 5m, 15m, 1h, 4h, 1d).
+	Resolution candles.Resolution
+
+	// ATRWindow is the true-range ATR window used for exits.
 	ATRWindow int
+
+	// VolumeAvgWindow is the rolling mean-volume window confirming
+	// entries; 0 disables the volume gate.
+	VolumeAvgWindow int
+
+	// VolumeRatioThreshold: an entry requires bar volume >= this × the
+	// rolling mean volume.
+	VolumeRatioThreshold decimal.Decimal
 
 	// StopLossATR / TakeProfitATR are exit distances in ATR units.
 	// 0 disables each.
@@ -78,20 +91,24 @@ type Config struct {
 }
 
 // DefaultConfig returns sensible defaults for live deployment and tests.
-// Window defaults mirror breakout's continuous-market calibration.
+// Windows are calibrated for 15m bars: fast 8 bars ≈ 2h, slow 96 ≈ 24h,
+// ATR 24 bars ≈ 6h.
 func DefaultConfig() Config {
 	return Config{
-		SignalSource:    SignalSourcePrice,
-		FastWindow:      240,
-		SlowWindow:      1440,
-		ATRWindow:       240,
-		StopLossATR:     decimal.MustNew(20, 0), //nolint:mnd
-		TakeProfitATR:   decimal.Zero,
-		MinOrderSize:    decimal.Zero,
-		MaxOrderSize:    decimal.Zero,
-		MaxPositionSize: decimal.One,
-		InitialBalance:  decimal.One,
-		Leverage:        decimal.One,
+		SignalSource:         SignalSourcePrice,
+		Resolution:           candles.Resolution15m,
+		FastWindow:           8,
+		SlowWindow:           96,
+		ATRWindow:            24,
+		VolumeAvgWindow:      20,
+		VolumeRatioThreshold: decimal.One,
+		StopLossATR:          decimal.MustNew(20, 0), //nolint:mnd
+		TakeProfitATR:        decimal.Zero,
+		MinOrderSize:         decimal.Zero,
+		MaxOrderSize:         decimal.Zero,
+		MaxPositionSize:      decimal.One,
+		InitialBalance:       decimal.One,
+		Leverage:             decimal.One,
 	}
 }
 
