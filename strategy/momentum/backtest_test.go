@@ -6,15 +6,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/govalues/decimal"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/dora-network/bond-trading-strategies/candles"
 	"github.com/dora-network/bond-trading-strategies/prices"
 	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
 	"github.com/dora-network/bond-trading-strategies/strategy/momentum/momentumfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
-	"github.com/google/uuid"
-	"github.com/govalues/decimal"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 var barBase = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -31,6 +32,31 @@ func flatBar(i int, price int64) types.Bar {
 
 // halfBar prices: decimal.MustNew(995, 1) = 99.5.
 func half(value int64) decimal.Decimal { return decimal.MustNew(value, 1) }
+
+// hourlyBar builds a flat bar at the given hour offset from barBase.
+// 1h resolution fixture helper for the multi-day bounds test.
+func hourlyBar(i int, price int64) types.Bar {
+	p := decimal.MustNew(price, 0)
+	return types.Bar{
+		Time: barBase.Add(time.Duration(i) * time.Hour),
+		Open: p, High: p, Low: p, Close: p,
+	}
+}
+
+// risingHourlyBar builds a bar with a non-degenerate range so the
+// reversal-exit path uses the adverse-extreme fill (matches the
+// F11 wiring for bar-driven exits). Price is the close.
+func risingHourlyBar(i int, price int64) types.Bar {
+	p := decimal.MustNew(price, 0)
+	open := decimal.MustNew(price-1, 0)
+	return types.Bar{
+		Time:  barBase.Add(time.Duration(i) * time.Hour),
+		Open:  open,
+		High:  p,
+		Low:   open,
+		Close: p,
+	}
+}
 
 // uptrendThenReversal: prices rise (fast>slow -> Buy), then fall so the
 // MAs cross back (-> reversal exit).
@@ -190,8 +216,29 @@ func TestBacktest_StopFiresAtBarLowNotClose(t *testing.T) {
 	closedTrades := closedOf(t, res)
 
 	require.NotEmpty(t, closedTrades)
-	require.Equal(t, momentum.ExitReasonStopLoss, closedTrades[0].ExitReason,
+	ct := closedTrades[0]
+	require.Equal(t, momentum.ExitReasonStopLoss, ct.ExitReason,
 		"stop must fire on the bar LOW (99.5 < ~100.67) even though the close (102.5) is above the threshold")
+	// Band-level fill: exit at the stop threshold (~100.667), not the
+	// bar close (102.5). Bar.Open=102 sits above the level so the gap
+	// cap is the level itself.
+	wantLevel := stopLevel(102, cfg.StopLossATR)
+	assert.True(t, ct.ExitPrice.Equal(wantLevel),
+		"stop fill must be the band level (entry − SLmult×ATR), got %s want %s", ct.ExitPrice, wantLevel)
+	assert.True(t, ct.ExitPrice.Cmp(decimal.MustNew(102, 0)) < 0,
+		"stop fill must sit below entry 102, got %s", ct.ExitPrice)
+	assert.True(t, ct.PnL.IsNeg(),
+		"stop fill below entry must record a loss, got PnL %s", ct.PnL)
+}
+
+// stopLevel replicates the strategy's SL math (entry − SLmult×ATR) so
+// tests can compare against the actual fill without depending on the
+// internal decimal precision of 2/3 + 102.
+func stopLevel(entry int64, slMult decimal.Decimal) decimal.Decimal {
+	atr, _ := decimal.MustNew(2, 0).Quo(decimal.MustNew(3, 0))
+	dist, _ := slMult.Mul(atr)
+	level, _ := decimal.MustNew(entry, 0).Sub(dist)
+	return level
 }
 
 // Tick-faithful replay: with ticks covering the bar window, the intrabar
@@ -231,6 +278,69 @@ func TestBacktest_TickReplayExitsAtTickPrice(t *testing.T) {
 	assert.True(t, ct.CloseTime.Equal(tickTime), "exit is timestamped at the tick, not the bar close")
 }
 
+// TestBacktest_TickExitThenBarEntryTimestampsAreMonotonic pins the
+// F11 ordering invariant: a tick-driven exit (recorded at the tick's
+// timestamp) must precede the next bar-driven entry (recorded at the
+// bar CLOSE). Pre-fix, the bar-driven entry was stamped at the bar
+// START, which sits before the tick window opens, so a tick that fires
+// after the next bar's START produced a non-monotonic trade-records
+// timeline (entry_2 < tick_exit). Bar-driven entries must carry the
+// CLOSE time so they sort AFTER any tick exit that fired inside the
+// preceding bar's window.
+func TestBacktest_TickExitThenBarEntryTimestampsAreMonotonic(t *testing.T) {
+	cfg := testCfg(2, 3, decimal.MustNew(2, 0), decimal.Zero)
+	cfg.Resolution = candles.Resolution1m
+	s := momentum.New(cfg, nil)
+	bt := momentum.NewBacktester(s, nil)
+
+	// Same entry series as TestBacktest_TickReplayExitsAtTickPrice:
+	// rising prices through 6 bars, BUY at bar 2. Bar 3 has no
+	// bar-level stop (close 102.5 > stop ≈ 100.67) and fast>slow
+	// still holds, so the only thing that can close the position in
+	// bar 3's formation window is a crossing tick. Bar 4 still has
+	// fast>slow → BUY re-entry.
+	bars := []types.Bar{
+		flatBar(0, 100), flatBar(1, 101), flatBar(2, 102),
+		{Time: barBase.Add(3 * time.Minute),
+			Open: decimal.MustNew(102, 0), High: decimal.MustNew(103, 0),
+			Low: decimal.MustNew(102, 0), Close: half(1025)},
+		flatBar(4, 103), flatBar(5, 104),
+	}
+	// Tick at bar 4 START + 30s — inside the window
+	// (bar 3 CLOSE, bar 4 CLOSE] = (barBase+4min, barBase+5min]. This
+	// is AFTER bar 4 START (barBase+4min) but BEFORE bar 4 CLOSE
+	// (barBase+5min), so pre-fix the re-entry recorded at bar 4 START
+	// precedes the tick exit and the trade-records timeline goes
+	// non-monotonic.
+	tickTime := barBase.Add(4*time.Minute + 30*time.Second)
+	momentum.SetBacktestTicks(bt, []prices.AssetPrice{
+		{AssetID: "asset", Price: half(995), YTM: ptrYTM(), Time: tickTime},
+	})
+
+	res, err := bt.Run(context.Background(), bars)
+	require.NoError(t, err)
+	records := recordsOf(t, res)
+	closedTrades := closedOf(t, res)
+
+	require.Len(t, closedTrades, 2, "tick exit + force-close after re-entry = 2 trades")
+	require.Len(t, records, 4,
+		"expected entry_1 + tick-exit_1 + re-entry_2 + force-close_2 "+
+			"trade records, got %d", len(records))
+
+	entry, tickExit, reEntry, forceExit := records[0], records[1], records[2], records[3]
+	require.True(t, tickExit.Time.After(entry.Time),
+		"tick exit must follow the entry, got entry=%s tick_exit=%s",
+		entry.Time, tickExit.Time)
+	require.True(t, reEntry.Time.After(tickExit.Time),
+		"re-entry must be timestamped AFTER the tick exit "+
+			"(otherwise the persisted trade-records timeline goes "+
+			"non-monotonic: re-entry=%s, tick_exit=%s)",
+		reEntry.Time, tickExit.Time)
+	require.True(t, forceExit.Time.After(reEntry.Time),
+		"force-close must follow the re-entry, got re-entry=%s force-close=%s",
+		reEntry.Time, forceExit.Time)
+}
+
 // TestBacktest_TakeProfitFiresAtBarHigh pins the favorable-extreme TP
 // evaluation: a bar whose HIGH crosses the take-profit band must close
 // the position even when its CLOSE is back below the threshold.
@@ -255,8 +365,84 @@ func TestBacktest_TakeProfitFiresAtBarHigh(t *testing.T) {
 	closedTrades := closedOf(t, res)
 
 	require.NotEmpty(t, closedTrades)
-	require.Equal(t, momentum.ExitReasonTakeProfit, closedTrades[0].ExitReason,
+	ct := closedTrades[0]
+	require.Equal(t, momentum.ExitReasonTakeProfit, ct.ExitReason,
 		"take-profit must fire on the bar HIGH (104 > ~103.33) even though the close (102.5) is below the threshold")
+	// Band-level fill: exit at the TP threshold (~103.333), not the
+	// bar close (102.5). Bar.Open=102 sits below the level so the gap
+	// cap is the level itself.
+	wantLevel := tpLevel(102, cfg.TakeProfitATR)
+	assert.True(t, ct.ExitPrice.Equal(wantLevel),
+		"TP fill must be the band level (entry + TPmult×ATR), got %s want %s", ct.ExitPrice, wantLevel)
+	assert.True(t, ct.ExitPrice.Cmp(decimal.MustNew(102, 0)) > 0,
+		"TP fill must sit above entry 102, got %s", ct.ExitPrice)
+	assert.True(t, ct.PnL.IsPos(),
+		"TP fill above entry must record a profit, got PnL %s", ct.PnL)
+}
+
+// tpLevel mirrors stopLevel for the take-profit band (entry + TPmult×ATR).
+func tpLevel(entry int64, tpMult decimal.Decimal) decimal.Decimal {
+	atr, _ := decimal.MustNew(2, 0).Quo(decimal.MustNew(3, 0))
+	dist, _ := tpMult.Mul(atr)
+	level, _ := decimal.MustNew(entry, 0).Add(dist)
+	return level
+}
+
+// TestBacktest_StopGappedDownFillsAtOpen pins the gap-capped fill rule
+// for a long stop: when the bar OPENS below the stop level, the order
+// can't fill better than the market's first price, so the fill is the
+// open (worse than the level).
+func TestBacktest_StopGappedDownFillsAtOpen(t *testing.T) {
+	cfg := testCfg(2, 3, decimal.MustNew(2, 0), decimal.Zero)
+	s := momentum.New(cfg, nil)
+	bt := momentum.NewBacktester(s, nil)
+
+	// Entry at bar 2 (close 102, stop ≈ 100.667). Bar 3 opens at 99
+	// (below the stop) and stays there — open gapped through the
+	// level, so fill must be 99, not 100.667.
+	bars := []types.Bar{
+		flatBar(0, 100), flatBar(1, 101), flatBar(2, 102),
+		{Time: barBase.Add(3 * time.Minute),
+			Open: decimal.MustNew(99, 0), High: decimal.MustNew(99, 0),
+			Low: decimal.MustNew(98, 0), Close: decimal.MustNew(99, 0)},
+	}
+
+	res, err := bt.Run(context.Background(), bars)
+	require.NoError(t, err)
+	closedTrades := closedOf(t, res)
+	require.NotEmpty(t, closedTrades)
+	ct := closedTrades[0]
+	require.Equal(t, momentum.ExitReasonStopLoss, ct.ExitReason)
+	assert.True(t, ct.ExitPrice.Equal(decimal.MustNew(99, 0)),
+		"long stop gapped down: fill must be bar.Open (99), got %s", ct.ExitPrice)
+}
+
+// TestBacktest_TakeProfitGappedUpFillsAtOpen pins the gap-capped fill
+// rule for a long take-profit: when the bar OPENS above the TP level,
+// the limit order fills at the open (better than the level).
+func TestBacktest_TakeProfitGappedUpFillsAtOpen(t *testing.T) {
+	cfg := testCfg(2, 3, decimal.Zero, decimal.MustNew(2, 0))
+	s := momentum.New(cfg, nil)
+	bt := momentum.NewBacktester(s, nil)
+
+	// Entry at bar 2 (close 102, TP ≈ 103.333). Bar 3 opens at 105
+	// (above the TP) and stays there — open gapped through the
+	// level, so fill must be 105, not 103.333.
+	bars := []types.Bar{
+		flatBar(0, 100), flatBar(1, 101), flatBar(2, 102),
+		{Time: barBase.Add(3 * time.Minute),
+			Open: decimal.MustNew(105, 0), High: decimal.MustNew(106, 0),
+			Low: decimal.MustNew(105, 0), Close: decimal.MustNew(105, 0)},
+	}
+
+	res, err := bt.Run(context.Background(), bars)
+	require.NoError(t, err)
+	closedTrades := closedOf(t, res)
+	require.NotEmpty(t, closedTrades)
+	ct := closedTrades[0]
+	require.Equal(t, momentum.ExitReasonTakeProfit, ct.ExitReason)
+	assert.True(t, ct.ExitPrice.Equal(decimal.MustNew(105, 0)),
+		"long TP gapped up: fill must be bar.Open (105), got %s", ct.ExitPrice)
 }
 
 // TestBacktest_VolumeGateSuppressesEntry verifies the backtest replay
@@ -433,4 +619,326 @@ func TestBacktest_RequiresBaseAssetLookup(t *testing.T) {
 
 	_, err := s.Backtest(context.Background(), btStart, btEnd)
 	require.ErrorContains(t, err, "backtest requires the order book's base asset")
+}
+
+// TestBacktest_TradeBoundsSuppressWarmupEntry pins the F10 fix: when the
+// runner supplies TradeFrom/TradeTo bounds, bars before TradeFrom must
+// only warm indicators — they MUST NOT open a position. Fixture: fast=3,
+// slow=5, prices 100..108. Slow window fills at bar 4, fast crosses
+// above slow at bar 4 → BUY signal on the LAST warmup bar. TradeFrom
+// is set to bar 5's start; the in-bounds bars continue the uptrend so
+// the cross persists and the next in-bounds bar enters. Pre-fix the
+// warmup BUY leaks into the result (entry bar before TradeFrom); post-
+// fix the warmup signal is dropped and the in-bounds bar enters. The
+// trade record's stamped Time = bar.Time + res, so the in-bounds check
+// uses rec.Time - res (the bar START) ≥ TradeFrom.
+func TestBacktest_TradeBoundsSuppressWarmupEntry(t *testing.T) {
+	cfg := testCfg(3, 5, decimal.Zero, decimal.Zero)
+	cfg.Resolution = candles.Resolution1m
+	s := momentum.New(cfg, nil)
+	bt := momentum.NewBacktester(s, nil)
+
+	// 5 warmup rising bars (fills slow window, MA cross fires at bar 4
+	// — the last warmup bar). 4 in-bounds rising bars: the cross
+	// persists, so a fresh BUY fires on bar 5 in-bounds. No opposite
+	// signal ever appears → position force-closed at the end.
+	obs := make([]types.Bar, 0, 9)
+	for i := range 5 {
+		obs = append(obs, flatBar(i, int64(100+i)))
+	}
+	for i := range 4 {
+		obs = append(obs, flatBar(5+i, int64(105+i)))
+	}
+
+	tradeFrom := obs[5].Time
+	tradeTo := obs[len(obs)-1].Time
+	bt.TradeFrom = tradeFrom
+	bt.TradeTo = tradeTo
+
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	closedTrades := closedOf(t, res)
+	tradeRecords := recordsOf(t, res)
+
+	// (b) Exactly one closed trade: the warmup signal was suppressed
+	// and the in-bounds cross entered.
+	require.Len(t, closedTrades, 1, "expected one in-bounds closed trade from the persisted cross")
+	require.NotEmpty(t, tradeRecords, "expected trade records for the in-bounds entry")
+
+	// (a) Every trade record must come from a bar in [TradeFrom, TradeTo].
+	// rec.Time = bar.Time + res (F11), so rec.Time - res is the bar START.
+	for _, rec := range tradeRecords {
+		barStart := rec.Time.Add(-time.Minute)
+		require.False(t, barStart.Before(tradeFrom),
+			"entry bar %s must be >= TradeFrom %s (rec.Time=%s)",
+			barStart, tradeFrom, rec.Time)
+	}
+
+	// (c) The closed trade's OpenTime must be at the in-bounds bar CLOSE
+	// (or later), and the CloseTime must sit inside the requested period.
+	ct := closedTrades[0]
+	openBarStart := ct.OpenTime.Add(-time.Minute)
+	require.False(t, openBarStart.Before(tradeFrom),
+		"OpenTime bar %s must be >= TradeFrom %s", openBarStart, tradeFrom)
+	require.False(t, ct.CloseTime.After(tradeTo.Add(time.Minute)),
+		"CloseTime %s must be <= TradeTo+res %s", ct.CloseTime, tradeTo.Add(time.Minute))
+}
+
+// TestBacktest_TradeBoundsRestrictSummaryBounds pins the F10 summary
+// override: when the runner pins TradeFrom/TradeTo, the stats.Summarise
+// call must use those bounds (not the warmup-inclusive bar slice). The
+// reporting restriction is half the F10 finding — stats.Summarise uses
+// the period bounds as the Sharpe daily-PnL denominator, so a wider
+// span (warmup included) would silently distort Sharpe. Fixture: 1h
+// resolution, 72 bars = 3 days. Day 1 (bars 0-23) and day 2 first
+// half (bars 24-35) are flat at 100 (warmup). Day 2 second half
+// (bars 36-47) rises 101..112 → MA cross → BUY at bar 36 (in-bounds).
+// Day 3 first half (bars 48-59) rises 113..124 (position held). Day 3
+// second half (bars 60-71) falls 124..102 (steep enough to force the
+// reversal exit). The closed trade's PnL lands on day 3.
+//
+// The test runs the same fixture twice: Run A pins TradeFrom=bar 0
+// (so the override is a no-op — slice bounds == requested bounds);
+// Run B pins TradeFrom=bar 36 (mid-day 2) so the override must
+// shorten the period. The Sharpe ratio depends on the daily-PnL
+// series length, so the two Sharpes MUST differ when the override
+// is wired; if the override is removed (mutation), both runs use
+// slice bounds and the Sharpes are equal.
+func TestBacktest_TradeBoundsRestrictSummaryBounds(t *testing.T) {
+	const barsPerDay = 24
+	const day2Mid = barsPerDay + 12   // bar 36 = day 2 12:00
+	const day3Start = 2 * barsPerDay  // bar 48 = day 3 00:00
+	const day3Mid = 2*barsPerDay + 12 // bar 60 = day 3 12:00
+	const total = 3 * barsPerDay      // 72
+
+	obs := make([]types.Bar, 0, total)
+	// Day 1: flat at 100.
+	for i := range barsPerDay {
+		obs = append(obs, hourlyBar(i, 100))
+	}
+	// Day 2 first half: flat at 100 (continues warmup).
+	for i := barsPerDay; i < day2Mid; i++ {
+		obs = append(obs, hourlyBar(i, 100))
+	}
+	// Day 2 second half: rising 101..112 (12 bars, +1/bar).
+	for i := day2Mid; i < day3Start; i++ {
+		obs = append(obs, risingHourlyBar(i, int64(101+(i-day2Mid))))
+	}
+	// Day 3 first half: rising 113..124.
+	for i := day3Start; i < day3Mid; i++ {
+		obs = append(obs, risingHourlyBar(i, int64(113+(i-day3Start))))
+	}
+	// Day 3 second half: falling 124..102 (−2/bar, steep enough for
+	// fast < slow reversal exit). Once the position closes, the
+	// remaining flat bars carry no signal, so the fixture records
+	// exactly one closed trade.
+	price := int64(124)
+	for i := day3Mid; i < total; i++ {
+		obs = append(obs, risingHourlyBar(i, price))
+		price -= 2
+	}
+
+	runOnce := func(tradeFrom time.Time) momentum.BacktestResult {
+		cfg := testCfg(3, 5, decimal.Zero, decimal.Zero)
+		cfg.Resolution = candles.Resolution1h
+		s := momentum.New(cfg, nil)
+		bt := momentum.NewBacktester(s, nil)
+		bt.TradeFrom = tradeFrom
+		bt.TradeTo = obs[len(obs)-1].Time
+		res, err := bt.Run(context.Background(), obs)
+		require.NoError(t, err)
+		return res
+	}
+
+	// Run A: TradeFrom pinned to the very first bar (no warmup). The
+	// override, if active, is a no-op for this run (slice bounds ==
+	// requested bounds). Captures the slice-bounds Sharpe as a
+	// baseline so the test fails when the override is removed: with
+	// no override, Run B falls back to the slice bounds and matches
+	// Run A's Sharpe.
+	resA := runOnce(obs[0].Time)
+	require.False(t, resA.SharpeRatio.IsZero(),
+		"slice-bounds Sharpe must be non-zero for the override assertion to bite")
+
+	// Run B: TradeFrom pinned to mid-day 2. The override, if active,
+	// shortens the period to [day 2 mid, end of day 3] — a 1-day
+	// daily-PnL series instead of the 3-day series Run A used.
+	resB := runOnce(obs[day2Mid].Time)
+	require.NotEqual(t, 0, resA.SharpeRatio.Cmp(resB.SharpeRatio),
+		"summary-bounds override must shorten the Sharpe window: "+
+			"with TradeFrom=mid-day 2 the Sharpe (%s) must differ "+
+			"from the slice-bounds Sharpe (%s); equality means the "+
+			"override is bypassed", resB.SharpeRatio, resA.SharpeRatio)
+
+	// Sanity: the in-bounds cross must still produce at least one
+	// closed trade when the override is active. The override changes
+	// reporting bounds, not the entry guard.
+	require.NotEmpty(t, resB.ClosedTrades,
+		"in-bounds cross must still produce a closed trade when the override is active")
+}
+
+// TestBacktest_TradeToExactBoundaryIsExclusive pins the F10 entry-guard
+// strictness: bar.Time == TradeTo MUST NOT open a position. The guard
+// is `bar.Time.Before(b.TradeTo)` (exclusive upper bound), so a fresh
+// entry signal on the last bar — whose Time equals TradeTo — is
+// suppressed. Fixture: 5 flat bars at 100 (fast=slow=100, no cross)
+// followed by 1 rising bar at 101 (cross fires at bar 5, the last
+// bar). TradeFrom=bar 0 (no warmup gate), TradeTo=bar 5's Time.
+// Pre-mutation: 0 closed trades (entry at bar 5 suppressed).
+// Mutation `!bar.Time.After` → entry allowed at bar 5 → 1 closed
+// trade.
+func TestBacktest_TradeToExactBoundaryIsExclusive(t *testing.T) {
+	cfg := testCfg(3, 5, decimal.Zero, decimal.Zero)
+	cfg.Resolution = candles.Resolution1h
+	s := momentum.New(cfg, nil)
+	bt := momentum.NewBacktester(s, nil)
+
+	// 5 flat bars at 100 keep fast=slow=100 (no cross) until bar 5's
+	// spike to 101 (Close=101) crosses fast above slow — the only
+	// BUY in the series, sitting on the last bar.
+	obs := make([]types.Bar, 0, 6)
+	for i := range 5 {
+		obs = append(obs, hourlyBar(i, 100))
+	}
+	obs = append(obs, risingHourlyBar(5, 101))
+
+	bt.TradeFrom = obs[0].Time
+	bt.TradeTo = obs[len(obs)-1].Time
+
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	require.Empty(t, res.ClosedTrades,
+		"entry on bar.Time == TradeTo must be suppressed; got %d closed trades",
+		len(res.ClosedTrades))
+	require.Empty(t, res.TradeRecords,
+		"entry on bar.Time == TradeTo must be suppressed; got %d trade records",
+		len(res.TradeRecords))
+}
+
+// barAt builds a bar at an arbitrary absolute time, used by the
+// unaligned-end and force-close tests.
+func barAt(t time.Time, price int64) types.Bar {
+	p := decimal.MustNew(price, 0)
+	return types.Bar{
+		Time: t, Open: p, High: p, Low: p, Close: p,
+	}
+}
+
+// TestBacktest_TradeToCompletionGated pins the F12 entry-guard fix:
+// the TradeTo comparison must use the bar's COMPLETION (bar.Time + res),
+// not its START, so a bar whose START is inside the window but whose
+// COMPLETION lands past TradeTo cannot open a position.
+//
+// Fixture (1m resolution, fast=3, slow=5): 5 warmup flat at 100 (no
+// cross, fast=slow=100) → 1 in-bounds flat at 100 (no cross) → 1 TAIL
+// rising bar at 110 (cross fires: fastMA > slowMA). TradeTo is set
+// 30s into the tail bar's window, so the old guard
+// (bar.Time.Before(TradeTo)) would let the entry through; the new
+// guard (completion-gated) suppresses it.
+//
+// Pre-fix: the tail bar's BUY fires → 1 closed trade (force-close at end).
+// Post-fix: the tail bar's BUY is suppressed → 0 closed trades.
+func TestBacktest_TradeToCompletionGated(t *testing.T) {
+	cfg := testCfg(3, 5, decimal.Zero, decimal.Zero)
+	cfg.Resolution = candles.Resolution1m
+	s := momentum.New(cfg, nil)
+	bt := momentum.NewBacktester(s, nil)
+
+	obs := make([]types.Bar, 0, 5+1+1)
+	for i := range 5 {
+		obs = append(obs, flatBar(i, 100))
+	}
+	obs = append(obs, flatBar(5, 100)) // still no cross
+	// TAIL bar at Time=barBase+6m, completion=barBase+7m. TradeTo=
+	// barBase+6m30s, so the old guard (bar.Time.Before(TradeTo))
+	// would let the entry through; the new guard (completion-gated)
+	// suppresses it.
+	tradeTo := barBase.Add(6*time.Minute + 30*time.Second)
+	obs = append(obs, barAt(barBase.Add(6*time.Minute), 110))
+
+	bt.TradeFrom = obs[0].Time
+	bt.TradeTo = tradeTo
+
+	res, err := bt.Run(context.Background(), obs)
+	require.NoError(t, err)
+
+	// Post-fix: no closed trade (the tail bar's BUY is suppressed by
+	// the completion-gated guard, so no position is ever opened).
+	// Pre-fix: 1 closed trade (the tail bar's BUY fires and is force-
+	// closed at end).
+	require.Empty(t, res.ClosedTrades,
+		"the tail bar's entry must be suppressed; got %d closed trades",
+		len(res.ClosedTrades))
+	require.Empty(t, res.TradeRecords,
+		"no trade record may be produced for the suppressed tail entry; got %d",
+		len(res.TradeRecords))
+}
+
+// TestBacktest_ForceCloseStampWithinTruncatedWindow pins the F12 force-
+// close path: with the partial trailing bucket excluded by the
+// resolution-truncated loadEnd, the last loaded bar's Time <= loadEnd
+// <= end (raw), so the force-close stamp (last.Time + res) lands at or
+// before the requested end. Fixture: getBars is called with an
+// UNALIGNED end (1h res, end = start + 2h + 30m, loadEnd = start + 2h);
+// the store returns bars up to loadEnd only. Run with bt.TradeTo = end
+// (raw, unaligned) — the force-close stamp must equal the last bar's
+// Time + res = loadEnd, NOT loadEnd + res (which would be > TradeTo).
+// No signal fires (steady prices), so the backtest produces no trades;
+// the assertion is on the bar-time bound after the truncated load.
+func TestBacktest_ForceCloseStampWithinTruncatedWindow(t *testing.T) {
+	cfg := testCfg(3, 5, decimal.Zero, decimal.Zero)
+
+	ob := uuid.Must(uuid.NewV7())
+	cfg.OrderBookID = ob
+	cfg.Resolution = "1h"
+	cfg.SlowWindow = 4
+	s := momentum.New(cfg, nil)
+
+	start := barBase.Add(2 * time.Hour)
+	end := start.Add(2*time.Hour + 30*time.Minute) // unaligned
+	loadEnd := end.UTC().Truncate(time.Hour)       // start + 2h
+	dataStart := start.Add(-time.Duration(cfg.SlowWindow+1) * time.Hour)
+
+	store := &momentumfakes.FakeCandleHistoryStore{}
+	lo, hi := dataStart, loadEnd.Add(-time.Minute)
+	store.CandleRangeReturns(&lo, &hi, nil)
+
+	// Hand-craft 1h bars from dataStart to loadEnd, all flat at 100.
+	// fast=slow=100 throughout, no cross, no signal.
+	var bcs []candles.Candle
+	for t := dataStart; t.Before(loadEnd); t = t.Add(time.Hour) {
+		bcs = append(bcs, candles.Candle{
+			OrderBookID: ob.String(), StartTimestamp: t,
+			Close: decimal.One,
+		})
+	}
+	store.LoadCandlesBucketedReturns(bcs, nil)
+	momentum.SetCandleHistoryStore(s, store)
+
+	bars, err := momentum.GetBars(context.Background(), s, start, end)
+	require.NoError(t, err)
+	require.NotEmpty(t, bars)
+
+	bt := momentum.NewBacktester(s, nil)
+	bt.TradeFrom = start
+	bt.TradeTo = end
+
+	_, err = bt.Run(context.Background(), bars)
+	require.NoError(t, err)
+
+	// Key assertion: the last bar's Time + res == loadEnd, not loadEnd
+	// + res. A force-close in this run would stamp last.Time + res
+	// = loadEnd <= end (the runner's TradeTo). Pre-fix (no truncation
+	// in getBars) the store would have returned an additional bar
+	// starting at loadEnd, and the force-close stamp would have been
+	// loadEnd + res > end.
+	last := bars[len(bars)-1]
+	assert.True(t, last.Time.Equal(loadEnd.Add(-time.Hour)),
+		"last bar's Time must be loadEnd - res (partial bucket dropped); got %s, want %s",
+		last.Time, loadEnd.Add(-time.Hour))
+	assert.True(t, last.Time.Add(time.Hour).Equal(loadEnd),
+		"last bar's completion must equal loadEnd (NOT loadEnd + res); got %s, want %s",
+		last.Time.Add(time.Hour), loadEnd)
 }

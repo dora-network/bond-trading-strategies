@@ -57,6 +57,14 @@ func (bc *BarCloser) loop() {
 			}
 			for i := range batch {
 				e := batch[i]
+				// Drop replayed/stale entries strictly older than the
+				// current pending candle: the registry's no-op cursor
+				// store forces DORA to resend the bootstrap on
+				// reconnect, and overwriting pending would let later
+				// entries re-emit already-closed bars.
+				if pending != nil && e.Val.StartTimestamp.Before(pending.StartTimestamp) {
+					continue
+				}
 				if pending != nil && e.Val.StartTimestamp.After(pending.StartTimestamp) {
 					select {
 					case bc.out <- BarFromCandle(*pending):

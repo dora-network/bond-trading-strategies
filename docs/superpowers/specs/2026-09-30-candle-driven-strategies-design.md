@@ -79,8 +79,8 @@ DORA WS (per book, per resolution) ──> candles.Handler (existing + Resolutio
   by the strategy (MR / momentum spread mode) at bar close, as today.
 - **`candles.PGStore.LoadCandlesBucketed(ctx, orderBookID, resolution, since,
   until)`** — SQL bucketing adapted from `internal/agent/store/history_store.go`
-  (generate_series grid, forward-fill, OHLCV + 4-YTM roll-up; `1m` passes
-  through). Used by backtests and live warm-start prefill.
+  (generate_series grid, flat-fill at previous close, OHLCV + 4-YTM roll-up;
+  `1m` passes through). Used by backtests and live warm-start prefill.
 
 ## Per-strategy changes
 

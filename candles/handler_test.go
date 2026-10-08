@@ -334,6 +334,172 @@ func TestHandler_processMessage(t *testing.T) {
 		wg.Wait()
 		assert.Equal(t, 1, fakeStore.SaveCandlesCallCount())
 	})
+
+	t.Run("unsubscribe during in-flight fan-out does not panic", func(t *testing.T) {
+		t.Parallel()
+
+		fakeStore := &candlesfakes.FakeCandleStore{}
+		h := mustNew(t, candles.Config{}, fakeStore)
+		requestID := uuid.Must(uuid.NewV7())
+
+		subCh, err := h.Subscribe(requestID)
+		require.NoError(t, err)
+
+		payload := []byte(`[{
+			"Time": "2026-04-10T15:30:00Z",
+			"Val": {"order_book_id": "book-123"}
+		}]`)
+
+		// Fill the subscriber buffer (size 16) so the next send blocks
+		// inside the bounded push until something drains.
+		for range 16 {
+			require.NoError(t, h.ProcessMessage(context.Background(), "book-123", payload))
+		}
+		require.Equal(t, 16, len(subCh))
+
+		// Launch the 17th processMessage in a goroutine. It will
+		// block in `subCh <- entries`. Under the pre-fix code the
+		// snapshot RLock has been released, so Unsubscribe can
+		// close the channel while the send is in flight — "send
+		// on closed channel" panic. The fix holds the RLock across
+		// the send so Unsubscribe waits.
+		processReturned := make(chan error, 1)
+		go func() {
+			processReturned <- h.ProcessMessage(context.Background(), "book-123", payload)
+		}()
+
+		// Yield long enough for the goroutine to enter the blocked
+		// send. The 5s pushTimeout is the upper bound for any
+		// downstream stall; we finish well under that.
+		time.Sleep(50 * time.Millisecond)
+
+		unsubReturned := make(chan error, 1)
+		go func() {
+			unsubReturned <- h.Unsubscribe(requestID)
+		}()
+
+		// Drain the buffered entries so the in-flight send completes.
+		for i := range 16 {
+			select {
+			case <-subCh:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("subscriber channel stuck at drain %d", i)
+			}
+		}
+
+		// processMessage must return cleanly with no panic.
+		select {
+		case err := <-processReturned:
+			require.NoError(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("processMessage did not return after drain")
+		}
+
+		// Unsubscribe must return cleanly.
+		select {
+		case err := <-unsubReturned:
+			require.NoError(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("Unsubscribe did not return")
+		}
+
+		// The 17th entry that the fan-out sent before Unsubscribe
+		// closed the channel is still in the buffer.
+		select {
+		case _, ok := <-subCh:
+			require.True(t, ok, "in-flight entry was lost")
+		case <-time.After(2 * time.Second):
+			t.Fatal("in-flight entry not received")
+		}
+
+		// Channel is now closed by Unsubscribe.
+		select {
+		case _, ok := <-subCh:
+			require.False(t, ok, "channel not closed by Unsubscribe")
+		case <-time.After(2 * time.Second):
+			t.Fatal("channel not closed after Unsubscribe")
+		}
+	})
+
+	t.Run("fan-out uses one shared deadline across all subscribers", func(t *testing.T) {
+		// Mutates package var pushTimeout, so do NOT t.Parallel().
+		// Pre-fix (per-subscriber timeouts): N stalled sends
+		// serialize to N*pushTimeout. Post-fix (single shared
+		// deadline): bounded to 1*pushTimeout regardless of N.
+		prev := *candles.PushTimeoutForTest
+		candles.SetPushTimeoutForTest(200 * time.Millisecond)
+		t.Cleanup(func() { candles.SetPushTimeoutForTest(prev) })
+
+		fakeStore := &candlesfakes.FakeCandleStore{}
+		h := mustNew(t, candles.Config{}, fakeStore)
+		requestIDa := uuid.Must(uuid.NewV7())
+		requestIDb := uuid.Must(uuid.NewV7())
+
+		subA, err := h.Subscribe(requestIDa)
+		require.NoError(t, err)
+		subB, err := h.Subscribe(requestIDb)
+		require.NoError(t, err)
+		defer func() { _ = h.Unsubscribe(requestIDb) }()
+
+		payload := []byte(`[{
+			"Time": "2026-04-10T15:30:00Z",
+			"Val": {"order_book_id": "book-123"}
+		}]`)
+
+		// Fill BOTH subscriber buffers (16 each) so the next send
+		// to either stalls.
+		for i := range 16 {
+			require.NoError(t, h.ProcessMessage(context.Background(), "book-123", payload),
+				"fill %d", i)
+		}
+		require.Equal(t, 16, len(subA))
+		require.Equal(t, 16, len(subB))
+
+		// Launch the 17th processMessage. Both sends will stall.
+		// With the fix the single shared deadline bounds the call
+		// to ~1*pushTimeout; pre-fix per-subscriber timeouts
+		// serialize to ~2*pushTimeout.
+		processReturned := make(chan error, 1)
+		processStart := time.Now()
+		go func() {
+			processReturned <- h.ProcessMessage(context.Background(), "book-123", payload)
+		}()
+
+		// Yield long enough for the goroutine to enter the
+		// blocked send on subA. Shrink sleep is cheap.
+		time.Sleep(20 * time.Millisecond)
+
+		// Unsubscribe one subscriber while the other stays stalled.
+		// The RLock held by processMessage must drain before
+		// Unsubscribe takes the write lock; that happens when the
+		// fan-out finishes.
+		unsubReturned := make(chan error, 1)
+		go func() {
+			unsubReturned <- h.Unsubscribe(requestIDa)
+		}()
+
+		// 1.5*pushTimeout = 300ms. Pre-fix two stalled sends take
+		// >= 2*pushTimeout = 400ms, so the bound trips.
+		budget := time.After(300 * time.Millisecond)
+		select {
+		case err := <-processReturned:
+			require.NoError(t, err)
+		case <-budget:
+			t.Fatalf("processMessage did not return within 1.5*pushTimeout (took %s)",
+				time.Since(processStart))
+		}
+		select {
+		case err := <-unsubReturned:
+			require.NoError(t, err)
+		case <-time.After(300 * time.Millisecond):
+			t.Fatalf("Unsubscribe did not return within 1.5*pushTimeout (took %s)",
+				time.Since(processStart))
+		}
+
+		assert.Less(t, time.Since(processStart), 300*time.Millisecond,
+			"fan-out + unsubscribe took %s; expected < 1.5*pushTimeout (300ms)",
+			time.Since(processStart))
+	})
 }
 
 func TestHandler_StreamSingle(t *testing.T) {

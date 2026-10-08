@@ -349,6 +349,11 @@ func (s *Strategy) Backtest(ctx context.Context, start, end time.Time) (backtest
 	s.baseAssetID = assetID
 	s.mu.Unlock()
 	bt.ticks = s.loadTicks(ctx, assetID, bars)
+	// Pin the trading window so warmup bars (the pre-`start` slice
+	// getBars returns) only seed indicators; entries and reporting
+	// stay restricted to [start, end].
+	bt.TradeFrom = start
+	bt.TradeTo = end
 	return bt.Run(ctx, bars)
 }
 

@@ -122,6 +122,32 @@ type Handler struct {
 	onMessage   func()
 }
 
+// pushTimeout caps the entire fan-out for one processMessage call.
+// One shared deadline (not per-subscriber) bounds total writer
+// wait regardless of subscriber count, so Unsubscribe/Subscribe
+// can never wait longer than pushTimeout. Var (not const) so
+// package tests can shrink it via PushTimeoutForTest (which
+// takes pushTimeoutMu, so concurrent fan-out reads in
+// processMessage don't race).
+//
+//nolint:gochecknoglobals // ponytail: constant, not state.
+var pushTimeout = 5 * time.Second
+
+// pushTimeoutMu guards pushTimeout against concurrent test
+// shrinkage while processMessage reads it on every fan-out.
+//
+//nolint:gochecknoglobals // ponytail: constant, not state.
+var pushTimeoutMu sync.RWMutex
+
+// pushTimeoutFor returns pushTimeout under the read lock so
+// concurrent test shrinkage via SetPushTimeoutForTest is
+// race-free.
+func pushTimeoutFor() time.Duration {
+	pushTimeoutMu.RLock()
+	defer pushTimeoutMu.RUnlock()
+	return pushTimeout
+}
+
 // New creates a new candles Handler.
 func New(cfg Config, store CandleStore, opts ...func(*Handler)) (*Handler, error) {
 	if cfg.Resolution == "" {
@@ -262,28 +288,40 @@ func (h *Handler) processMessage(ctx context.Context, orderBookID string, data [
 		return nil
 	}
 
+	// Hold the read lock across the entire fan-out so Unsubscribe
+	// (which takes the write lock to close + delete) waits for any
+	// in-flight send to finish. Without this, a concurrent
+	// Unsubscribe can close a channel that processMessage is still
+	// sending on, panicking the goroutine. The fan-out also uses a
+	// SINGLE shared deadline (pushTimeout) so total writer wait
+	// is bounded by one pushTimeout regardless of subscriber
+	// count; subscribers beyond the exhausted budget are dropped
+	// (warn) — same degradation as before, now with a bounded
+	// worst case.
 	h.mu.RLock()
+	defer h.mu.RUnlock()
+
 	count := len(h.subscribers)
 	subs := make([]chan []StreamCandlesEntry, 0, count)
 	for _, subCh := range h.subscribers {
 		subs = append(subs, subCh)
 	}
-	h.mu.RUnlock()
 
 	slog.Debug("sending candle updates", "order_book_id", orderBookID, "updates", len(entries), "subscribers", count)
 
-	// Bounded push so a single slow subscriber can't hold the WS
-	const pushTimeout = 5 * time.Second
+	// Bounded push so a slow subscriber can't hold the WS. ONE
+	// shared deadline caps the whole fan-out — not per-subscriber —
+	// so N stalled sends cost at most pushTimeout, not N*pushTimeout.
+	pt := pushTimeoutFor()
+	fanoutCtx, cancel := context.WithTimeout(ctx, pt)
+	defer cancel()
 	for i, subCh := range subs {
-		pushCtx, cancel := context.WithTimeout(ctx, pushTimeout)
 		select {
-		case <-pushCtx.Done():
+		case <-fanoutCtx.Done():
 			slog.Warn("subscriber push timed out",
 				"subscriber_index", i, "order_book_id", orderBookID,
-				"updates", len(entries), "timeout", pushTimeout)
-			cancel()
+				"updates", len(entries), "timeout", pt)
 		case subCh <- entries:
-			cancel()
 		}
 	}
 

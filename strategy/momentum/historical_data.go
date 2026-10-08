@@ -48,23 +48,32 @@ type benchmarkYieldClient interface {
 // including (SlowWindow+1) bars of warmup before start so the slow MA
 // and the ATR (seeded by the previous close) are full by the first
 // decision bar. Bars are oldest-first.
+//
+// loadEnd floors end to the resolution grid. An unaligned end (e.g. a
+// caller passing end = start + N*res + 7m30s at a 15m resolution) would
+// otherwise fold the PARTIAL trailing bucket as a closed bar — the
+// last bar would cover only 7m30s of real data, its CLOSE would land
+// past end, and an entry on it would be stamped past TradeTo. A bar
+// is final only when complete; live (BarCloser) never emits a partial
+// one, so the partial bucket must not be replayed at all.
 func (s *Strategy) getBars(ctx context.Context, start, end time.Time) ([]types.Bar, error) {
 	res := strategy.ResolutionDuration(s.cfg.Resolution)
 	if res == 0 {
 		return nil, fmt.Errorf("unknown resolution %q", s.cfg.Resolution)
 	}
 	dataStart := start.Add(-time.Duration(s.cfg.SlowWindow+1) * res)
+	loadEnd := end.UTC().Truncate(res)
 
 	store, err := s.getCandleHistoryStore(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkCandleCoverage(ctx, store, dataStart, end); err != nil {
+	if err := s.checkCandleCoverage(ctx, store, dataStart, loadEnd); err != nil {
 		return nil, err
 	}
 
 	ob := s.cfg.OrderBookID.String()
-	loaded, err := store.LoadCandlesBucketed(ctx, ob, s.cfg.Resolution, dataStart, end)
+	loaded, err := store.LoadCandlesBucketed(ctx, ob, s.cfg.Resolution, dataStart, loadEnd)
 	if err != nil {
 		return nil, fmt.Errorf("load candles: %w", err)
 	}
@@ -84,7 +93,7 @@ func (s *Strategy) getBars(ctx context.Context, start, end time.Time) ([]types.B
 		if err != nil {
 			return nil, err
 		}
-		benchmarkYields, err := benchmarkClient.FetchHistoricalYields(ctx, tenor, dataStart, end)
+		benchmarkYields, err := benchmarkClient.FetchHistoricalYields(ctx, tenor, dataStart, loadEnd)
 		if err != nil {
 			return nil, fmt.Errorf("fetch historical benchmark yields: %w", err)
 		}
@@ -118,11 +127,20 @@ func (s *Strategy) getBars(ctx context.Context, start, end time.Time) ([]types.B
 	return bars, nil
 }
 
+// sourceBarDuration is the resolution of the raw candles_history rows
+// CandleRange reports; the raw table stores 1m candles, not the strategy's
+// bar resolution.
+const sourceBarDuration = time.Minute
+
 // checkCandleCoverage verifies candles_history fully covers the requested
-// window (including warmup) for the strategy's order book. The last
-// persisted bar starts at hi and covers [hi, hi+res), so the window is
-// covered when end ≤ hi+res — a bar starting at/after end is never loaded
-// and must not be required.
+// window (including warmup) for the strategy's order book. CandleRange
+// reports the min/max timestamps of the RAW 1m candles_history rows: the
+// last persisted row starts at hi and covers [hi, hi+1m), so the window
+// is covered when end ≤ hi+1m — a 1m candle starting at/after end is
+// never loaded and must not be required. The caller passes the
+// resolution-truncated loadEnd (see getBars / PreflightBacktest) so
+// coverage is checked against the same window the bucketed load uses
+// and never against a partial trailing bucket.
 func (s *Strategy) checkCandleCoverage(ctx context.Context, store candleHistoryStore, dataStart, end time.Time) error {
 	ob := s.cfg.OrderBookID.String()
 	lo, hi, err := store.CandleRange(ctx, ob)
@@ -132,8 +150,7 @@ func (s *Strategy) checkCandleCoverage(ctx context.Context, store candleHistoryS
 	if lo == nil || hi == nil {
 		return &candles.ErrNoCandleCoverage{OrderBookID: ob}
 	}
-	res := strategy.ResolutionDuration(s.cfg.Resolution)
-	if lo.After(dataStart) || hi.Add(res).Before(end) {
+	if lo.After(dataStart) || hi.Add(sourceBarDuration).Before(end) {
 		return &candles.ErrNoCandleCoverage{OrderBookID: ob, Available: lo, Until: hi}
 	}
 	return nil
@@ -155,7 +172,11 @@ func (s *Strategy) PreflightBacktest(ctx context.Context, start, end time.Time) 
 		return fmt.Errorf("unknown resolution %q", s.cfg.Resolution)
 	}
 	dataStart := start.Add(-time.Duration(s.cfg.SlowWindow+1) * res)
-	return s.checkCandleCoverage(ctx, store, dataStart, end)
+	// Floor end to the resolution grid so coverage is checked against
+	// the same window getBars loads — never against a partial trailing
+	// bucket.
+	loadEnd := end.UTC().Truncate(res)
+	return s.checkCandleCoverage(ctx, store, dataStart, loadEnd)
 }
 
 func (s *Strategy) getCandleHistoryStore(ctx context.Context) (candleHistoryStore, error) {

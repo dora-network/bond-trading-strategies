@@ -24,6 +24,13 @@ type Backtester struct {
 	// chronological order. Empty disables tick replay: intrabar exits
 	// fall back to the bar-extreme approximation.
 	ticks []prices.AssetPrice
+	// TradeFrom / TradeTo define the trading window. Bars before
+	// TradeFrom only warm indicators and trade filters; entries
+	// execute only for bars with Time >= TradeFrom (and, when set,
+	// Time < TradeTo). Summary bounds come from these fields when
+	// non-zero, else the bar slice. Zero values = unrestricted.
+	TradeFrom time.Time
+	TradeTo   time.Time
 }
 
 // NewBacktester wraps a Strategy for backtesting. The writer receives one
@@ -75,27 +82,53 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 
 		if openTrade != nil {
 			var (
-				exit   bool
-				reason string
+				exit      bool
+				fillPrice decimal.Decimal
+				reason    string
 			)
 			if prevWindowHadTicks {
 				// Ticks already drove the intrabar band checks for this
 				// bar's formation window; only the close-decision remains.
-				exit, reason = b.strategy.ShouldExit(openTrade.Signal, decision, openTrade.Price, openTrade.EntryATR)
+				if e, r := b.strategy.ShouldExit(openTrade.Signal, decision, openTrade.Price, openTrade.EntryATR); e {
+					exit, fillPrice, reason = true, decision.Price(), r
+				}
 			} else {
-				exit, reason = b.exitForBar(openTrade, bar, decision)
+				exit, fillPrice, reason = b.exitForBar(openTrade, bar, decision)
 			}
 			if exit {
-				ct, err := closeAtPrice(openTrade, decision, reason)
+				d := decision
+				d.price = fillPrice
+				// Bar-driven exit: the close-decision fires at the
+				// bar's CLOSE, so the persisted close must carry
+				// bar.Time + res. The tick-exit path further down
+				// overrides d.time with the tick timestamp and is
+				// unaffected. Without this shift, a re-entry on the
+				// next bar could be stamped at the bar START
+				// (earlier than this exit's CLOSE) and break timeline
+				// monotonicity.
+				d.time = bar.Time.Add(res)
+				ct, err := closeAtPrice(openTrade, d, reason)
 				if err != nil {
 					return BacktestResult{}, err
 				}
 				closedTrades = append(closedTrades, ct)
-				tradeRecords = append(tradeRecords, exitRecord(openTrade, decision))
+				tradeRecords = append(tradeRecords, exitRecord(openTrade, d))
 				openTrade = nil
 			}
-		} else if decision.Signal() != types.SignalHold {
-			// Flat: open on a fresh signal.
+		} else if decision.Signal() != types.SignalHold &&
+			(b.TradeFrom.IsZero() || !bar.Time.Before(b.TradeFrom)) &&
+			(b.TradeTo.IsZero() || !bar.Time.Add(res).After(b.TradeTo)) {
+			// Flat: open on a fresh signal, but only when the bar
+			// sits inside the trading window. Entries execute at
+			// bar completion (bar.Time + res), so every entry
+			// timestamp falls in (TradeFrom, TradeTo]; the
+			// TradeFrom side stays `Before`-strict (bars starting
+			// before TradeFrom never trade even if they complete
+			// exactly at TradeFrom — warmup contract). Bars
+			// outside the window still update indicators, trade
+			// filters, and run exits — only the entry branch is
+			// gated, so a position opened in-bounds can still run
+			// to end of data.
 			price := decision.Price()
 			if price.IsZero() {
 				continue
@@ -107,8 +140,15 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 			if !ok || quantity.IsZero() {
 				continue
 			}
+			// Bar-driven entry: the decision fires at the bar's CLOSE
+			// (decision.Time = bar.Time = bar START), so the persisted
+			// trade record must carry the CLOSE time (bar.Time + res).
+			// Without this shift, a re-entry after a tick-driven exit
+			// could be stamped at the bar START — earlier than the
+			// preceding trade's tick exit time, breaking timeline
+			// monotonicity. Tick-driven exits are unaffected.
 			rec := TradeRecord{
-				Time: decision.Time(), BondID: decision.bondID, Signal: decision.Signal(),
+				Time: decision.Time().Add(res), BondID: decision.bondID, Signal: decision.Signal(),
 				Price: price, Quantity: quantity, PositionSize: decision.PositionSize(),
 				FastMA: decision.FastMA, SlowMA: decision.SlowMA, EntryATR: decision.ATR,
 			}
@@ -154,8 +194,11 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 		// bar produced. meanreversion does the same. Inherit
 		// FastMA/SlowMA/ATR from lastDecision so the persisted force-
 		// close TradeRecord has the same MA state as in-loop exits.
+		// Force-close is a bar-driven event: stamp the close at the
+		// last bar's CLOSE (last.Time + res) so it sorts AFTER any
+		// tick exit that fired in the last bar's formation window.
 		d := Decision{
-			time:   last.Time,
+			time:   last.Time.Add(res),
 			bondID: openTrade.BondID,
 			price:  last.Close,
 			signal: lastDecision.Signal(),
@@ -185,6 +228,15 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 		return BacktestResult{}, nil
 	}
 	start, end := bars[0].Time, bars[len(bars)-1].Time
+	// When the runner pinned the trading window, report bounds from
+	// TradeFrom/TradeTo so the summary covers only the requested
+	// period (not the warmup slice).
+	if !b.TradeFrom.IsZero() {
+		start = b.TradeFrom
+	}
+	if !b.TradeTo.IsZero() {
+		end = b.TradeTo
+	}
 	return summarise(closedTrades, tradeRecords, start, end)
 }
 
@@ -210,22 +262,70 @@ func (b *Backtester) tickWindow(idx *int, from, to time.Time) []prices.AssetPric
 // exitForBar evaluates the open position's exits for one bar:
 // stop-loss against the adverse extreme, take-profit against the
 // favorable extreme, then the close-decision bands/reversal. Priority
-// stop_loss > take_profit > close-decision.
-func (b *Backtester) exitForBar(open *TradeRecord, bar types.Bar, decision Decision) (bool, string) {
+// stop_loss > take_profit > close-decision. On a band exit the returned
+// fill price is the band level (entry ± mult×ATR) gap-capped at
+// bar.Open — an order can't fill better than the market's first price
+// when the bar opens through the band. Signal/close-decision exits
+// fill at the decision close.
+func (b *Backtester) exitForBar(open *TradeRecord, bar types.Bar, decision Decision) (bool, decimal.Decimal, string) {
 	adverse, favorable := bar.Low, bar.High
 	if open.Signal == types.SignalSell {
 		adverse, favorable = bar.High, bar.Low
 	}
-	// bandExit with the adverse extreme can only fire its stop branch
-	// (the TP threshold lies beyond the favorable extreme); likewise
-	// the favorable extreme can only fire take-profit.
-	if reason, exit := b.strategy.bandExit(open.Signal, open.Price, open.EntryATR, adverse); exit {
-		return true, reason
+	stop, tp, hasStop, hasTP := b.strategy.bandLevels(open.Signal, open.Price, open.EntryATR)
+	// The adverse extreme can only cross the stop band (the TP
+	// threshold lies beyond the favorable extreme); likewise the
+	// favorable extreme can only cross take-profit.
+	if hasStop {
+		crossed := (open.Signal == types.SignalBuy && adverse.Cmp(stop) <= 0) ||
+			(open.Signal == types.SignalSell && adverse.Cmp(stop) >= 0)
+		if crossed {
+			return true, stopFill(open.Signal, stop, bar.Open), ExitReasonStopLoss
+		}
 	}
-	if reason, exit := b.strategy.bandExit(open.Signal, open.Price, open.EntryATR, favorable); exit {
-		return true, reason
+	if hasTP {
+		crossed := (open.Signal == types.SignalBuy && favorable.Cmp(tp) >= 0) ||
+			(open.Signal == types.SignalSell && favorable.Cmp(tp) <= 0)
+		if crossed {
+			return true, tpFill(open.Signal, tp, bar.Open), ExitReasonTakeProfit
+		}
 	}
-	return b.strategy.ShouldExit(open.Signal, decision, open.Price, open.EntryATR)
+	if exit, reason := b.strategy.ShouldExit(open.Signal, decision, open.Price, open.EntryATR); exit {
+		return true, decision.Price(), reason
+	}
+	return false, decimal.Zero, ""
+}
+
+// stopFill returns the gap-capped stop fill: long → min(level, open)
+// (open gapped below stop → fill at open, worse); short → max(level,
+// open).
+func stopFill(openSignal types.Signal, level, open decimal.Decimal) decimal.Decimal {
+	if openSignal == types.SignalBuy {
+		if open.Cmp(level) < 0 {
+			return open
+		}
+		return level
+	}
+	if open.Cmp(level) > 0 {
+		return open
+	}
+	return level
+}
+
+// tpFill returns the gap-capped TP fill: long → max(level, open) (open
+// gapped above TP → limit fills at open, better); short → min(level,
+// open).
+func tpFill(openSignal types.Signal, level, open decimal.Decimal) decimal.Decimal {
+	if openSignal == types.SignalBuy {
+		if open.Cmp(level) > 0 {
+			return open
+		}
+		return level
+	}
+	if open.Cmp(level) < 0 {
+		return open
+	}
+	return level
 }
 
 // closeAtPrice converts an open TradeRecord + a closing Decision into a

@@ -55,12 +55,18 @@ func (s *PGStore) GetLastTimestamp(ctx context.Context, orderBookID string) (*ti
 // LoadCandles reads candles_history rows for one order book in [since, until]
 // inclusive, ordered by start_timestamp ASC. Mirrors the upstream REST
 // GET /v1/charts/{order_book_id}/candle response shape (all four YTM
-// columns included).
+// columns included). YTMs are coalesced to '0' so the scan into a plain
+// Go string does not fail on NULL columns left behind by the migration 014
+// upgrade; zero is the codebase's missing-YTM sentinel (see
+// fetchCandlesSQL for the full contract).
 func (s *PGStore) LoadCandles(ctx context.Context, orderBookID string, since, until time.Time) ([]Candle, error) {
 	const q = `
 		SELECT order_book_id::text, start_timestamp,
 		       open::text, high::text, low::text, close::text, volume::text,
-		       open_ytm::text, high_ytm::text, low_ytm::text, close_ytm::text
+		       COALESCE(open_ytm,  '0')::text AS open_ytm,
+		       COALESCE(high_ytm,  '0')::text AS high_ytm,
+		       COALESCE(low_ytm,   '0')::text AS low_ytm,
+		       COALESCE(close_ytm, '0')::text AS close_ytm
 		FROM candles_history
 		WHERE order_book_id = $1
 		  AND start_timestamp >= $2
@@ -143,10 +149,22 @@ var maxCandleRows = 1500
 // fetchCandlesSQL returns the SELECT for the requested resolution. "1m"
 // is a simple pass-through. "5m" / "15m" / "1h" / "4h" / "1d"
 // build OHLCV buckets over the full bucket grid from start to end
-// (generate_series); buckets with no source minutes are forward-filled
-// from the previous non-empty bucket via a lateral join (volume
-// defaults to 0), so consumers see a gapless series. Postgres has no
-// IGNORE NULLS for lag(), hence the lateral form.
+// (generate_series); empty buckets (no source minutes) are FLAT-FILLED
+// at the previous populated bucket's close (all four prices + all four
+// YTMs collapse to prev close/close_ytm, volume zero) — NOT
+// forward-filled. Forward-fill would inherit the prior bucket's
+// High/Low extremes: an entry at prev close 100 could see a stop-out
+// on a phantom low of 95 that never traded, and true-range ATR would
+// re-count the old range as new movement. Flat-fill keeps the gapless
+// series but reports zero movement. Buckets with no data AND no
+// populated predecessor (leading gap when `since` precedes the book's
+// first candle) are DROPPED in the WHERE clause — surfacing them
+// would yield NULL OHLC and crash the public scan into a plain Go
+// string. Filtering in SQL (not post-scan) is required so
+// keyset-pagination's `len(rows) < maxCandleRows` termination stays
+// correct: a post-scan skip would still consume the LIMIT and the
+// pagination loop would over-fetch forever. Postgres has no IGNORE
+// NULLS for lag(), hence the lateral form.
 // Parameter layout (both branches): $1 = order_book_id, $2 = window
 // start (>=), $3 = window end (<), $4 = keyset cursor timestamp (>),
 // $5 = batch size (LIMIT). The cursor is a single timestamp, not a
@@ -154,10 +172,21 @@ var maxCandleRows = 1500
 //
 //nolint:dupl // ponytail: duplicated from internal/agent/store/history_store.go
 func fetchCandlesSQL(resolution Resolution) string {
+	// NULL→'0' normalisation: migration 014 added the four YTM columns as
+	// nullable so pre-existing candles_history rows survived the upgrade
+	// without backfill; queryCandlePage scans them into plain Go strings
+	// (no NullString), so NULLs would error the scan before any strategy
+	// could see the book. Zero is the codebase's missing-YTM sentinel
+	// (meanreversion/historical_data.go, momentum/historical_data.go drop
+	// zero-CloseYTM bars; breakout passes them through). Only YTMs are
+	// coalesced — OHLCV is fully populated on legacy rows.
 	bucketSec := resolutionToSeconds(resolution)
 	if bucketSec <= resolutionSeconds[Resolution1m] {
 		return `SELECT order_book_id, start_timestamp, open, high, low, close, volume,
-                      open_ytm, high_ytm, low_ytm, close_ytm
+                      COALESCE(open_ytm,  '0') AS open_ytm,
+                      COALESCE(high_ytm,  '0') AS high_ytm,
+                      COALESCE(low_ytm,   '0') AS low_ytm,
+                      COALESCE(close_ytm, '0') AS close_ytm
                FROM candles_history
                WHERE order_book_id = $1
                  AND start_timestamp >= $2
@@ -205,25 +234,25 @@ func fetchCandlesSQL(resolution Resolution) string {
         SELECT
           $1 AS order_book_id,
           a.bucket_start AS start_timestamp,
-          COALESCE(a.open,  p.open)       AS open,
-          COALESCE(a.high,  p.high)       AS high,
-          COALESCE(a.low,   p.low)        AS low,
-          COALESCE(a.close, p.close)      AS close,
-          COALESCE(a.volume, 0)           AS volume,
-          COALESCE(a.open_ytm,  p.open_ytm)  AS open_ytm,
-          COALESCE(a.high_ytm, p.high_ytm)   AS high_ytm,
-          COALESCE(a.low_ytm,  p.low_ytm)    AS low_ytm,
-          COALESCE(a.close_ytm, p.close_ytm) AS close_ytm
+          COALESCE(a.open,  p.close)        AS open,
+          COALESCE(a.high,  p.close)        AS high,
+          COALESCE(a.low,   p.close)        AS low,
+          COALESCE(a.close, p.close)        AS close,
+          COALESCE(a.volume, 0)             AS volume,
+          COALESCE(COALESCE(a.open_ytm,  p.close_ytm), '0') AS open_ytm,
+          COALESCE(COALESCE(a.high_ytm, p.close_ytm),  '0') AS high_ytm,
+          COALESCE(COALESCE(a.low_ytm,  p.close_ytm),  '0') AS low_ytm,
+          COALESCE(COALESCE(a.close_ytm, p.close_ytm), '0') AS close_ytm
         FROM agg a
         LEFT JOIN LATERAL (
-          SELECT open, high, low, close,
-                 open_ytm, high_ytm, low_ytm, close_ytm
+          SELECT close, close_ytm
           FROM agg p
           WHERE p.n > 0 AND p.bucket_start < a.bucket_start
           ORDER BY p.bucket_start DESC
           LIMIT 1
         ) p ON a.n = 0
         WHERE a.bucket_start > ($4 AT TIME ZONE 'UTC')
+          AND (a.n > 0 OR p.close IS NOT NULL)
         ORDER BY a.bucket_start ASC
         LIMIT $5`, bucketSec)
 }

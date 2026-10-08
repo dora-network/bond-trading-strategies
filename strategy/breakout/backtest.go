@@ -42,6 +42,13 @@ type Backtester struct {
 	// chronological order. Empty disables tick replay: intrabar exits
 	// fall back to the bar-extreme approximation.
 	ticks []prices.AssetPrice
+	// TradeFrom / TradeTo define the trading window. Bars before
+	// TradeFrom only warm indicators and trade filters; entries
+	// execute only for bars with Time >= TradeFrom (and, when set,
+	// Time < TradeTo). Summary bounds come from these fields when
+	// non-zero, else the bar slice. Zero values = unrestricted.
+	TradeFrom time.Time
+	TradeTo   time.Time
 }
 
 // NewBacktester creates a Backtester wrapping the given Strategy. The
@@ -92,6 +99,11 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 	// Bar.Time is the bar START; the decision happens at the bar CLOSE
 	// (bar.Time+res). Trades during the signal bar must fold into OBV
 	// before that bar's gate evaluation, so the cutoff is the close.
+	// Bar-driven trade records (entries, bar-driven exits, force-closes)
+	// are stamped at the bar CLOSE, not the START, so they sort AFTER
+	// any tick-driven exit that fired inside the preceding bar's
+	// formation window. Tick-driven exits keep the tick's own
+	// timestamp.
 	res := strategy.ResolutionDuration(b.strategy.cfg.Resolution)
 	tickIdx := 0
 	// prevWindowHadTicks records whether the window (close_{i-1}, close_i]
@@ -116,36 +128,49 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 
 			if openTrade != nil {
 				var (
-					exit   bool
-					reason string
+					exit      bool
+					fillPrice decimal.Decimal
+					reason    string
 				)
 				if prevWindowHadTicks {
 					// Ticks already drove the intrabar band checks for
 					// this bar's formation window; only the reversal
 					// close-decision remains.
 					if isReversal(openTrade.Signal, decision.Signal()) {
-						exit, reason = true, ExitReasonReversal
+						exit, fillPrice, reason = true, decision.Price(), ExitReasonReversal
 					}
 				} else {
-					exit, reason = b.exitForBar(openTrade, bar, decision)
+					exit, fillPrice, reason = b.exitForBar(openTrade, bar, decision)
 				}
 				if exit {
+					d := decision
+					d.price = fillPrice
+					// Bar-driven exit (reversal or band): the close-decision
+					// fires at the bar's CLOSE, so the persisted close
+					// must carry bar.Time + res. Without this shift, a
+					// re-entry on the next bar could be stamped at the bar
+					// START (earlier than this exit's CLOSE) and break
+					// timeline monotonicity. The tick-exit path further
+					// down overrides d.time with the tick timestamp and
+					// is unaffected.
+					d.time = bar.Time.Add(res)
 					if reason == ExitReasonReversal {
 						// Persist the exit row so /trades shows a matched
 						// pair (mirrors the pre-cutover behaviour; band exits
-						// record only the ClosedTrade).
+						// record only the ClosedTrade). Stamp the row at the
+						// bar CLOSE so the timeline is monotonic.
 						tradeRecords = append(tradeRecords, TradeRecord{
-							Time:             decision.Time(),
+							Time:             d.Time(),
 							BondID:           openTrade.BondID,
 							Signal:           openTrade.Signal,
-							Price:            decision.Price(),
+							Price:            d.Price(),
 							Quantity:         openTrade.Quantity,
 							PositionSize:     openTrade.Quantity,
 							CompressionRatio: openTrade.CompressionRatio,
 							EntryATR:         openTrade.EntryATR,
 						})
 					}
-					ct, newBalance, err := b.closeAtPrice(openTrade, decision, remainingBalance, reason)
+					ct, newBalance, err := b.closeAtPrice(openTrade, d, remainingBalance, reason)
 					if err != nil {
 						return BacktestResult{}, err
 					}
@@ -153,8 +178,21 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 					closedTrades = append(closedTrades, ct)
 					openTrade = nil
 				}
-			} else if decision.Signal() != types.SignalHold {
-				// Flat — open on a fresh entry signal.
+			} else if decision.Signal() != types.SignalHold &&
+				(b.TradeFrom.IsZero() || !bar.Time.Before(b.TradeFrom)) &&
+				(b.TradeTo.IsZero() || !bar.Time.Add(res).After(b.TradeTo)) {
+				// Flat — open on a fresh entry signal, but only
+				// when the bar sits inside the trading window.
+				// Entries execute at bar completion (bar.Time + res),
+				// so every entry timestamp falls in (TradeFrom,
+				// TradeTo]. The TradeFrom side stays `Before`-strict
+				// (bars starting before TradeFrom never trade even
+				// if they complete exactly at TradeFrom — warmup
+				// contract). Bars outside the window still seed
+				// indicators, OBV via ingestTradesUpTo, and run
+				// exits — only the entry branch is gated, so a
+				// position opened in-bounds can still run to end
+				// of data.
 				entryPrice := decision.Price()
 				budget, err := remainingBalance.Mul(decision.PositionSize())
 				if err != nil {
@@ -169,8 +207,16 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 					// Budget too small to buy even one bond; skip.
 					continue
 				}
+				// Bar-driven entry: the decision fires at the bar's
+				// CLOSE (decision.Time = bar.Time = bar START), so the
+				// persisted trade record must carry the CLOSE time
+				// (bar.Time + res). Without this shift, a re-entry
+				// after a tick-driven exit could be stamped at the
+				// bar START — earlier than the preceding trade's
+				// tick exit time, breaking timeline monotonicity.
+				// Tick-driven exits are unaffected.
 				tradeRecords = append(tradeRecords, TradeRecord{
-					Time:     decision.Time(),
+					Time:     decision.Time().Add(res),
 					BondID:   decision.BondID(),
 					Signal:   decision.Signal(),
 					Price:    entryPrice,
@@ -255,8 +301,11 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 			_ = remainingBalance
 		}
 
+		// Force-close is a bar-driven event: stamp the close at the
+		// last bar's CLOSE (last.Time + res) so it sorts AFTER any
+		// tick exit that fired in the last bar's formation window.
 		tradeRecords = append(tradeRecords, TradeRecord{
-			Time:         last.Time,
+			Time:         last.Time.Add(res),
 			BondID:       openTrade.BondID,
 			Signal:       openTrade.Signal,
 			Price:        exitPrice,
@@ -270,7 +319,7 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 		ct := ClosedTrade{
 			BondID:                openTrade.BondID,
 			OpenTime:              openTrade.Time,
-			CloseTime:             last.Time,
+			CloseTime:             last.Time.Add(res),
 			Signal:                openTrade.Signal,
 			ExitSignal:            lastDecision.Signal(),
 			EntryPrice:            openTrade.Price,
@@ -298,6 +347,15 @@ func (b *Backtester) Run(ctx context.Context, bars []types.Bar) (BacktestResult,
 	}
 
 	start, end := bars[0].Time, bars[len(bars)-1].Time
+	// When the runner pinned the trading window, report bounds from
+	// TradeFrom/TradeTo so the summary covers only the requested
+	// period (not the warmup slice).
+	if !b.TradeFrom.IsZero() {
+		start = b.TradeFrom
+	}
+	if !b.TradeTo.IsZero() {
+		end = b.TradeTo
+	}
 	metrics, err := computeSummary(closedTrades, start, end)
 	if err != nil {
 		return BacktestResult{}, fmt.Errorf("compute summary: %w", err)
@@ -337,26 +395,85 @@ func (b *Backtester) tickWindow(idx *int, from, to time.Time) []prices.AssetPric
 // for a short), take-profit against the favorable extreme, then the
 // opposite-signal reversal. Priority stop_loss > take_profit >
 // reversal, so a fast move that blows through both bands records the
-// worse outcome. Exit price is the bar's close (matches the live loop,
-// which acts on closed-bar decisions).
-func (b *Backtester) exitForBar(open *TradeRecord, bar types.Bar, decision Decision) (bool, string) {
+// worse outcome. On a band exit the returned fill price is the band
+// level (entry ± mult×ATR) gap-capped at bar.Open — an order can't
+// fill better than the market's first price when the bar opens
+// through the band. Reversal exits fill at the decision close.
+func (b *Backtester) exitForBar(open *TradeRecord, bar types.Bar, decision Decision) (bool, decimal.Decimal, string) {
 	adverse, favorable := bar.Low, bar.High
 	if open.Signal == types.SignalSell {
 		adverse, favorable = bar.High, bar.Low
 	}
+	cfg := b.strategy.cfg
 	// The adverse extreme can only cross the stop band (the TP
 	// threshold lies beyond the favorable extreme); likewise the
 	// favorable extreme can only cross take-profit.
-	if reason, ok := checkStopLossTakeProfit(open, adverse, b.strategy.cfg); ok {
-		return true, reason
+	if isStopBandHit(open, adverse, cfg) {
+		level, _ := bandLevel(open.Price, open.EntryATR, cfg.StopLossATR, open.Signal == types.SignalSell)
+		return true, breakoutStopFill(open.Signal, level, bar.Open), ExitReasonStopLoss
 	}
-	if reason, ok := checkStopLossTakeProfit(open, favorable, b.strategy.cfg); ok {
-		return true, reason
+	if isTPBandHit(open, favorable, cfg) {
+		level, _ := bandLevel(open.Price, open.EntryATR, cfg.TakeProfitATR, open.Signal == types.SignalBuy)
+		return true, breakoutTPFill(open.Signal, level, bar.Open), ExitReasonTakeProfit
 	}
 	if isReversal(open.Signal, decision.Signal()) {
-		return true, ExitReasonReversal
+		return true, decision.Price(), ExitReasonReversal
 	}
-	return false, ""
+	return false, decimal.Zero, ""
+}
+
+// isStopBandHit reports whether the supplied price has crossed the
+// stop band (entry ± SLmult×ATR) for the open position. Encapsulates
+// the (SignalBuy, wantAbove=false) and (SignalSell, wantAbove=true)
+// pair so exitForBar reads cleanly.
+func isStopBandHit(open *TradeRecord, price decimal.Decimal, cfg Config) bool {
+	if !cfg.StopLossATR.IsPos() {
+		return false
+	}
+	hit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.StopLossATR, price, open.Signal == types.SignalSell)
+	return ok && hit
+}
+
+// isTPBandHit reports whether the supplied price has crossed the
+// take-profit band (entry ± TPmult×ATR) for the open position.
+func isTPBandHit(open *TradeRecord, price decimal.Decimal, cfg Config) bool {
+	if !cfg.TakeProfitATR.IsPos() {
+		return false
+	}
+	hit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.TakeProfitATR, price, open.Signal == types.SignalBuy)
+	return ok && hit
+}
+
+// breakoutStopFill returns the gap-capped stop fill: long → min(level,
+// open) (open gapped below stop → fill at open, worse); short →
+// max(level, open).
+func breakoutStopFill(openSignal types.Signal, level, open decimal.Decimal) decimal.Decimal {
+	if openSignal == types.SignalBuy {
+		if open.Cmp(level) < 0 {
+			return open
+		}
+		return level
+	}
+	if open.Cmp(level) > 0 {
+		return open
+	}
+	return level
+}
+
+// breakoutTPFill returns the gap-capped TP fill: long → max(level,
+// open) (open gapped above TP → limit fills at open, better); short →
+// min(level, open).
+func breakoutTPFill(openSignal types.Signal, level, open decimal.Decimal) decimal.Decimal {
+	if openSignal == types.SignalBuy {
+		if open.Cmp(level) > 0 {
+			return open
+		}
+		return level
+	}
+	if open.Cmp(level) < 0 {
+		return open
+	}
+	return level
 }
 
 // loadTrades loads all trades for the backtest date range into a sorted
@@ -522,79 +639,48 @@ func computeSummary(closed []ClosedTrade, start, end time.Time) (stats.Summary, 
 	return stats.Summarise(points, start, end)
 }
 
-// checkStopLossTakeProfit returns the exit reason ("stop_loss" or
-// "take_profit") if the current price has crossed the SL or TP band
-// for the open position, or ("", false) if neither band was hit (or
-// both are disabled via a zero multiplier).
-//
-// For a long (BUY): SL is below entry, TP is above.
-// For a short (SELL): SL is above entry, TP is below.
-// Stop-loss is checked before take-profit so a single fast move that
-// blows through both bands records the worse outcome (the SL).
-func checkStopLossTakeProfit(open *TradeRecord, currentPrice decimal.Decimal, cfg Config) (string, bool) {
-	if open.EntryATR.IsZero() {
-		return "", false
-	}
-	switch open.Signal {
-	case types.SignalBuy:
-		if cfg.StopLossATR.IsPos() {
-			if slHit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.StopLossATR, currentPrice, false); ok && slHit {
-				return ExitReasonStopLoss, true
-			}
-		}
-		if cfg.TakeProfitATR.IsPos() {
-			if tpHit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.TakeProfitATR, currentPrice, true); ok && tpHit {
-				return ExitReasonTakeProfit, true
-			}
-		}
-	case types.SignalSell:
-		if cfg.StopLossATR.IsPos() {
-			if slHit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.StopLossATR, currentPrice, true); ok && slHit {
-				return ExitReasonStopLoss, true
-			}
-		}
-		if cfg.TakeProfitATR.IsPos() {
-			if tpHit, ok := exitPriceCrosses(open.Price, open.EntryATR, cfg.TakeProfitATR, currentPrice, false); ok && tpHit {
-				return ExitReasonTakeProfit, true
-			}
-		}
-	default:
-		// open.Signal is Hold; unreachable in production (the backtest
-		// only opens on Buy or Sell).
-		return "", false
-	}
-	// Reached when the SignalBuy or SignalSell cases don't fire their
-	// inner returns (e.g. multipliers are non-positive or the price
-	// hasn't crossed the band).
-	return "", false
-}
-
 // exitPriceCrosses reports whether the current price has crossed the
 // exit threshold derived from entry price +/- multiplier*entryATR.
 // For longs, "above" is the profitable direction; for shorts, "below".
 // Returns (false, false) if the multiplier is non-positive or the
 // arithmetic errors.
 func exitPriceCrosses(entryPrice, entryATR, multiplier, currentPrice decimal.Decimal, wantAbove bool) (bool, bool) {
-	if !multiplier.IsPos() {
+	level, ok := bandLevel(entryPrice, entryATR, multiplier, wantAbove)
+	if !ok {
 		return false, false
+	}
+	if wantAbove {
+		return currentPrice.Cmp(level) >= 0, true
+	}
+	return currentPrice.Cmp(level) <= 0, true
+}
+
+// bandLevel returns the entry-anchored stop/take-profit price level
+// (entry +/- multiplier*entryATR). Single source of truth shared by
+// exitPriceCrosses (live tick check, backtest band fire) and the
+// bar-extreme fill helper: both MUST use the same level so a band
+// fire can never drift from the fill price. ok=false when the
+// multiplier is non-positive or the arithmetic errors.
+func bandLevel(entryPrice, entryATR, multiplier decimal.Decimal, wantAbove bool) (decimal.Decimal, bool) {
+	if !multiplier.IsPos() {
+		return decimal.Zero, false
 	}
 	distance, err := multiplier.Mul(entryATR)
 	if err != nil {
-		return false, false
+		return decimal.Zero, false
 	}
-	var threshold decimal.Decimal
 	if wantAbove {
-		threshold, err = entryPrice.Add(distance)
-	} else {
-		threshold, err = entryPrice.Sub(distance)
+		level, err := entryPrice.Add(distance)
+		if err != nil {
+			return decimal.Zero, false
+		}
+		return level, true
 	}
+	level, err := entryPrice.Sub(distance)
 	if err != nil {
-		return false, false
+		return decimal.Zero, false
 	}
-	if wantAbove {
-		return currentPrice.Cmp(threshold) >= 0, true
-	}
-	return currentPrice.Cmp(threshold) <= 0, true
+	return level, true
 }
 
 // closeAtPrice closes the open trade at the current decision's price
