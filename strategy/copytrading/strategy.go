@@ -89,6 +89,12 @@ func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 	}
 }
 
+// HasMarketAPIClient reports whether a market API client is wired. The
+// HTTP handler uses this to reject live runs that would otherwise have
+// no client to place orders with (caller authenticated without a DORA
+// API key).
+func (s *Strategy) HasMarketAPIClient() bool { return s.marketAPI != nil }
+
 // WithBacktestStore sets the trades history store used by the backtester.
 func WithBacktestStore(store tradesHistoryStore) func(*Strategy) {
 	return func(s *Strategy) {
@@ -157,6 +163,12 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 func (s *Strategy) run(ctx context.Context, msgCh <-chan strategy.Message) error {
 	if s.tradeStream == nil {
 		return errors.New("trade stream not configured: use WithTradeStream")
+	}
+	// A nil client here means the run was created or resumed without a
+	// user API key. Failing fast beats the alternative: the first trade
+	// event would nil-dereference in handleTrade and crash the server.
+	if s.marketAPI == nil {
+		return errors.New("market API client not configured: use WithMarketAPIClient")
 	}
 	subscriberID, tradeCh := s.tradeStream.Subscribe(s.cfg.FollowedTrader)
 	defer s.tradeStream.Unsubscribe(subscriberID)

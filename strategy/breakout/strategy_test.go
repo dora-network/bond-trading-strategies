@@ -1,14 +1,17 @@
 package breakout_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dora-network/bond-trading-strategies/candles"
+	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/breakout"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 )
@@ -259,4 +262,14 @@ func TestTrueRangeFeedsATRWindow(t *testing.T) {
 				"ATR must be the mean true range (4), not |Δclose| (0); got %s", d.ATR.String())
 		}
 	}
+}
+
+// Regression: a run created or resumed without a user API key has no
+// market client (the constructor deliberately has no server-key
+// default — orders must go to the user's account). Run must fail fast
+// instead of nil-dereferencing in the live loop.
+func TestRunRequiresMarketAPIClient(t *testing.T) {
+	s := breakout.New(breakout.Config{}, nil)
+	err := s.Run(context.Background(), make(chan strategycore.Message), uuid.Must(uuid.NewV7()))
+	require.ErrorContains(t, err, "market API client is not configured")
 }

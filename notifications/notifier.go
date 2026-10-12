@@ -26,6 +26,7 @@ const (
 	EventRunResumed        EventType = "run.resumed"
 	EventRunStopped        EventType = "run.stopped"
 	EventRunCompleted      EventType = "run.completed"
+	EventRunFailed         EventType = "run.failed"
 	EventRunStopLoss       EventType = "run.stop_loss"
 	// EventOrderUpdate is published when DORA reports a state change for an
 	// order that was placed by one of the user's running strategies. Payload

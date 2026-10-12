@@ -3,6 +3,7 @@ package http_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dora-network/bond-trading-strategies/internal/secrets"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/dora-network/bond-trading-strategies/notifications/notificationsfakes"
 	"github.com/dora-network/bond-trading-strategies/prices"
@@ -31,6 +33,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/streams"
 )
 
 func TestHandlerListsCopyTraders(t *testing.T) {
@@ -1421,6 +1424,12 @@ func TestHandlerRestoreRuns(t *testing.T) {
 		},
 	}
 
+	encKey := make([]byte, 32)
+	_, err := rand.Read(encKey)
+	require.NoError(t, err)
+	store.runs[pausedID].EncryptedAPIKey, err = secrets.Encrypt([]byte("test-api-key"), encKey)
+	require.NoError(t, err)
+
 	svc := strategycore.NewService()
 	pricesHandler := prices.New(prices.Config{})
 	handlerAny := strategyhttp.NewHandler(
@@ -1429,6 +1438,7 @@ func TestHandlerRestoreRuns(t *testing.T) {
 		strategyhttp.WithPricesHandler(pricesHandler),
 		strategyhttp.WithDORAClient(doraClientFunc{}),
 		strategyhttp.WithTradesHistoryStore(nil),
+		strategyhttp.WithEncryptionKey(encKey),
 	)
 	restorer, ok := handlerAny.(interface{ RestoreRuns(context.Context) error })
 	require.True(t, ok)
@@ -3723,4 +3733,262 @@ func TestMeanReversionImbalanceDecode(t *testing.T) {
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Contains(t, rec.Body.String(), "imbalance_threshold")
 	})
+}
+
+// TestCreateRunRequiresAPIKeyForOrderPlacingStrategies verifies that a
+// live run for a strategy with no server-default market client
+// (copytrading, twap, vwap) is rejected at creation when the caller
+// authenticated with a bearer token instead of a DORA API key. Before
+// this check such a run was accepted and its strategy left with a nil
+// market client (production SIGSEGV, CloudWatch 2026-10-09).
+func TestCreateRunRequiresAPIKeyForOrderPlacingStrategies(t *testing.T) {
+	t.Parallel()
+
+	svc := &strategyfakes.FakeService{}
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	body := map[string]any{
+		"strategy_type": "copytrading",
+		"config": map[string]any{
+			"followed_trader":         uuid.Must(uuid.NewV7()).String(),
+			"percentage_of_available": 0.5,
+			"leverage":                1.0,
+		},
+	}
+	payload, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	// Bearer-token callers carry no DORA API key.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer some-token")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "keyless live run must be rejected: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires a DORA API key")
+	assert.Equal(t, 0, svc.RunStrategyCallCount(), "no run may be started for a keyless caller")
+
+	// Every strategy type is covered — none may fall back to the
+	// server's admin DORA_API_KEY for user trading.
+	momentumBody, err := json.Marshal(map[string]any{
+		"strategy_type": "momentum",
+		"config": map[string]any{
+			"order_book_id": uuid.Must(uuid.NewV7()).String(),
+			"fast_window":   48,
+			"slow_window":   360,
+			"atr_window":    60,
+			"resolution":    "15m",
+		},
+	})
+	require.NoError(t, err)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(momentumBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer some-token")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "keyless momentum run must be rejected: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires a DORA API key",
+		"400 must come from the missing-key check, not config validation")
+
+	// The same body with an API key is accepted.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, "run with API key should be created: %s", rec.Body.String())
+}
+
+// TestHandlerRestoreRunsSkipsKeylessCopyTrading verifies that a legacy
+// running copytrading run with no stored encrypted API key is skipped
+// during startup restore instead of being relaunched with a nil market
+// client (which crashed the server on the first copied trade).
+func TestHandlerRestoreRunsSkipsKeylessCopyTrading(t *testing.T) {
+	t.Parallel()
+
+	keylessID := uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
+	store := &memoryRunStore{
+		runs: map[uuid.UUID]*strategyhttp.RunDetail{
+			keylessID: {
+				RunSummary: strategyhttp.RunSummary{
+					ID:           keylessID,
+					DORAUserID:   "test-user",
+					StrategyType: "copytrading",
+					Status:       "running",
+					CreatedAt:    now,
+					UpdatedAt:    now,
+				},
+				Config: json.RawMessage(`{"followed_trader":"` + uuid.Must(uuid.NewV7()).String() + `","percentage_of_available":0.5,"leverage":1}`),
+			},
+		},
+	}
+
+	svc := strategycore.NewService()
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithRunStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+		strategyhttp.WithTradeStream(streams.NewTradeStream()),
+	)
+	restorer, ok := handler.(interface{ RestoreRuns(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreRuns(context.Background()), "keyless run must be skipped, not fail the restore")
+	require.False(t, svc.IsRunActive(keylessID), "keyless run must not be (re)started")
+
+	// The skipped run must not linger as "running": it is reported
+	// failed (persisted and in memory) so it cannot block new runs for
+	// its order book or be mistaken for an active strategy.
+	require.Equal(t, "failed", store.runs[keylessID].Status,
+		"keyless run must be persisted as failed")
+	assert.Contains(t, store.runs[keylessID].Error, "no stored DORA API key")
+}
+
+// keylessRunStore returns a store holding one copytrading run with no
+// stored API key, in the given status.
+func keylessRunStore(t *testing.T, status string) (*memoryRunStore, uuid.UUID) {
+	t.Helper()
+	runID := uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
+	return &memoryRunStore{
+		runs: map[uuid.UUID]*strategyhttp.RunDetail{
+			runID: {
+				RunSummary: strategyhttp.RunSummary{
+					ID:           runID,
+					DORAUserID:   "test-user",
+					StrategyType: "copytrading",
+					Status:       status,
+					CreatedAt:    now,
+					UpdatedAt:    now,
+				},
+				Config: json.RawMessage(`{"followed_trader":"` + uuid.Must(uuid.NewV7()).String() + `","percentage_of_available":0.5,"leverage":1}`),
+			},
+		},
+	}, runID
+}
+
+// TestResumeRunRejectsKeylessRunWithoutAPIKey verifies that resuming a
+// keyless run without an API key (bearer-token caller) is rejected with
+// 409 and the run is transitioned to failed, not flipped to running.
+func TestResumeRunRejectsKeylessRunWithoutAPIKey(t *testing.T) {
+	t.Parallel()
+
+	store, runID := keylessRunStore(t, "paused")
+	handler := strategyhttp.NewHandler(
+		strategycore.NewService(),
+		strategyhttp.WithRunStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+	// Load the persisted runs into the handler's memory (paused runs
+	// are loaded but not relaunched).
+	restorer, ok := handler.(interface{ RestoreRuns(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreRuns(context.Background()))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/resume", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+	req.Header.Set("tenant-id", "tenant-A")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusConflict, rec.Code, "keyless bearer resume must be rejected: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "no usable stored DORA API key")
+	require.Equal(t, "failed", store.runs[runID].Status,
+		"keyless run must be transitioned to failed, not back to running")
+}
+
+// TestResumeRunReplacesMissingAPIKey verifies the revival path: a run
+// that failed for lack of a stored key is resumed by an API-key caller
+// and their current key is persisted so the run survives restart.
+func TestResumeRunReplacesMissingAPIKey(t *testing.T) {
+	t.Parallel()
+
+	store, runID := keylessRunStore(t, "paused")
+	encKey := make([]byte, 32)
+	_, err := rand.Read(encKey)
+	require.NoError(t, err)
+
+	svc := strategycore.NewService()
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithRunStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+		strategyhttp.WithTradeStream(streams.NewTradeStream()),
+		strategyhttp.WithEncryptionKey(encKey),
+	)
+	restorer, ok := handler.(interface{ RestoreRuns(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreRuns(context.Background()))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/resume", nil)
+	req.Header.Set("Authorization", "ApiKey fresh-key")
+	req.Header.Set("tenant-id", "tenant-A")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "resume with API key must revive the run: %s", rec.Body.String())
+
+	require.Equal(t, "running", store.runs[runID].Status)
+	require.NotEmpty(t, store.runs[runID].EncryptedAPIKey, "caller key must be persisted for restart recovery")
+	decrypted, err := secrets.Decrypt(store.runs[runID].EncryptedAPIKey, encKey)
+	require.NoError(t, err)
+	assert.Equal(t, "fresh-key", string(decrypted))
+	require.True(t, svc.IsRunActive(runID), "revived run must be active")
+}
+
+// TestResumeRunReplacesStaleAPIKey verifies that a stored key which no
+// longer decrypts (e.g. rotated server encryption key) is replaced the
+// same way, and that a bearer-token resume of such a run is a 409.
+func TestResumeRunReplacesStaleAPIKey(t *testing.T) {
+	t.Parallel()
+
+	store, runID := keylessRunStore(t, "running")
+	encKey := make([]byte, 32)
+	_, err := rand.Read(encKey)
+	require.NoError(t, err)
+	otherKey := make([]byte, 32)
+	_, err = rand.Read(otherKey)
+	require.NoError(t, err)
+	store.runs[runID].EncryptedAPIKey, err = secrets.Encrypt([]byte("old-key"), otherKey)
+	require.NoError(t, err)
+
+	handler := strategyhttp.NewHandler(
+		strategycore.NewService(),
+		strategyhttp.WithRunStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+		strategyhttp.WithTradeStream(streams.NewTradeStream()),
+		strategyhttp.WithEncryptionKey(encKey),
+	)
+	restorer, ok := handler.(interface{ RestoreRuns(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreRuns(context.Background()),
+		"stale-key run must be marked failed without aborting restore")
+	require.Equal(t, "failed", store.runs[runID].Status,
+		"startup marks stale-key run failed instead of aborting")
+
+	// Bearer resume: no replacement key available.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/resume", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+	req.Header.Set("tenant-id", "tenant-A")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusConflict, rec.Code, "stale-key bearer resume must be rejected: %s", rec.Body.String())
+
+	// API-key resume: the caller's key replaces the stale blob.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs/"+runID.String()+"/resume", nil)
+	req.Header.Set("Authorization", "ApiKey fresh-key")
+	req.Header.Set("tenant-id", "tenant-A")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "resume with API key must replace the stale key: %s", rec.Body.String())
+	require.Equal(t, "running", store.runs[runID].Status)
+	decrypted, err := secrets.Decrypt(store.runs[runID].EncryptedAPIKey, encKey)
+	require.NoError(t, err)
+	assert.Equal(t, "fresh-key", string(decrypted))
 }

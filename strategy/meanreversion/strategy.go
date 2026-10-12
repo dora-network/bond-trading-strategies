@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -209,7 +208,6 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		cfg:              cfg,
 		window:           window.NewRollingWindow(cfg.LookbackWindow),
 		pricesHandler:    pricesHandler,
-		marketAPIClient:  strategy.NewDoraClientWithKey(os.Getenv("DORA_API_KEY")),
 		errs:             make([]error, 0),
 		collateralWeight: decimal.One,
 	}
@@ -272,15 +270,21 @@ func WithTradeHistoryStore(store trades.TradeStore) func(*Strategy) {
 	}
 }
 
-// WithMarketAPIClient sets the market API client on a mean-reversion Strategy.
-// Use this to inject a client that authenticates with a specific API key
-// (e.g. the user's own key decrypted from storage) instead of the default
-// client that reads DORA_API_KEY from the environment.
+// WithMarketAPIClient sets the market API client on a mean-reversion
+// Strategy. Required when Run() is called: live orders are placed to the
+// authenticated user's account, so the client must carry the user's API
+// key. There is deliberately no server-key fallback.
 func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 	return func(s *Strategy) {
 		s.marketAPIClient = client
 	}
 }
+
+// HasMarketAPIClient reports whether a market API client is wired. The
+// HTTP handler uses this to reject live runs that would otherwise have
+// no client to place orders with (caller authenticated without a DORA
+// API key).
+func (s *Strategy) HasMarketAPIClient() bool { return s.marketAPIClient != nil }
 
 // WithBacktestWriter sets the destination for per-trade rows the
 // backtester emits during a backtest. If unset, trade rows are not
@@ -365,6 +369,10 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 		s.mu.Unlock()
 		return fmt.Errorf("strategy is already running")
 	}
+	if s.marketAPIClient == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("mean_reversion: market API client not configured: use WithMarketAPIClient")
+	}
 	var runCtx context.Context
 	runCtx, s.cancel = context.WithCancel(ctx)
 
@@ -381,6 +389,9 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 }
 
 func (s *Strategy) subscribePrices() (<-chan map[uuid.UUID]prices.AssetPrice, error) {
+	if s.pricesHandler == nil {
+		return nil, errors.New("mean_reversion: prices handler is not configured")
+	}
 	s.pricesReqID = uuid.Must(uuid.NewV7())
 	pricesCh, err := s.pricesHandler.Subscribe(s.pricesReqID)
 	if err != nil {

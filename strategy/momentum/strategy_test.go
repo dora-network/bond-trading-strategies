@@ -1,11 +1,14 @@
 package momentum_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/dora-network/bond-trading-strategies/candles"
+	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/momentum"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/require"
 )
@@ -367,4 +370,14 @@ func TestShouldExit_Hold_NoExit_Short(t *testing.T) {
 	d := momentum.NewExitDecision(types.SignalSell, decimal.MustNew(100, 0))
 	exit, _ := s.ShouldExit(types.SignalSell, d, decimal.MustNew(100, 0), decimal.MustNew(1, 0))
 	require.False(t, exit)
+}
+
+// Regression: a run created or resumed without a user API key has no
+// market client (the constructor deliberately has no server-key
+// default — orders must go to the user's account). Run must fail fast
+// instead of nil-dereferencing in the live loop.
+func TestRunRequiresMarketAPIClient(t *testing.T) {
+	s := momentum.New(momRunConfig(uuid.Must(uuid.NewV7())), nil)
+	err := s.Run(context.Background(), make(chan strategycore.Message), uuid.Must(uuid.NewV7()))
+	require.ErrorContains(t, err, "market API client not configured")
 }
