@@ -164,7 +164,7 @@ func runResume(
 		EncryptedAPIKey: encryptedAPIKey,
 	}
 
-	require.NoError(t, h.resumePersistedRun(context.Background(), detail))
+	require.NoError(t, h.resumePersistedRun(context.Background(), detail, ""))
 	require.NotNil(t, captured, "strategy must have been captured from RunStrategyCalls")
 	return captured, store, runID
 }
@@ -301,7 +301,7 @@ func TestResumePersistedRun_MomentumWiresAPIKeyAndDecisionSeq(t *testing.T) {
 		EncryptedAPIKey: encryptForTest(t, encKey, []byte("test-api-key")),
 	}
 
-	require.NoError(t, h.resumePersistedRun(context.Background(), detail))
+	require.NoError(t, h.resumePersistedRun(context.Background(), detail, ""))
 	require.NotNil(t, captured, "strategy must have been captured from RunStrategyCalls")
 
 	s, ok := captured.(*momentum.Strategy)
