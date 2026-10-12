@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dora-network/bond-trading-strategies/docs/openapi"
 	"github.com/dora-network/bond-trading-strategies/notifications"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -39,10 +40,49 @@ func TestEventType_Values(t *testing.T) {
 		notifications.EventRunPaused,
 		notifications.EventRunResumed,
 		notifications.EventRunStopped,
+		notifications.EventRunCompleted,
+		notifications.EventRunFailed,
 		notifications.EventRunStopLoss,
 		notifications.EventOrderUpdate,
 	}
-	assert.Len(t, cases, 9)
+	assert.Len(t, cases, 11)
+}
+
+// TestEventType_OpenAPIEnum asserts every EventType constant the server
+// can emit is listed in the published OpenAPI enum, so generated
+// clients never reject a real event (and the contract never drifts
+// from the implementation).
+func TestEventType_OpenAPIEnum(t *testing.T) {
+	var spec struct {
+		Components struct {
+			Schemas map[string]struct {
+				Enum []string `json:"enum"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	require.NoError(t, json.Unmarshal(openapi.Spec, &spec))
+	eventTypeSchema, ok := spec.Components.Schemas["EventType"]
+	require.True(t, ok, "docs/openapi/strategy-server.json must define the EventType schema")
+	published := make(map[string]bool, len(eventTypeSchema.Enum))
+	for _, v := range eventTypeSchema.Enum {
+		published[v] = true
+	}
+	for _, et := range []notifications.EventType{
+		notifications.EventBacktestStarted,
+		notifications.EventBacktestCompleted,
+		notifications.EventBacktestFailed,
+		notifications.EventRunStarted,
+		notifications.EventRunPaused,
+		notifications.EventRunResumed,
+		notifications.EventRunStopped,
+		notifications.EventRunCompleted,
+		notifications.EventRunFailed,
+		notifications.EventRunStopLoss,
+		notifications.EventOrderUpdate,
+	} {
+		assert.True(t, published[string(et)],
+			"EventType %q is emitted by the server but missing from docs/openapi/strategy-server.json", et)
+	}
 }
 
 type captureLog struct {

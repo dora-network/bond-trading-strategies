@@ -999,6 +999,7 @@ func (h *Handler) injectCandleStores(strat strategycore.Strategy) {
 	}
 }
 
+//nolint:funlen // auth + API-key guard, coverage preflight, persistence, and event publishing in one endpoint
 func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	var req CreateBacktestRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -1036,6 +1037,20 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		apiKey = info.APIKey
 	}
 	h.applyUserAPIKey(strat, apiKey)
+	// mean_reversion, momentum, and breakout resolve the order book's
+	// asset ID via the DORA API inside Backtest. Backtests always run
+	// with the caller's key — the server's admin DORA_API_KEY is
+	// reserved for shared market-data subscriptions — so a caller
+	// without a DORA API key (bearer token) is rejected synchronously
+	// instead of being accepted and failing asynchronously on a nil
+	// client.
+	if backtestResolvesAssetIDs(strat) && !canPlaceOrders(strat) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"strategy type %s resolves asset IDs via the DORA API during backtests and requires a DORA API key (Authorization: ApiKey <key>)",
+			def.Type,
+		))
+		return
+	}
 	h.injectCandleStores(strat)
 
 	// Synchronous data-coverage preflight so a bad window fails fast with
@@ -2714,6 +2729,19 @@ func requireMarketClient(strat strategycore.Strategy, strategyType string) error
 		return nil
 	}
 	return fmt.Errorf("strategy type %s places live orders and requires a DORA API key (Authorization: ApiKey <key>)", strategyType)
+}
+
+// backtestResolvesAssetIDs reports whether the strategy's Backtest
+// resolves the order book's asset ID through the DORA API. Such
+// backtests need the caller's DORA API key; createBacktest rejects
+// keyless callers synchronously — the server's admin key is never
+// used for backtests.
+func backtestResolvesAssetIDs(strat strategycore.Strategy) bool {
+	switch strat.(type) {
+	case *meanreversion.Strategy, *momentum.Strategy, *breakout.Strategy:
+		return true
+	}
+	return false
 }
 
 // attachStateStore wires the handler's configured StateStore into a
