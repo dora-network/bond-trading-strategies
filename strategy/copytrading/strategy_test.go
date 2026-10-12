@@ -52,6 +52,15 @@ func TestDisallowedSet(t *testing.T) {
 	require.NotContains(t, s.disallowedSet, bond2)
 }
 
+// Regression: a run resumed without a user API key has no market API
+// client. Run must fail fast instead of nil-dereferencing on the first
+// trade event (production SIGSEGV, CloudWatch 2026-10-09).
+func TestRunRequiresMarketAPIClient(t *testing.T) {
+	s := New(Config{FollowedTrader: uuid.New()}, WithTradeStream(streams.NewTradeStream()))
+	err := s.run(context.Background(), make(chan strategy.Message))
+	require.ErrorContains(t, err, "market API client not configured")
+}
+
 func TestCalculateOrderSize(t *testing.T) {
 	tests := []struct {
 		name         string

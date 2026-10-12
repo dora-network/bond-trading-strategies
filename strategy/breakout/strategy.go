@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"time"
 
@@ -213,11 +212,10 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		cfg.Leverage = decimal.One
 	}
 	s := &Strategy{
-		cfg:             cfg,
-		shortVolWin:     window.NewRollingWindow(cfg.ShortVolWindow),
-		longVolWin:      window.NewRollingWindow(cfg.LongVolWindow),
-		atrWin:          window.NewRollingWindow(cfg.ATRWindow),
-		marketAPIClient: strategy.NewDoraClientWithKey(os.Getenv("DORA_API_KEY")),
+		cfg:         cfg,
+		shortVolWin: window.NewRollingWindow(cfg.ShortVolWindow),
+		longVolWin:  window.NewRollingWindow(cfg.LongVolWindow),
+		atrWin:      window.NewRollingWindow(cfg.ATRWindow),
 	}
 	// Initialize the OBV ring buffer when windowed mode is requested.
 	// A nil obvWindow means cumulative OBV (price-comparison). A
@@ -244,9 +242,18 @@ func WithDecisionStore(store strategy.DecisionRecorder) func(*Strategy) {
 
 // WithMarketAPIClient injects the DORA client used for live trading.
 // Required when Run() is called; the strategy will fail to start without it.
+// Live orders are placed to the authenticated user's account, so the
+// client must carry the user's API key; there is deliberately no
+// server-key fallback.
 func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 	return func(s *Strategy) { s.marketAPIClient = client }
 }
+
+// HasMarketAPIClient reports whether a market API client is wired. The
+// HTTP handler uses this to reject live runs that would otherwise have
+// no client to place orders with (caller authenticated without a DORA
+// API key).
+func (s *Strategy) HasMarketAPIClient() bool { return s.marketAPIClient != nil }
 
 // WithCandleFeed sets the bar source used by the live run loop. Required
 // for Run: the loop fails fast when no feed is configured.

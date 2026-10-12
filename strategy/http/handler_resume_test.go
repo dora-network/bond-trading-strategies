@@ -164,7 +164,7 @@ func runResume(
 		EncryptedAPIKey: encryptedAPIKey,
 	}
 
-	require.NoError(t, h.resumePersistedRun(context.Background(), detail))
+	require.NoError(t, h.resumePersistedRun(context.Background(), detail, ""))
 	require.NotNil(t, captured, "strategy must have been captured from RunStrategyCalls")
 	return captured, store, runID
 }
@@ -247,16 +247,12 @@ func TestResumePersistedRun_WiresAllThreeFindings(t *testing.T) {
 }
 
 // TestResumePersistedRun_MomentumWiresAPIKeyAndDecisionSeq pins the
-// the per-user market client (momentum.New always wires a server
-// DORA_API_KEY client, so a missing arm silently authenticates as
-// the wrong user on the resumed run rather than nil-panicking)
 // momentum arms of resumePersistedRun: applyUserAPIKey must wire the
-// per-user market client (momentum's construction closure wires none,
-// so a missing arm leaves a nil client that panics on the first
-// asset lookup) and the SetDecisionSeq switch must seed the counter
-// from MaxSeq so post-restart decisions don't collide on
-// strategy_decisions. Momentum has no StateStore arm by design
-// (no checkpointed execution state).
+// per-user market client (momentum.New wires no default client — a
+// missing arm leaves nil and Run fails fast) and the SetDecisionSeq
+// switch must seed the counter from MaxSeq so post-restart decisions
+// don't collide on strategy_decisions. Momentum has no StateStore arm
+// by design (no checkpointed execution state).
 func TestResumePersistedRun_MomentumWiresAPIKeyAndDecisionSeq(t *testing.T) {
 	t.Parallel()
 
@@ -305,14 +301,16 @@ func TestResumePersistedRun_MomentumWiresAPIKeyAndDecisionSeq(t *testing.T) {
 		EncryptedAPIKey: encryptForTest(t, encKey, []byte("test-api-key")),
 	}
 
-	require.NoError(t, h.resumePersistedRun(context.Background(), detail))
+	require.NoError(t, h.resumePersistedRun(context.Background(), detail, ""))
 	require.NotNil(t, captured, "strategy must have been captured from RunStrategyCalls")
 
 	s, ok := captured.(*momentum.Strategy)
 	require.True(t, ok, "unexpected resumed strategy type %T", captured)
-	// The applyUserAPIKey arm cannot be observed from here: momentum.New
-	// defaults marketAPIClient to the server DORA_API_KEY client, so a
-	// non-nil check is vacuous. The seq seed is the observable arm.
+	// With the server-key default removed, the applyUserAPIKey arm is
+	// observable: the resumed strategy must carry a client wired from
+	// the decrypted per-user key, not nil.
+	require.True(t, s.HasMarketAPIClient(),
+		"resumed momentum run must have a per-user market client")
 	require.Equal(t, maxSeq, s.DecisionSeqForTest(),
 		"decision seq must be seeded past MaxSeq by resumePersistedRun's SetDecisionSeq switch")
 }

@@ -999,6 +999,7 @@ func (h *Handler) injectCandleStores(strat strategycore.Strategy) {
 	}
 }
 
+//nolint:funlen // auth + API-key guard, coverage preflight, persistence, and event publishing in one endpoint
 func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	var req CreateBacktestRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -1036,6 +1037,20 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 		apiKey = info.APIKey
 	}
 	h.applyUserAPIKey(strat, apiKey)
+	// mean_reversion, momentum, and breakout resolve the order book's
+	// asset ID via the DORA API inside Backtest. Backtests always run
+	// with the caller's key — the server's admin DORA_API_KEY is
+	// reserved for shared market-data subscriptions — so a caller
+	// without a DORA API key (bearer token) is rejected synchronously
+	// instead of being accepted and failing asynchronously on a nil
+	// client.
+	if backtestResolvesAssetIDs(strat) && !canPlaceOrders(strat) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"strategy type %s resolves asset IDs via the DORA API during backtests and requires a DORA API key (Authorization: ApiKey <key>)",
+			def.Type,
+		))
+		return
+	}
 	h.injectCandleStores(strat)
 
 	// Synchronous data-coverage preflight so a bad window fails fast with
@@ -1675,6 +1690,14 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	}
 	h.applyUserAPIKey(strat, apiKey)
 
+	// A live run places real orders; reject strategy types that would
+	// have no market client (see requireMarketClient) instead of
+	// accepting a run that fails on its first order.
+	if err := requireMarketClient(strat, def.Type); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Attach the per-run decision recorder so every successful live
 	// market order is written to strategy_decisions. nil disables
 	// recording; the helper is a no-op for unknown strategy types.
@@ -1884,6 +1907,19 @@ func (h *Handler) pauseRun(w http.ResponseWriter, ctx context.Context, id uuid.U
 	h.getRun(w, ctx, id)
 }
 
+// writeResumeError maps resume failures to responses: a run with no
+// usable stored key has already been transitioned to failed, so the
+// caller gets a 409 that names the fix (resume with an API key to
+// replace it) instead of a zombie 200.
+func writeResumeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errRunUnusableAPIKey) {
+		writeError(w, http.StatusConflict,
+			"run has no usable stored DORA API key; resume with a valid DORA API key (Authorization: ApiKey <key>) to replace it")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, fmt.Sprintf("resume run: %v", err))
+}
+
 func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.UUID) {
 	detail, ok := h.runDetail(id)
 	if !ok {
@@ -1903,21 +1939,30 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 		writeError(w, http.StatusConflict, "run is stopped")
 		return
 	}
+	// The caller's current API key: when the run has to be rebuilt
+	// from persistence (not active in memory), it replaces a missing
+	// or stale stored key so the run — and its restart recovery —
+	// trade with the caller's current credentials.
+	info, _ := authctx.AuthInfoFromContext(ctx)
+	var callerAPIKey string
+	if info != nil {
+		callerAPIKey = info.APIKey
+	}
 	if detail.Status == "paused" {
 		if err := h.service.ResumeStrategy(ctx, id); err != nil {
 			if !errors.Is(err, strategycore.ErrRunIDNotFound) {
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf("resume run: %v", err))
 				return
 			}
-			if err := h.resumePersistedRun(ctx, detail); err != nil {
-				writeError(w, http.StatusInternalServerError, fmt.Sprintf("resume run: %v", err))
+			if err := h.resumePersistedRun(ctx, detail, callerAPIKey); err != nil {
+				writeResumeError(w, err)
 				return
 			}
 		}
 	} else if err := h.service.ResumeStrategy(ctx, id); err != nil {
 		if errors.Is(err, strategycore.ErrRunIDNotFound) {
-			if err := h.resumePersistedRun(ctx, detail); err != nil {
-				writeError(w, http.StatusInternalServerError, fmt.Sprintf("resume run: %v", err))
+			if err := h.resumePersistedRun(ctx, detail, callerAPIKey); err != nil {
+				writeResumeError(w, err)
 				return
 			}
 		} else {
@@ -1988,7 +2033,12 @@ func (h *Handler) RestoreRuns(ctx context.Context) error {
 			"strategy_type", detail.StrategyType,
 			"config", detail.Config,
 		)
-		if err := h.resumePersistedRun(ctx, detail); err != nil {
+		if err := h.resumePersistedRun(ctx, detail, ""); err != nil {
+			// Runs with no usable API key are already marked failed;
+			// keep restoring the rest.
+			if errors.Is(err, errRunUnusableAPIKey) {
+				continue
+			}
 			return fmt.Errorf("restore run %s: %w", detail.ID, err)
 		}
 	}
@@ -2013,24 +2063,61 @@ func (h *Handler) RestoreBacktests(ctx context.Context) error {
 	return nil
 }
 
-func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) error {
+// resumePersistedRun relaunches a persisted run. callerAPIKey is the
+// authenticated caller's current DORA API key on the manual resume
+// path, empty on startup restore. When set it replaces the stored key
+// (missing or stale): orders go to the caller's account, so the run
+// keeps trading with their current key after the next restart.
+func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail, callerAPIKey string) error {
 	_, normalised, strat, _, err := h.resolveStrategy(detail.StrategyType, detail.Config, capabilityRun, nil)
 	if err != nil {
 		return err
 	}
 	_ = normalised
 
-	// Decrypt the stored API key and inject it into the strategy so it can
-	// authenticate with DORA. Without this, a resumed run would fall back to
-	// the server's DORA_API_KEY env var, which may belong to a different user.
+	// Resolve the key the run trades with. No strategy falls back to
+	// the server's DORA_API_KEY: live orders go to the user's account.
 	var apiKeyDecrypted []byte
-	if len(detail.EncryptedAPIKey) > 0 && len(h.encryptionKey) > 0 {
+	switch {
+	case callerAPIKey != "":
+		if len(h.encryptionKey) > 0 {
+			encrypted, err2 := secrets.Encrypt([]byte(callerAPIKey), h.encryptionKey)
+			if err2 != nil {
+				return fmt.Errorf("encrypt api key for run %s: %w", detail.ID, err2)
+			}
+			h.mu.Lock()
+			detail.EncryptedAPIKey = encrypted // detail is the h.runs entry
+			h.mu.Unlock()
+		} else {
+			h.log.Warn("no encryption key configured; caller API key not persisted for restart",
+				"run_id", detail.ID)
+		}
+		apiKeyDecrypted = []byte(callerAPIKey)
+	case len(detail.EncryptedAPIKey) > 0 && len(h.encryptionKey) > 0:
 		var err2 error
 		apiKeyDecrypted, err2 = secrets.Decrypt(detail.EncryptedAPIKey, h.encryptionKey)
 		if err2 != nil {
-			return fmt.Errorf("decrypt api key for run %s: %w", detail.ID, err2)
+			// Stale blob (e.g. rotated server encryption key) with no
+			// caller key to replace it. Mark failed — a manual resume
+			// with a valid API key can still revive the run.
+			h.failUnusableAPIKeyRun(ctx, detail,
+				"stored DORA API key cannot be decrypted; resume with a valid API key to replace it")
+			return errRunUnusableAPIKey
 		}
+	}
+	if len(apiKeyDecrypted) > 0 {
 		h.applyUserAPIKey(strat, string(apiKeyDecrypted))
+	}
+
+	// A run restored without a usable API key cannot trade — no
+	// strategy falls back to the server key. Transition it to failed
+	// (in memory and persisted) so it is not reported active and does
+	// not block new runs for its order book, then report the distinct
+	// outcome to the caller.
+	if !canPlaceOrders(strat) {
+		h.failUnusableAPIKeyRun(ctx, detail,
+			"run has no stored DORA API key; resume with a valid API key to replace it")
+		return errRunUnusableAPIKey
 	}
 
 	// Attach the per-run decision recorder. nil disables recording.
@@ -2417,6 +2504,47 @@ func (h *Handler) runWindowExpired(detail *RunDetail) bool {
 	return h.now().UTC().After(cfg.EndTime)
 }
 
+// errRunUnusableAPIKey reports that a persisted run has no usable
+// stored DORA API key (none stored, or the blob no longer decrypts
+// against the server's encryption key). RestoreRuns tolerates it (the
+// run is marked failed and restore continues); the manual resume
+// endpoint maps it to 409 — resuming with a valid API key replaces
+// the stored key and revives the run.
+var errRunUnusableAPIKey = errors.New("run has no usable stored DORA API key")
+
+// failUnusableAPIKeyRun transitions a run whose stored DORA API key is
+// missing or undecryptable to failed: no strategy may fall back to the
+// server key. Mirrors expireRun — in-memory and persisted status move
+// together and subscribers get an event — so the run is no longer
+// reported active and does not block new runs for its order book. The
+// failure is not terminal: a manual resume authenticated with a valid
+// API key replaces the stored key and revives the run.
+func (h *Handler) failUnusableAPIKeyRun(ctx context.Context, detail *RunDetail, reason string) {
+	h.log.Error("run cannot run: no usable DORA API key",
+		"run_id", detail.ID, "strategy_type", detail.StrategyType, "reason", reason)
+	now := h.now().UTC()
+	runIDStr := detail.ID.String()
+	userID := detail.DORAUserID
+	h.mu.Lock()
+	if d, ok := h.runs[detail.ID]; ok {
+		d.Status = "failed"
+		d.Error = reason
+		d.UpdatedAt = now
+		d.StoppedAt = &now
+		if err := h.saveRun(ctx, d); err != nil {
+			slog.Error("save run with unusable api key", "err", err, "run_id", runIDStr)
+		}
+	}
+	h.mu.Unlock()
+	h.publishEvent(ctx, notifications.Event{
+		Type:      notifications.EventRunFailed,
+		UserID:    userID,
+		RunID:     runIDStr,
+		Timestamp: now,
+		Payload:   map[string]any{"error": reason},
+	})
+}
+
 // expireRun marks the run as completed in the DB and publishes
 // EventRunCompleted. Called by RestoreRuns when a run with status
 // "running" is found past its end_time — we don't want to relaunch
@@ -2567,6 +2695,53 @@ func (h *Handler) applyUserAPIKey(strat strategycore.Strategy, apiKey string) {
 	case *vwap.Strategy:
 		vwap.WithMarketAPIClient(client)(s)
 	}
+}
+
+// canPlaceOrders reports whether a freshly-built live strategy has a
+// market API client to place orders with. No strategy defaults to the
+// server's DORA_API_KEY client: live orders are placed to the
+// authenticated user's account, so every strategy needs the caller's
+// key via applyUserAPIKey. Unknown strategy types fail closed — a new
+// type must grow a HasMarketAPIClient arm before it may run live.
+func canPlaceOrders(strat strategycore.Strategy) bool {
+	switch s := strat.(type) {
+	case *copytrading.Strategy:
+		return s.HasMarketAPIClient()
+	case *twap.Strategy:
+		return s.HasMarketAPIClient()
+	case *vwap.Strategy:
+		return s.HasMarketAPIClient()
+	case *meanreversion.Strategy:
+		return s.HasMarketAPIClient()
+	case *momentum.Strategy:
+		return s.HasMarketAPIClient()
+	case *breakout.Strategy:
+		return s.HasMarketAPIClient()
+	}
+	return false
+}
+
+// requireMarketClient returns an error when a live-run strategy has no
+// market API client to place orders with — the caller authenticated
+// without a DORA API key (see canPlaceOrders).
+func requireMarketClient(strat strategycore.Strategy, strategyType string) error {
+	if canPlaceOrders(strat) {
+		return nil
+	}
+	return fmt.Errorf("strategy type %s places live orders and requires a DORA API key (Authorization: ApiKey <key>)", strategyType)
+}
+
+// backtestResolvesAssetIDs reports whether the strategy's Backtest
+// resolves the order book's asset ID through the DORA API. Such
+// backtests need the caller's DORA API key; createBacktest rejects
+// keyless callers synchronously — the server's admin key is never
+// used for backtests.
+func backtestResolvesAssetIDs(strat strategycore.Strategy) bool {
+	switch strat.(type) {
+	case *meanreversion.Strategy, *momentum.Strategy, *breakout.Strategy:
+		return true
+	}
+	return false
 }
 
 // attachStateStore wires the handler's configured StateStore into a

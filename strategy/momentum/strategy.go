@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -99,9 +98,9 @@ type Strategy struct {
 }
 
 // New creates a Strategy with the given Config, prices handler, and
-// optional options. The market API client is initialised from the
-// DORA_API_KEY environment variable by default; callers that need a
-// per-user key should use WithMarketAPIClient.
+// optional options. Live runs require a market API client carrying the
+// user's API key (WithMarketAPIClient); there is deliberately no
+// server-key fallback.
 func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *Strategy {
 	if cfg.Leverage.IsZero() {
 		cfg.Leverage = decimal.One
@@ -114,7 +113,6 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		sourceSign:       sourceSign(cfg.SignalSource),
 		collateralWeight: decimal.One,
 		pricesHandler:    pricesHandler,
-		marketAPIClient:  strategy.NewDoraClientWithKey(os.Getenv("DORA_API_KEY")),
 		errs:             make([]error, 0),
 	}
 	if cfg.VolumeAvgWindow > 0 {
@@ -160,12 +158,19 @@ func WithPriceHistoryStore(store priceHistorySource) func(*Strategy) {
 	}
 }
 
-// WithMarketAPIClient sets the market API client on a momentum Strategy.
-// Use this to inject a client that authenticates with a specific API
-// key instead of the default client that reads DORA_API_KEY.
+// WithMarketAPIClient sets the market API client on a momentum
+// Strategy. Required when Run() is called: live orders are placed to
+// the authenticated user's account, so the client must carry the
+// user's API key. There is deliberately no server-key fallback.
 func WithMarketAPIClient(c strategy.MarketAPIClient) func(*Strategy) {
 	return func(s *Strategy) { s.marketAPIClient = c }
 }
+
+// HasMarketAPIClient reports whether a market API client is wired. The
+// HTTP handler uses this to reject live runs that would otherwise have
+// no client to place orders with (caller authenticated without a DORA
+// API key).
+func (s *Strategy) HasMarketAPIClient() bool { return s.marketAPIClient != nil }
 
 // WithDecisionStore sets the recorder invoked after every successful
 // CreateMarketOrder in the live run loop.
@@ -537,6 +542,10 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 		s.mu.Unlock()
 		return fmt.Errorf("strategy is already running")
 	}
+	if s.marketAPIClient == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("momentum: market API client not configured: use WithMarketAPIClient")
+	}
 	var runCtx context.Context
 	runCtx, s.cancel = context.WithCancel(ctx)
 
@@ -552,6 +561,9 @@ func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID
 }
 
 func (s *Strategy) subscribePrices() (<-chan map[uuid.UUID]prices.AssetPrice, error) {
+	if s.pricesHandler == nil {
+		return nil, errors.New("momentum: prices handler is not configured")
+	}
 	s.pricesReqID = uuid.Must(uuid.NewV7())
 	pricesCh, err := s.pricesHandler.Subscribe(s.pricesReqID)
 	if err != nil {
