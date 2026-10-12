@@ -31,6 +31,7 @@ import (
 	"github.com/dora-network/bond-trading-strategies/strategy/stats"
 	"github.com/dora-network/bond-trading-strategies/strategy/strategyfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
+	"github.com/dora-network/bond-trading-strategies/streams"
 )
 
 func TestHandlerListsCopyTraders(t *testing.T) {
@@ -3723,4 +3724,111 @@ func TestMeanReversionImbalanceDecode(t *testing.T) {
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Contains(t, rec.Body.String(), "imbalance_threshold")
 	})
+}
+
+// TestCreateRunRequiresAPIKeyForOrderPlacingStrategies verifies that a
+// live run for a strategy with no server-default market client
+// (copytrading, twap, vwap) is rejected at creation when the caller
+// authenticated with a bearer token instead of a DORA API key. Before
+// this check such a run was accepted and its strategy left with a nil
+// market client (production SIGSEGV, CloudWatch 2026-10-09).
+func TestCreateRunRequiresAPIKeyForOrderPlacingStrategies(t *testing.T) {
+	t.Parallel()
+
+	svc := &strategyfakes.FakeService{}
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	body := map[string]any{
+		"strategy_type": "copytrading",
+		"config": map[string]any{
+			"followed_trader":         uuid.Must(uuid.NewV7()).String(),
+			"percentage_of_available": 0.5,
+			"leverage":                1.0,
+		},
+	}
+	payload, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	// Bearer-token callers carry no DORA API key.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer some-token")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "keyless live run must be rejected: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires a DORA API key")
+	assert.Equal(t, 0, svc.RunStrategyCallCount(), "no run may be started for a keyless caller")
+
+	// Every strategy type is covered — none may fall back to the
+	// server's admin DORA_API_KEY for user trading.
+	momentumBody, err := json.Marshal(map[string]any{
+		"strategy_type": "momentum",
+		"config": map[string]any{
+			"order_book_id": uuid.Must(uuid.NewV7()).String(),
+			"fast_window":   48,
+			"slow_window":   360,
+			"atr_window":    60,
+			"resolution":    "15m",
+		},
+	})
+	require.NoError(t, err)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(momentumBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer some-token")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "keyless momentum run must be rejected: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires a DORA API key",
+		"400 must come from the missing-key check, not config validation")
+
+	// The same body with an API key is accepted.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, "run with API key should be created: %s", rec.Body.String())
+}
+
+// TestHandlerRestoreRunsSkipsKeylessCopyTrading verifies that a legacy
+// running copytrading run with no stored encrypted API key is skipped
+// during startup restore instead of being relaunched with a nil market
+// client (which crashed the server on the first copied trade).
+func TestHandlerRestoreRunsSkipsKeylessCopyTrading(t *testing.T) {
+	t.Parallel()
+
+	keylessID := uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
+	store := &memoryRunStore{
+		runs: map[uuid.UUID]*strategyhttp.RunDetail{
+			keylessID: {
+				RunSummary: strategyhttp.RunSummary{
+					ID:           keylessID,
+					DORAUserID:   "test-user",
+					StrategyType: "copytrading",
+					Status:       "running",
+					CreatedAt:    now,
+					UpdatedAt:    now,
+				},
+				Config: json.RawMessage(`{"followed_trader":"` + uuid.Must(uuid.NewV7()).String() + `","percentage_of_available":0.5,"leverage":1}`),
+			},
+		},
+	}
+
+	svc := strategycore.NewService()
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithRunStore(store),
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+		strategyhttp.WithTradeStream(streams.NewTradeStream()),
+	)
+	restorer, ok := handler.(interface{ RestoreRuns(context.Context) error })
+	require.True(t, ok)
+	require.NoError(t, restorer.RestoreRuns(context.Background()), "keyless run must be skipped, not fail the restore")
+	require.False(t, svc.IsRunActive(keylessID), "keyless run must not be (re)started")
 }

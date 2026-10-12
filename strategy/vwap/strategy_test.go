@@ -8,9 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/govalues/decimal"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/exec"
 )
 
@@ -272,4 +274,13 @@ func TestProcessOrderUpdate_UnknownClientOrderID(t *testing.T) {
 	})
 	require.Equal(t, "0", s.state.TotalFilled.String())
 	require.Empty(t, s.state.Orders)
+}
+
+// Regression: a run created or resumed without a user API key has no
+// market client. Run must fail fast instead of nil-dereferencing in
+// Executor.PlaceOrder on the first order bucket (process-killing panic).
+func TestRunRequiresMarketAPIClient(t *testing.T) {
+	s := New(Config{OrderBookID: "01900000-0000-0000-0000-000000000001", BucketMinutes: 5}, silentLogger())
+	err := s.Run(context.Background(), make(chan strategy.Message), uuid.Must(uuid.NewV7()))
+	require.ErrorContains(t, err, "market API client not configured")
 }

@@ -2,6 +2,7 @@ package twap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -53,6 +54,12 @@ func WithMarketAPIClient(client strategy.MarketAPIClient) func(*Strategy) {
 	return func(s *Strategy) { s.exec.Market = client }
 }
 
+// HasMarketAPIClient reports whether a market API client is wired. The
+// HTTP handler uses this to reject live runs that would otherwise have
+// no client to place orders with (caller authenticated without a DORA
+// API key).
+func (s *Strategy) HasMarketAPIClient() bool { return s.exec.Market != nil }
+
 func WithDecisionStore(rec strategy.DecisionRecorder) func(*Strategy) {
 	return func(s *Strategy) { s.exec.Records = rec }
 }
@@ -84,6 +91,12 @@ func (s *Strategy) Backtest(_ context.Context, _ time.Time, _ time.Time) (types.
 
 // Run starts the TWAP strategy in the background.
 func (s *Strategy) Run(ctx context.Context, msgCh <-chan strategy.Message, runID uuid.UUID) error {
+	// A nil client means the run was created or resumed without a user
+	// API key. Fail fast: the first order bucket would nil-dereference
+	// in Executor.PlaceOrder and crash the server.
+	if s.exec.Market == nil {
+		return errors.New("twap: market API client not configured: use WithMarketAPIClient")
+	}
 	s.mu.Lock()
 	s.runID = runID
 	s.exec.RunID = runID

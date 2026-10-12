@@ -1675,6 +1675,14 @@ func (h *Handler) createRun(w http.ResponseWriter, r *http.Request) {
 	}
 	h.applyUserAPIKey(strat, apiKey)
 
+	// A live run places real orders; reject strategy types that would
+	// have no market client (see requireMarketClient) instead of
+	// accepting a run that fails on its first order.
+	if err := requireMarketClient(strat, def.Type); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Attach the per-run decision recorder so every successful live
 	// market order is written to strategy_decisions. nil disables
 	// recording; the helper is a no-op for unknown strategy types.
@@ -2020,9 +2028,11 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 	}
 	_ = normalised
 
-	// Decrypt the stored API key and inject it into the strategy so it can
-	// authenticate with DORA. Without this, a resumed run would fall back to
-	// the server's DORA_API_KEY env var, which may belong to a different user.
+	// Decrypt the stored API key and inject it into the strategy so it
+	// authenticates with DORA as the run's owner: live orders go to the
+	// user's account. No strategy falls back to the server's
+	// DORA_API_KEY; a run without a stored key cannot trade and is
+	// skipped below.
 	var apiKeyDecrypted []byte
 	if len(detail.EncryptedAPIKey) > 0 && len(h.encryptionKey) > 0 {
 		var err2 error
@@ -2031,6 +2041,16 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail) err
 			return fmt.Errorf("decrypt api key for run %s: %w", detail.ID, err2)
 		}
 		h.applyUserAPIKey(strat, string(apiKeyDecrypted))
+	}
+
+	// A run restored without a stored API key cannot trade — no
+	// strategy falls back to the server key. Skip it (with a loud log)
+	// rather than starting a run whose Run() fails immediately — along
+	// with the per-run goroutines started below — on every restart.
+	if !canPlaceOrders(strat) {
+		h.log.Error("skipping run restore: no market API client (run has no stored DORA API key)",
+			"run_id", detail.ID, "strategy_type", detail.StrategyType)
+		return nil
 	}
 
 	// Attach the per-run decision recorder. nil disables recording.
@@ -2567,6 +2587,40 @@ func (h *Handler) applyUserAPIKey(strat strategycore.Strategy, apiKey string) {
 	case *vwap.Strategy:
 		vwap.WithMarketAPIClient(client)(s)
 	}
+}
+
+// canPlaceOrders reports whether a freshly-built live strategy has a
+// market API client to place orders with. No strategy defaults to the
+// server's DORA_API_KEY client: live orders are placed to the
+// authenticated user's account, so every strategy needs the caller's
+// key via applyUserAPIKey. Unknown strategy types fail closed — a new
+// type must grow a HasMarketAPIClient arm before it may run live.
+func canPlaceOrders(strat strategycore.Strategy) bool {
+	switch s := strat.(type) {
+	case *copytrading.Strategy:
+		return s.HasMarketAPIClient()
+	case *twap.Strategy:
+		return s.HasMarketAPIClient()
+	case *vwap.Strategy:
+		return s.HasMarketAPIClient()
+	case *meanreversion.Strategy:
+		return s.HasMarketAPIClient()
+	case *momentum.Strategy:
+		return s.HasMarketAPIClient()
+	case *breakout.Strategy:
+		return s.HasMarketAPIClient()
+	}
+	return false
+}
+
+// requireMarketClient returns an error when a live-run strategy has no
+// market API client to place orders with — the caller authenticated
+// without a DORA API key (see canPlaceOrders).
+func requireMarketClient(strat strategycore.Strategy, strategyType string) error {
+	if canPlaceOrders(strat) {
+		return nil
+	}
+	return fmt.Errorf("strategy type %s places live orders and requires a DORA API key (Authorization: ApiKey <key>)", strategyType)
 }
 
 // attachStateStore wires the handler's configured StateStore into a

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dora-network/bond-trading-strategies/candles"
+	strategycore "github.com/dora-network/bond-trading-strategies/strategy"
 	"github.com/dora-network/bond-trading-strategies/strategy/meanreversion/meanreversionfakes"
 	"github.com/dora-network/bond-trading-strategies/strategy/types"
 	"github.com/dora-network/bond-trading-strategies/strategy/window"
@@ -406,4 +407,14 @@ func TestStrategyTypeExported(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "mean_reversion", meanreversion.StrategyType,
 		"StrategyType must be exported and equal to the documented value")
+}
+
+// Regression: a run created or resumed without a user API key has no
+// market client (the constructor deliberately has no server-key
+// default — orders must go to the user's account). Run must fail fast
+// instead of nil-dereferencing in the live loop.
+func TestRunRequiresMarketAPIClient(t *testing.T) {
+	s := meanreversion.New(meanreversion.Config{LookbackWindow: 20}, nil)
+	err := s.Run(context.Background(), make(chan strategycore.Message), uuid.Must(uuid.NewV7()))
+	require.ErrorContains(t, err, "market API client not configured")
 }
