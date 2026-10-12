@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -1034,6 +1035,13 @@ func (h *Handler) createBacktest(w http.ResponseWriter, r *http.Request) {
 	var apiKey string
 	if info != nil {
 		apiKey = info.APIKey
+	}
+	if apiKey == "" {
+		// Bearer-token caller: a backtest places no orders — the
+		// client only serves read-only asset-ID lookups — so fall
+		// back to the server-scoped key. Live runs stay
+		// user-key-only (see requireMarketClient).
+		apiKey = os.Getenv("DORA_API_KEY")
 	}
 	h.applyUserAPIKey(strat, apiKey)
 	h.injectCandleStores(strat)

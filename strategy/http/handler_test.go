@@ -1427,8 +1427,13 @@ func TestHandlerRestoreRuns(t *testing.T) {
 	encKey := make([]byte, 32)
 	_, err := rand.Read(encKey)
 	require.NoError(t, err)
-	store.runs[pausedID].EncryptedAPIKey, err = secrets.Encrypt([]byte("test-api-key"), encKey)
+	encrypted, err := secrets.Encrypt([]byte("test-api-key"), encKey)
 	require.NoError(t, err)
+	// Both fixtures carry a usable stored key so restore exercises the
+	// successful startup relaunch; keyless runs are covered by
+	// TestHandlerRestoreRunsSkipsKeylessCopyTrading.
+	store.runs[runningID].EncryptedAPIKey = encrypted
+	store.runs[pausedID].EncryptedAPIKey = encrypted
 
 	svc := strategycore.NewService()
 	pricesHandler := prices.New(prices.Config{})
@@ -1443,6 +1448,11 @@ func TestHandlerRestoreRuns(t *testing.T) {
 	restorer, ok := handlerAny.(interface{ RestoreRuns(context.Context) error })
 	require.True(t, ok)
 	require.NoError(t, restorer.RestoreRuns(context.Background()))
+	// The running fixture must have been relaunched with its stored
+	// key — active in the service and still "running", not transitioned
+	// to failed as a keyless run would be.
+	require.True(t, svc.IsRunActive(runningID), "keyed running run must be relaunched at startup")
+	require.Equal(t, "running", store.runs[runningID].Status)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/runs", nil)
@@ -3735,72 +3745,117 @@ func TestMeanReversionImbalanceDecode(t *testing.T) {
 	})
 }
 
-// TestCreateRunRequiresAPIKeyForOrderPlacingStrategies verifies that a
-// live run for a strategy with no server-default market client
-// (copytrading, twap, vwap) is rejected at creation when the caller
-// authenticated with a bearer token instead of a DORA API key. Before
-// this check such a run was accepted and its strategy left with a nil
+// TestCreateRunRequiresAPIKeyForOrderPlacingStrategies verifies, for
+// every strategy type, that a live run is rejected at creation when
+// the caller authenticated with a bearer token instead of a DORA API
+// key — no strategy may fall back to the server's admin DORA_API_KEY
+// for user trading — and that the same payload with an API key is
+// accepted. Before this check such runs were accepted with a nil
 // market client (production SIGSEGV, CloudWatch 2026-10-09).
 func TestCreateRunRequiresAPIKeyForOrderPlacingStrategies(t *testing.T) {
 	t.Parallel()
 
-	svc := &strategyfakes.FakeService{}
-	handler := strategyhttp.NewHandler(
-		svc,
-		strategyhttp.WithDORAClient(doraClientFunc{}),
-		strategyhttp.WithTradesHistoryStore(nil),
-	)
-
-	body := map[string]any{
-		"strategy_type": "copytrading",
-		"config": map[string]any{
-			"followed_trader":         uuid.Must(uuid.NewV7()).String(),
-			"percentage_of_available": 0.5,
-			"leverage":                1.0,
-		},
+	// validRunConfig returns a minimal config that decodes for a live
+	// run, so a non-400 answer is attributable to the API-key checks.
+	validRunConfig := func(strategyType string) map[string]any {
+		switch strategyType {
+		case "copytrading":
+			return map[string]any{
+				"followed_trader":         uuid.Must(uuid.NewV7()).String(),
+				"percentage_of_available": 0.5,
+				"leverage":                1.0,
+			}
+		case "twap":
+			return map[string]any{
+				"order_book_id":    uuid.Must(uuid.NewV7()).String(),
+				"total_amount":     1000,
+				"side":             "buy",
+				"start_time":       time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+				"end_time":         time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+				"interval_seconds": 60,
+			}
+		case "vwap":
+			return map[string]any{
+				"order_book_id":  uuid.Must(uuid.NewV7()).String(),
+				"total_amount":   1000,
+				"side":           "buy",
+				"start_time":     time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+				"end_time":       time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+				"window_days":    30,
+				"bucket_minutes": 5,
+			}
+		case "mean_reversion":
+			return map[string]any{
+				"lookback_window":   20,
+				"tenor":             "2Y",
+				"entry_z_score":     2.0,
+				"exit_z_score":      0.5,
+				"stop_loss_z_score": 3.5,
+				"min_std_dev":       0.0005,
+				"max_position_size": 1.0,
+			}
+		case "momentum":
+			return map[string]any{
+				"order_book_id": uuid.Must(uuid.NewV7()).String(),
+				"fast_window":   48,
+				"slow_window":   360,
+				"atr_window":    60,
+				"resolution":    "15m",
+			}
+		case "breakout":
+			return map[string]any{
+				"short_vol_window": 5,
+				"long_vol_window":  10,
+				"atr_window":       5,
+				"order_book_id":    uuid.Must(uuid.NewV7()).String(),
+			}
+		}
+		t.Fatalf("no valid config fixture for strategy type %q", strategyType)
+		return nil
 	}
-	payload, err := json.Marshal(body)
-	require.NoError(t, err)
 
-	// Bearer-token callers carry no DORA API key.
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(payload))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer some-token")
-	handler.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusBadRequest, rec.Code, "keyless live run must be rejected: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "requires a DORA API key")
-	assert.Equal(t, 0, svc.RunStrategyCallCount(), "no run may be started for a keyless caller")
+	for _, strategyType := range []string{
+		"copytrading", "twap", "vwap", "mean_reversion", "momentum", "breakout",
+	} {
+		t.Run(strategyType, func(t *testing.T) {
+			t.Parallel()
 
-	// Every strategy type is covered — none may fall back to the
-	// server's admin DORA_API_KEY for user trading.
-	momentumBody, err := json.Marshal(map[string]any{
-		"strategy_type": "momentum",
-		"config": map[string]any{
-			"order_book_id": uuid.Must(uuid.NewV7()).String(),
-			"fast_window":   48,
-			"slow_window":   360,
-			"atr_window":    60,
-			"resolution":    "15m",
-		},
-	})
-	require.NoError(t, err)
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(momentumBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer some-token")
-	handler.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusBadRequest, rec.Code, "keyless momentum run must be rejected: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "requires a DORA API key",
-		"400 must come from the missing-key check, not config validation")
+			svc := &strategyfakes.FakeService{}
+			handler := strategyhttp.NewHandler(
+				svc,
+				strategyhttp.WithDORAClient(doraClientFunc{}),
+				strategyhttp.WithTradesHistoryStore(nil),
+			)
 
-	// The same body with an API key is accepted.
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(payload))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "ApiKey test-key")
-	handler.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusCreated, rec.Code, "run with API key should be created: %s", rec.Body.String())
+			payload, err := json.Marshal(map[string]any{
+				"strategy_type": strategyType,
+				"config":        validRunConfig(strategyType),
+			})
+			require.NoError(t, err)
+
+			// Bearer-token callers carry no DORA API key.
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer some-token")
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusBadRequest, rec.Code,
+				"keyless live run must be rejected: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "requires a DORA API key",
+				"400 must come from the missing-key check, not config validation")
+			assert.Equal(t, 0, svc.RunStrategyCallCount(),
+				"no run may be started for a keyless caller")
+
+			// The same body with an API key is accepted.
+			rec = httptest.NewRecorder()
+			req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/runs", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "ApiKey test-key")
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusCreated, rec.Code,
+				"run with API key should be created: %s", rec.Body.String())
+		})
+	}
 }
 
 // TestHandlerRestoreRunsSkipsKeylessCopyTrading verifies that a legacy
@@ -3991,4 +4046,56 @@ func TestResumeRunReplacesStaleAPIKey(t *testing.T) {
 	decrypted, err := secrets.Decrypt(store.runs[runID].EncryptedAPIKey, encKey)
 	require.NoError(t, err)
 	assert.Equal(t, "fresh-key", string(decrypted))
+}
+
+// TestCreateBacktestBearerUsesServerClient verifies that a
+// bearer-authenticated backtest (caller carries no DORA API key) still
+// gets a market client: backtests place no orders, so the client only
+// serves read-only asset-ID lookups and may fall back to the
+// server-scoped key. Without the fallback, mean-reversion, momentum,
+// and breakout backtests were accepted and then failed asynchronously
+// on LookupAssetID with a nil client.
+func TestCreateBacktestBearerUsesServerClient(t *testing.T) {
+	t.Setenv("DORA_API_KEY", "server-scoped-key")
+
+	var captured strategycore.Strategy
+	svc := &strategyfakes.FakeService{}
+	svc.RunBacktestCalls(func(_ context.Context, _ uuid.UUID, s strategycore.Strategy, _, _ time.Time) (<-chan types.BacktestResult, error) {
+		captured = s
+		return make(chan types.BacktestResult), nil
+	})
+	handler := strategyhttp.NewHandler(
+		svc,
+		strategyhttp.WithDORAClient(doraClientFunc{}),
+		strategyhttp.WithTradesHistoryStore(nil),
+	)
+
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	payload, err := json.Marshal(map[string]any{
+		"strategy_type": "mean_reversion",
+		"config": map[string]any{
+			"lookback_window":   20,
+			"tenor":             "2Y",
+			"entry_z_score":     2.0,
+			"exit_z_score":      0.5,
+			"stop_loss_z_score": 3.5,
+			"min_std_dev":       0.0005,
+			"max_position_size": 1.0,
+		},
+		"start": now.Add(-24 * time.Hour).Format(time.RFC3339),
+		"end":   now.Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/backtests", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer some-token")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code, "bearer backtest must be accepted: %s", rec.Body.String())
+
+	mr, ok := captured.(*meanreversion.Strategy)
+	require.True(t, ok, "captured strategy must be mean_reversion, got %T", captured)
+	assert.True(t, mr.HasMarketAPIClient(),
+		"bearer backtest must fall back to the server-scoped client, not a nil client")
 }

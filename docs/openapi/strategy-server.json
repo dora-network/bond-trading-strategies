@@ -3679,6 +3679,8 @@
           "run.paused",
           "run.resumed",
           "run.stopped",
+          "run.completed",
+          "run.failed",
           "run.stop_loss",
           "dora.order_update"
         ]
@@ -3737,6 +3739,25 @@
           }
         }
       },
+      "RunCompletedPayload": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "description": "run.completed carries no payload fields; the event's payload is null.",
+        "properties": {}
+      },
+      "RunFailedPayload": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
       "Event": {
         "type": "object",
         "description": "A single notification event delivered over the WebSocket. New event types (notably dora.*) may appear without a spec change \u2014 clients MUST tolerate unknown values of `type`.",
@@ -3776,9 +3797,8 @@
             "description": "Event timestamp in RFC3339, always UTC."
           },
           "payload": {
-            "type": "object",
-            "description": "Type-specific JSON object.",
-            "oneOf": [
+            "description": "Type-specific JSON object; null for run.completed.",
+            "anyOf": [
               {
                 "$ref": "#/components/schemas/BacktestStartedPayload"
               },
@@ -3796,6 +3816,12 @@
               },
               {
                 "$ref": "#/components/schemas/RunStopLossPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RunCompletedPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RunFailedPayload"
               }
             ]
           }
