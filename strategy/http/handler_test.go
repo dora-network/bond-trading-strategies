@@ -4048,15 +4048,15 @@ func TestResumeRunReplacesStaleAPIKey(t *testing.T) {
 	assert.Equal(t, "fresh-key", string(decrypted))
 }
 
-// TestCreateBacktestBearerUsesServerClient verifies that a
-// bearer-authenticated backtest (caller carries no DORA API key) still
-// gets a market client: backtests place no orders, so the client only
-// serves read-only asset-ID lookups and may fall back to the
-// server-scoped key. Without the fallback, mean-reversion, momentum,
-// and breakout backtests were accepted and then failed asynchronously
-// on LookupAssetID with a nil client.
-func TestCreateBacktestBearerUsesServerClient(t *testing.T) {
-	t.Setenv("DORA_API_KEY", "server-scoped-key")
+// TestCreateBacktestRequiresAPIKeyForAssetLookup verifies that a
+// bearer-authenticated backtest (caller carries no DORA API key) for a
+// strategy that resolves asset IDs via the DORA API is rejected
+// synchronously. Backtests always run with the caller's key — the
+// server's admin DORA_API_KEY is reserved for shared market data — so
+// there is deliberately no fallback; before the guard these backtests
+// were accepted and then failed asynchronously on a nil client.
+func TestCreateBacktestRequiresAPIKeyForAssetLookup(t *testing.T) {
+	t.Parallel()
 
 	var captured strategycore.Strategy
 	svc := &strategyfakes.FakeService{}
@@ -4087,15 +4087,27 @@ func TestCreateBacktestBearerUsesServerClient(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Bearer-token callers carry no DORA API key: the backtest must be
+	// rejected up front, never started.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/backtests", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer some-token")
 	handler.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusAccepted, rec.Code, "bearer backtest must be accepted: %s", rec.Body.String())
+	require.Equal(t, http.StatusBadRequest, rec.Code, "keyless asset-lookup backtest must be rejected: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires a DORA API key",
+		"400 must come from the missing-key check, not config validation")
+	assert.Equal(t, 0, svc.RunBacktestCallCount(), "no backtest may be started for a keyless caller")
 
+	// The same body with an API key is accepted and the strategy
+	// carries the caller's key for its asset-ID lookups.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/backtests", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "ApiKey test-key")
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code, "backtest with API key should be accepted: %s", rec.Body.String())
 	mr, ok := captured.(*meanreversion.Strategy)
 	require.True(t, ok, "captured strategy must be mean_reversion, got %T", captured)
-	assert.True(t, mr.HasMarketAPIClient(),
-		"bearer backtest must fall back to the server-scoped client, not a nil client")
+	assert.True(t, mr.HasMarketAPIClient(), "backtest must run with the caller's API key, not a nil client")
 }

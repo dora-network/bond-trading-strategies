@@ -3720,13 +3720,9 @@
           }
         }
       },
-      "RunStoppedPayload": {
-        "type": "object",
-        "properties": {
-          "reason": {
-            "type": "string"
-          }
-        }
+      "NullPayload": {
+        "type": "null",
+        "description": "run.paused, run.resumed, run.stopped, and run.completed publish no payload; the event's payload is null."
       },
       "RunStopLossPayload": {
         "type": "object",
@@ -3738,14 +3734,6 @@
             "type": "string"
           }
         }
-      },
-      "RunCompletedPayload": {
-        "type": [
-          "object",
-          "null"
-        ],
-        "description": "run.completed carries no payload fields; the event's payload is null.",
-        "properties": {}
       },
       "RunFailedPayload": {
         "type": "object",
@@ -3797,7 +3785,7 @@
             "description": "Event timestamp in RFC3339, always UTC."
           },
           "payload": {
-            "description": "Type-specific JSON object; null for run.completed.",
+            "description": "Type-specific JSON object; null for run.paused, run.resumed, run.stopped, and run.completed.",
             "anyOf": [
               {
                 "$ref": "#/components/schemas/BacktestStartedPayload"
@@ -3812,16 +3800,13 @@
                 "$ref": "#/components/schemas/RunStartedPayload"
               },
               {
-                "$ref": "#/components/schemas/RunStoppedPayload"
-              },
-              {
                 "$ref": "#/components/schemas/RunStopLossPayload"
               },
               {
-                "$ref": "#/components/schemas/RunCompletedPayload"
+                "$ref": "#/components/schemas/RunFailedPayload"
               },
               {
-                "$ref": "#/components/schemas/RunFailedPayload"
+                "$ref": "#/components/schemas/NullPayload"
               }
             ]
           }
