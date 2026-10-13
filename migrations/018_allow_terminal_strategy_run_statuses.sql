@@ -16,6 +16,11 @@ ALTER TABLE strategy_runs
 
 ---- create above / drop below ----
 
+-- Terminal-status rows must be normalized to an old-schema value first,
+-- or re-adding the restrictive constraint fails on them. "stopped" is
+-- the closest old-schema terminal state.
+UPDATE strategy_runs SET status = 'stopped' WHERE status IN ('completed', 'failed');
+
 ALTER TABLE strategy_runs
     DROP CONSTRAINT IF EXISTS strategy_runs_status_check;
 

@@ -152,6 +152,7 @@ func runResume(
 	h := &Handler{
 		service:               svc,
 		stateStore:            store,
+		runExitErrs:           make(map[uuid.UUID]error),
 		encryptionKey:         encKey,
 		decisionStore:         &memDecisionStore{maxSeq: maxSeq},
 		now:                   time.Now,
@@ -290,6 +291,7 @@ func TestResumePersistedRun_MomentumWiresAPIKeyAndDecisionSeq(t *testing.T) {
 	h := &Handler{
 		service:               svc,
 		encryptionKey:         encKey,
+		runExitErrs:           make(map[uuid.UUID]error),
 		decisionStore:         &memDecisionStore{maxSeq: maxSeq},
 		now:                   time.Now,
 		runs:                  make(map[uuid.UUID]*RunDetail),
@@ -345,7 +347,7 @@ func TestAttachStateStore_WiresBothStrategies(t *testing.T) {
 	vwapCfg.OrderBookID = runID.String()
 	vwapStrat := vwap.New(vwapCfg, silentLogger())
 
-	h := &Handler{stateStore: store}
+	h := &Handler{stateStore: store, runExitErrs: make(map[uuid.UUID]error)}
 	h.attachStateStore(twapStrat)
 	h.attachStateStore(vwapStrat)
 
