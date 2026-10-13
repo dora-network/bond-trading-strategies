@@ -212,10 +212,11 @@ func New(cfg Config, pricesHandler *prices.Handler, opts ...func(*Strategy)) *St
 		cfg.Leverage = decimal.One
 	}
 	s := &Strategy{
-		cfg:         cfg,
-		shortVolWin: window.NewRollingWindow(cfg.ShortVolWindow),
-		longVolWin:  window.NewRollingWindow(cfg.LongVolWindow),
-		atrWin:      window.NewRollingWindow(cfg.ATRWindow),
+		cfg:           cfg,
+		pricesHandler: pricesHandler,
+		shortVolWin:   window.NewRollingWindow(cfg.ShortVolWindow),
+		longVolWin:    window.NewRollingWindow(cfg.LongVolWindow),
+		atrWin:        window.NewRollingWindow(cfg.ATRWindow),
 	}
 	// Initialize the OBV ring buffer when windowed mode is requested.
 	// A nil obvWindow means cumulative OBV (price-comparison). A

@@ -74,6 +74,16 @@ func silentLogger() *slog.Logger {
 // twap.RunState and vwap.RunState to exec.RunState, so the bytes
 // are interchangeable — TWAP and VWAP share the same on-the-wire
 // JSON shape.
+
+// unwrapRunRecorder strips startRun's error-capture wrapper so tests can
+// assert on the concrete strategy the handler built.
+func unwrapRunRecorder(s strategycore.Strategy) strategycore.Strategy {
+	if rec, ok := s.(*runExitRecorder); ok {
+		return rec.Strategy
+	}
+	return s
+}
+
 func runResume(
 	t *testing.T,
 	strategyType string,
@@ -166,7 +176,7 @@ func runResume(
 
 	require.NoError(t, h.resumePersistedRun(context.Background(), detail, ""))
 	require.NotNil(t, captured, "strategy must have been captured from RunStrategyCalls")
-	return captured, store, runID
+	return unwrapRunRecorder(captured), store, runID
 }
 
 // TestResumePersistedRun_WiresAllThreeFindings is the regression
@@ -304,7 +314,7 @@ func TestResumePersistedRun_MomentumWiresAPIKeyAndDecisionSeq(t *testing.T) {
 	require.NoError(t, h.resumePersistedRun(context.Background(), detail, ""))
 	require.NotNil(t, captured, "strategy must have been captured from RunStrategyCalls")
 
-	s, ok := captured.(*momentum.Strategy)
+	s, ok := unwrapRunRecorder(captured).(*momentum.Strategy)
 	require.True(t, ok, "unexpected resumed strategy type %T", captured)
 	// With the server-key default removed, the applyUserAPIKey arm is
 	// observable: the resumed strategy must carry a client wired from

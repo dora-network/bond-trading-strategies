@@ -2310,7 +2310,40 @@ func parseDecimalField(v any) (decimal.Decimal, error) {
 	}
 }
 
+// runExitRecorder wraps a strategy so the handler observes the error Run
+// returned. The service deletes the run from its registry either way, so
+// without this an error exit is indistinguishable from a natural
+// completion and maybePublishNaturalCompletion would mark a crashed run
+// "completed".
+type runExitRecorder struct {
+	strategycore.Strategy
+	onExit func(error)
+}
+
+func (r *runExitRecorder) Run(ctx context.Context, msgCh <-chan strategycore.Message, runID uuid.UUID) error {
+	err := r.Strategy.Run(ctx, msgCh, runID)
+	r.onExit(err)
+	return err
+}
+
+// Unwrap exposes the wrapped strategy so callers (tests) can reach the
+// concrete type the handler built.
+func (r *runExitRecorder) Unwrap() strategycore.Strategy { return r.Strategy }
+
 func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strategycore.Strategy) (uuid.UUID, error) {
+	strat = &runExitRecorder{
+		Strategy: strat,
+		onExit: func(err error) {
+			if err == nil {
+				return
+			}
+			h.mu.Lock()
+			if detail.Status == "running" {
+				detail.Error = err.Error()
+			}
+			h.mu.Unlock()
+		},
+	}
 	starter, ok := h.service.(runStarter)
 	if ok {
 		if err := starter.RunStrategyWithID(ctx, detail.ID, strat); err != nil {
@@ -2455,13 +2488,14 @@ func (h *Handler) runIsActive(id uuid.UUID) bool {
 	return h.service.IsRunActive(id)
 }
 
-// maybePublishNaturalCompletion publishes EventRunCompleted if the run
-// was active one tick ago but isn't now, and the status is still
-// "running" — that combination means the strategy's run loop
-// returned nil naturally (chunks exhausted, end_time elapsed, or all
-// skipped consumed) without going through stopRun. The observer
-// picks this up once per run. The status is also flipped to
-// "completed" so runIsActive returns false and the public status
+// maybePublishNaturalCompletion publishes the terminal run event when the
+// run was active one tick ago but isn't now, and the status is still
+// "running" — the run loop returned without going through stopRun.
+// runExitRecorder stamps d.Error before the run leaves the service
+// registry, so an error exit is reported "failed" (EventRunFailed) and a
+// clean exit "completed" (EventRunCompleted). The observer
+// picks this up once per run. The status is also flipped so runIsActive
+// returns false and the public status
 func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, id uuid.UUID) {
 	h.mu.Lock()
 	d, ok := h.runs[id]
@@ -2470,20 +2504,28 @@ func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, id uuid.UUI
 		return
 	}
 	d.Status = "completed"
+	evtType := notifications.EventRunCompleted
+	var evtPayload map[string]any
+	if d.Error != "" {
+		d.Status = "failed"
+		evtType = notifications.EventRunFailed
+		evtPayload = map[string]any{"error": d.Error}
+	}
 	d.UpdatedAt = h.now().UTC()
 	d.StoppedAt = &d.UpdatedAt
 	userID := d.DORAUserID
 	runID := id.String()
 	if err := h.saveRun(ctx, d); err != nil {
-		slog.Error("twap: save completed run", "err", err, "run_id", runID)
+		slog.Error("save finished run", "err", err, "run_id", runID)
 	}
 	h.mu.Unlock()
 
 	h.publishEvent(ctx, notifications.Event{
-		Type:      notifications.EventRunCompleted,
+		Type:      evtType,
 		UserID:    userID,
 		RunID:     runID,
 		Timestamp: h.now().UTC(),
+		Payload:   evtPayload,
 	})
 }
 
