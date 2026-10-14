@@ -123,6 +123,12 @@ type Handler struct {
 	// by mu.
 	stopLossObservers     map[uuid.UUID]context.CancelFunc
 	runCompletionWatchers map[uuid.UUID]context.CancelFunc
+	// runExitErrs holds the error (nil for a clean exit) the run
+	// goroutine returned, keyed by run ID. Written by runExitRecorder
+	// and consumed by maybePublishNaturalCompletion — recorder-owned
+	// state so a fast exit never writes the shared RunDetail while
+	// createRun is still saving/serving it. Protected by mu.
+	runExitErrs map[uuid.UUID]error
 	// stopLossObserverInterval is the polling cadence for the stop-loss
 	// observer. Defaults to 1s; overridable for tests via
 	// WithStopLossObserverInterval.
@@ -525,6 +531,7 @@ func NewHandler(service strategycore.Service, opts ...func(*Handler)) http.Handl
 		runningStrategies:        make(map[uuid.UUID]strategycore.Strategy),
 		stopLossObservers:        make(map[uuid.UUID]context.CancelFunc),
 		runCompletionWatchers:    make(map[uuid.UUID]context.CancelFunc),
+		runExitErrs:              make(map[uuid.UUID]error),
 		stopLossObserverInterval: defaultStopLossObserverInterval,
 		orderbookCache:           make(map[string]DORAOrderBookSummary),
 		assetCache:               make(map[string]AssetInfo),
@@ -1971,30 +1978,45 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 		}
 	}
 
+	// The status transition and its side effects share one critical
+	// section with the completion watcher's terminal classification and
+	// stopRun's "stopped" write, which also run under h.mu: either all
+	// resume effects land before a terminal classification can, or the
+	// classification is already there and they are all skipped — the
+	// resume can never interleave between the two.
 	now := h.now().UTC()
 	h.mu.Lock()
-	if detail, ok := h.runs[id]; ok {
-		detail.Status = "running"
-		detail.UpdatedAt = now
-		detail.StoppedAt = nil
+	current, ok := h.runs[id]
+	terminal := !ok || current.Status == "failed" ||
+		current.Status == "completed" || current.Status == "stopped"
+	if !terminal {
+		current.Status = "running"
+		current.UpdatedAt = now
+		current.StoppedAt = nil
+		if h.orderUpdates != nil {
+			h.orderUpdates.UpdateRunStatus(id, "running")
+		}
+		if err := h.saveRun(ctx, current); err != nil {
+			h.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
+			return
+		}
+		h.publishEvent(ctx, notifications.Event{
+			Type:      notifications.EventRunResumed,
+			UserID:    doraUserID,
+			RunID:     current.ID.String(),
+			Timestamp: time.Now().UTC(),
+		})
 	}
 	h.mu.Unlock()
-
-	if h.orderUpdates != nil {
-		h.orderUpdates.UpdateRunStatus(id, "running")
-	}
-
-	detail, _ = h.runDetail(id)
-	if err := h.saveRun(ctx, detail); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
+	if terminal {
+		// A terminal state was already persisted and its event
+		// published — by the completion watcher for a fast exit, or
+		// by stopRun for a concurrent stop; report the outcome without
+		// a spurious "resumed".
+		h.getRun(w, ctx, id)
 		return
 	}
-	h.publishEvent(ctx, notifications.Event{
-		Type:      notifications.EventRunResumed,
-		UserID:    doraUserID,
-		RunID:     detail.ID.String(),
-		Timestamp: time.Now().UTC(),
-	})
 	h.getRun(w, ctx, id)
 }
 
@@ -2151,6 +2173,17 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail, cal
 		}
 	}
 	h.startOrderUpdater(detail, strat)
+	// Flip to "running" BEFORE launching the goroutine: a fast startup
+	// failure can beat resumeRun's own status flip, and the completion
+	// watcher only reports terminal outcomes for runs in the running
+	// state. When that happens, resumeRun's conditional transition
+	// defers to the classified exit rather than overwriting it. No-op
+	// for RestoreRuns, which only relaunches running rows.
+	h.mu.Lock()
+	detail.Status = "running"
+	detail.UpdatedAt = h.now().UTC()
+	detail.StoppedAt = nil
+	h.mu.Unlock()
 	if _, err := h.startRun(ctx, detail, strat); err != nil {
 		return err
 	}
@@ -2310,7 +2343,45 @@ func parseDecimalField(v any) (decimal.Decimal, error) {
 	}
 }
 
+// runExitRecorder wraps a strategy so the handler observes the error Run
+// returned, keyed by the run ID the service launched it under. The
+// service deletes the run from its registry either way, so without this
+// an error exit is indistinguishable from a natural completion and
+// maybePublishNaturalCompletion would mark a crashed run "completed".
+type runExitRecorder struct {
+	strategycore.Strategy
+	onExit func(runID uuid.UUID, err error)
+}
+
+func (r *runExitRecorder) Run(ctx context.Context, msgCh <-chan strategycore.Message, runID uuid.UUID) error {
+	err := r.Strategy.Run(ctx, msgCh, runID)
+	r.onExit(runID, err)
+	return err
+}
+
+// Unwrap exposes the wrapped strategy so callers (tests) can reach the
+// concrete type the handler built.
+func (r *runExitRecorder) Unwrap() strategycore.Strategy { return r.Strategy }
+
 func (h *Handler) startRun(ctx context.Context, detail *RunDetail, strat strategycore.Strategy) (uuid.UUID, error) {
+	h.mu.Lock()
+	// A new invocation starts with a clean slate: a run resumed after a
+	// failed attempt must not keep the old error, or a later clean exit
+	// would be classified failed.
+	detail.Error = ""
+	h.mu.Unlock()
+	strat = &runExitRecorder{
+		Strategy: strat,
+		onExit: func(runID uuid.UUID, err error) {
+			// Recorder-owned synchronized state: never write the shared
+			// RunDetail here — createRun may still be saving/serving it,
+			// and on the resume path the status may not be flipped to
+			// "running" yet.
+			h.mu.Lock()
+			h.runExitErrs[runID] = err
+			h.mu.Unlock()
+		},
+	}
 	starter, ok := h.service.(runStarter)
 	if ok {
 		if err := starter.RunStrategyWithID(ctx, detail.ID, strat); err != nil {
@@ -2455,35 +2526,49 @@ func (h *Handler) runIsActive(id uuid.UUID) bool {
 	return h.service.IsRunActive(id)
 }
 
-// maybePublishNaturalCompletion publishes EventRunCompleted if the run
-// was active one tick ago but isn't now, and the status is still
-// "running" — that combination means the strategy's run loop
-// returned nil naturally (chunks exhausted, end_time elapsed, or all
-// skipped consumed) without going through stopRun. The observer
-// picks this up once per run. The status is also flipped to
-// "completed" so runIsActive returns false and the public status
+// maybePublishNaturalCompletion publishes the terminal run event when the
+// run was active one tick ago but isn't now, and the status is still
+// "running" — the run loop returned without going through stopRun.
+// runExitRecorder stashes the run loop's exit result in runExitErrs
+// before the run leaves the service registry; this consumes it and only
+// then stamps d.Error, so an error exit is reported "failed"
+// (EventRunFailed) and a clean exit "completed" (EventRunCompleted). The
+// observer picks this up once per run. The status flip also makes the
+// public status terminal, so a concurrent resume cannot resurrect the
+// run as "running".
 func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, id uuid.UUID) {
 	h.mu.Lock()
+	exitErr := h.runExitErrs[id]
+	delete(h.runExitErrs, id)
 	d, ok := h.runs[id]
 	if !ok || d.Status != "running" {
 		h.mu.Unlock()
 		return
 	}
 	d.Status = "completed"
+	evtType := notifications.EventRunCompleted
+	var evtPayload map[string]any
+	if exitErr != nil {
+		d.Status = "failed"
+		d.Error = exitErr.Error()
+		evtType = notifications.EventRunFailed
+		evtPayload = map[string]any{"error": exitErr.Error()}
+	}
 	d.UpdatedAt = h.now().UTC()
 	d.StoppedAt = &d.UpdatedAt
 	userID := d.DORAUserID
 	runID := id.String()
 	if err := h.saveRun(ctx, d); err != nil {
-		slog.Error("twap: save completed run", "err", err, "run_id", runID)
+		slog.Error("save finished run", "err", err, "run_id", runID)
 	}
 	h.mu.Unlock()
 
 	h.publishEvent(ctx, notifications.Event{
-		Type:      notifications.EventRunCompleted,
+		Type:      evtType,
 		UserID:    userID,
 		RunID:     runID,
 		Timestamp: h.now().UTC(),
+		Payload:   evtPayload,
 	})
 }
 

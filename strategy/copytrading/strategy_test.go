@@ -81,13 +81,13 @@ func TestCalculateOrderSize(t *testing.T) {
 			expected:     decimal.MustParse("3000"),
 		},
 		{
-			name:         "clamped by min",
+			name:         "below minimum is skipped",
 			available:    decimal.MustParse("100"),
 			percentage:   decimal.MustParse("0.1"),
 			leverage:     decimal.MustParse("1.0"),
 			minOrderSize: 50,
 			maxOrderSize: 0,
-			expected:     decimal.MustParse("50"),
+			expected:     decimal.Zero,
 		},
 		{
 			name:         "clamped by max",
@@ -99,7 +99,7 @@ func TestCalculateOrderSize(t *testing.T) {
 			expected:     decimal.MustParse("1000"),
 		},
 		{
-			name:         "clamped by both",
+			name:         "clamped by max with minimum configured",
 			available:    decimal.MustParse("100000"),
 			percentage:   decimal.MustParse("0.1"),
 			leverage:     decimal.MustParse("3.0"),
@@ -113,6 +113,57 @@ func TestCalculateOrderSize(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := calculateOrderSize(tt.available, tt.percentage, tt.leverage, tt.minOrderSize, tt.maxOrderSize)
 			require.True(t, result.Equal(tt.expected), "expected %s, got %s", tt.expected, result)
+		})
+	}
+}
+
+func TestHandleTrade_MinimumOrderSize(t *testing.T) {
+	tests := []struct {
+		name       string
+		available  string
+		wantOrders int
+	}{
+		{name: "staging balance 0.003", available: "0.003", wantOrders: 0},
+		{name: "staging balance 0.054", available: "0.054", wantOrders: 0},
+		{name: "exact minimum", available: "4", wantOrders: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bondID := uuid.New()
+			usdID := uuid.New().String()
+			client := &fakeMarketAPI{
+				portfolio: &doraclient.AccountPortfolioV2{
+					Accounts: map[string]map[string]doraclient.AccountV2{
+						"isolated-bond": {
+							bondID.String(): {AssetId: bondID.String(), IsGlobal: new(false), Available: "0", Borrowed: "0"},
+							usdID:           {AssetId: usdID, IsGlobal: new(false), Available: tt.available},
+						},
+					},
+				},
+				quoteAssetID: usdID,
+			}
+			s := New(Config{
+				FollowedTrader:        uuid.New(),
+				PercentageOfAvailable: decimal.MustParse("0.25"),
+				Leverage:              decimal.One,
+				MinOrderSize:          1,
+				MaxOrderSize:          10,
+			}, WithMarketAPIClient(client))
+			trade := streams.TradeEvent{
+				TraderID:    s.cfg.FollowedTrader,
+				OrderBookID: uuid.New(),
+				AssetID:     bondID,
+				Side:        "sell",
+				Quantity:    decimal.One,
+				Price:       decimal.MustParse("0.8"),
+				ExecutionID: "exec-1",
+			}
+
+			require.NoError(t, s.handleTrade(context.Background(), trade))
+			require.Equal(t, tt.wantOrders, client.createMarketOrderCount())
+			if tt.wantOrders > 0 {
+				require.True(t, client.capturedQuantity.Equal(decimal.One), "expected minimum order size of 1")
+			}
 		})
 	}
 }

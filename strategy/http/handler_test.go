@@ -3339,6 +3339,9 @@ func TestHandler_EmitsRunStopLossEvent(t *testing.T) {
 	rec := performJSONRequest(t, handler, "/v1/runs", body)
 	require.Equal(t, http.StatusCreated, rec.Code)
 
+	if u, ok := capturedStrat.(interface{ Unwrap() strategycore.Strategy }); ok {
+		capturedStrat = u.Unwrap()
+	}
 	mrStrat, ok := capturedStrat.(*meanreversion.Strategy)
 	require.True(t, ok, "expected meanreversion.Strategy, got %T", capturedStrat)
 	_, _, triggered := mrStrat.LastStopLossTrigger()

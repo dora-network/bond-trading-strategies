@@ -644,7 +644,7 @@ func (s *Strategy) bondBalancesFor(portfolio *doraclient.AccountPortfolioV2, bon
 }
 
 // calculateOrderSize computes the order size from available balance, percentage,
-// leverage, and min/max clamps.
+// and leverage. It returns zero below the minimum and caps size at the maximum.
 func calculateOrderSize(available, percentage, leverage decimal.Decimal, minOrderSize, maxOrderSize int) decimal.Decimal {
 	orderSize, _ := available.Mul(percentage)
 	orderSize, _ = orderSize.Mul(leverage)
@@ -652,7 +652,7 @@ func calculateOrderSize(available, percentage, leverage decimal.Decimal, minOrde
 	if minOrderSize > 0 {
 		minSize := decimal.MustNew(int64(minOrderSize), 0)
 		if orderSize.Cmp(minSize) < 0 {
-			orderSize = minSize
+			return decimal.Zero
 		}
 	}
 	if maxOrderSize > 0 {
