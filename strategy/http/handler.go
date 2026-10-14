@@ -1978,45 +1978,45 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 		}
 	}
 
+	// The status transition and its side effects share one critical
+	// section with the completion watcher's terminal classification and
+	// stopRun's "stopped" write, which also run under h.mu: either all
+	// resume effects land before a terminal classification can, or the
+	// classification is already there and they are all skipped — the
+	// resume can never interleave between the two.
 	now := h.now().UTC()
 	h.mu.Lock()
-	// A rebuilt run whose strategy failed fast may already have been
-	// classified terminal by the completion watcher between
-	// resumePersistedRun returning and this transition; overwriting it
-	// would resurrect a dead run as "running" with no observers left.
-	terminal := false
-	if detail, ok := h.runs[id]; ok {
-		terminal = detail.Status == "failed" || detail.Status == "completed"
-		if !terminal {
-			detail.Status = "running"
-			detail.UpdatedAt = now
-			detail.StoppedAt = nil
+	current, ok := h.runs[id]
+	terminal := !ok || current.Status == "failed" ||
+		current.Status == "completed" || current.Status == "stopped"
+	if !terminal {
+		current.Status = "running"
+		current.UpdatedAt = now
+		current.StoppedAt = nil
+		if h.orderUpdates != nil {
+			h.orderUpdates.UpdateRunStatus(id, "running")
 		}
+		if err := h.saveRun(ctx, current); err != nil {
+			h.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
+			return
+		}
+		h.publishEvent(ctx, notifications.Event{
+			Type:      notifications.EventRunResumed,
+			UserID:    doraUserID,
+			RunID:     current.ID.String(),
+			Timestamp: time.Now().UTC(),
+		})
 	}
 	h.mu.Unlock()
 	if terminal {
-		// The watcher already persisted the terminal state and
-		// published its event; report the outcome without a spurious
-		// "resumed".
+		// A terminal state was already persisted and its event
+		// published — by the completion watcher for a fast exit, or
+		// by stopRun for a concurrent stop; report the outcome without
+		// a spurious "resumed".
 		h.getRun(w, ctx, id)
 		return
 	}
-
-	if h.orderUpdates != nil {
-		h.orderUpdates.UpdateRunStatus(id, "running")
-	}
-
-	detail, _ = h.runDetail(id)
-	if err := h.saveRun(ctx, detail); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
-		return
-	}
-	h.publishEvent(ctx, notifications.Event{
-		Type:      notifications.EventRunResumed,
-		UserID:    doraUserID,
-		RunID:     detail.ID.String(),
-		Timestamp: time.Now().UTC(),
-	})
 	h.getRun(w, ctx, id)
 }
 

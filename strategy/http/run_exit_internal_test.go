@@ -183,3 +183,115 @@ func TestResumeRunDoesNotResurrectClassifiedExit(t *testing.T) {
 	assert.NotNil(t, detail.StoppedAt, "terminal StoppedAt must survive the resume transition")
 	assert.Equal(t, http.StatusOK, w.Code)
 }
+
+// stubOrderUpdates records where the resume transition's order-status
+// side effect runs relative to h.mu.
+type stubOrderUpdates struct {
+	onUpdateRunStatus func(runID uuid.UUID, status string)
+}
+
+func (s *stubOrderUpdates) EnsureSubscribed(context.Context, string, string, uuid.UUID, string) error {
+	return nil
+}
+
+func (s *stubOrderUpdates) UpdateRunStatus(runID uuid.UUID, status string) {
+	if s.onUpdateRunStatus != nil {
+		s.onUpdateRunStatus(runID, status)
+	}
+}
+
+func (s *stubOrderUpdates) Unsubscribe(string) {}
+
+// TestResumeRunPreservesConcurrentStop pins the PR #53 review finding:
+// a stop that lands while resumeRun is between its entry status check
+// and its transition must not be overwritten — stopRun writes
+// "stopped" under h.mu after StopStrategy cancels the run, so the
+// resume transition has to defer to it like any other terminal state.
+func TestResumeRunPreservesConcurrentStop(t *testing.T) {
+	runID := uuid.Must(uuid.NewV7())
+	svc := &strategyfakes.FakeService{}
+	svc.RunStrategyReturns(runID, nil)
+	handler := NewHandler(svc, WithNow(func() time.Time {
+		return time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	}))
+	h, ok := handler.(*Handler)
+	require.True(t, ok, "NewHandler must return *Handler")
+
+	detail := &RunDetail{RunSummary: RunSummary{
+		ID:           runID,
+		Status:       "running",
+		DORAUserID:   "user-test",
+		StrategyType: "breakout",
+	}}
+	h.mu.Lock()
+	h.runs[runID] = detail
+	h.mu.Unlock()
+
+	// The service call is the window between resumeRun's entry status
+	// check and its transition: a concurrent stop's writes land here.
+	svc.ResumeStrategyCalls(func(_ context.Context, _ uuid.UUID) error {
+		stoppedAt := time.Date(2026, 10, 14, 12, 0, 1, 0, time.UTC)
+		h.mu.Lock()
+		detail.Status = "stopped"
+		detail.UpdatedAt = stoppedAt
+		detail.StoppedAt = &stoppedAt
+		h.mu.Unlock()
+		return nil
+	})
+
+	ctx := context.WithValue(context.Background(), doraUserIDContextKey{}, "user-test")
+	w := httptest.NewRecorder()
+	h.resumeRun(w, ctx, runID)
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	assert.Equal(t, "stopped", detail.Status)
+	assert.NotNil(t, detail.StoppedAt, "concurrent stop's StoppedAt must survive the resume transition")
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestResumeRunSideEffectsHoldTransitionLock pins the serialization half:
+// the resume transition's side effects (order-status update, persist,
+// run.resumed event) must run under h.mu — the same lock
+// maybePublishNaturalCompletion classifies terminal exits under.
+// Otherwise a completion-watcher tick can classify, persist, and publish
+// the terminal event between the transition and its effects.
+func TestResumeRunSideEffectsHoldTransitionLock(t *testing.T) {
+	runID := uuid.Must(uuid.NewV7())
+	svc := &strategyfakes.FakeService{}
+	svc.RunStrategyReturns(runID, nil)
+	handler := NewHandler(svc, WithNow(func() time.Time {
+		return time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	}))
+	h, ok := handler.(*Handler)
+	require.True(t, ok, "NewHandler must return *Handler")
+
+	detail := &RunDetail{RunSummary: RunSummary{
+		ID:           runID,
+		Status:       "paused",
+		DORAUserID:   "user-test",
+		StrategyType: "breakout",
+	}}
+	h.mu.Lock()
+	h.runs[runID] = detail
+	h.mu.Unlock()
+
+	muHeldDuringUpdate := false
+	h.orderUpdates = &stubOrderUpdates{
+		onUpdateRunStatus: func(uuid.UUID, string) {
+			muHeldDuringUpdate = h.mu.TryLock()
+			if muHeldDuringUpdate {
+				h.mu.Unlock()
+			}
+		},
+	}
+
+	ctx := context.WithValue(context.Background(), doraUserIDContextKey{}, "user-test")
+	w := httptest.NewRecorder()
+	h.resumeRun(w, ctx, runID)
+
+	assert.False(t, muHeldDuringUpdate,
+		"UpdateRunStatus must run under h.mu so terminal classification cannot interleave")
+	assert.Equal(t, "running", detail.Status)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
