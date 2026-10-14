@@ -1978,30 +1978,45 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 		}
 	}
 
+	// The status transition and its side effects share one critical
+	// section with the completion watcher's terminal classification and
+	// stopRun's "stopped" write, which also run under h.mu: either all
+	// resume effects land before a terminal classification can, or the
+	// classification is already there and they are all skipped — the
+	// resume can never interleave between the two.
 	now := h.now().UTC()
 	h.mu.Lock()
-	if detail, ok := h.runs[id]; ok {
-		detail.Status = "running"
-		detail.UpdatedAt = now
-		detail.StoppedAt = nil
+	current, ok := h.runs[id]
+	terminal := !ok || current.Status == "failed" ||
+		current.Status == "completed" || current.Status == "stopped"
+	if !terminal {
+		current.Status = "running"
+		current.UpdatedAt = now
+		current.StoppedAt = nil
+		if h.orderUpdates != nil {
+			h.orderUpdates.UpdateRunStatus(id, "running")
+		}
+		if err := h.saveRun(ctx, current); err != nil {
+			h.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
+			return
+		}
+		h.publishEvent(ctx, notifications.Event{
+			Type:      notifications.EventRunResumed,
+			UserID:    doraUserID,
+			RunID:     current.ID.String(),
+			Timestamp: time.Now().UTC(),
+		})
 	}
 	h.mu.Unlock()
-
-	if h.orderUpdates != nil {
-		h.orderUpdates.UpdateRunStatus(id, "running")
-	}
-
-	detail, _ = h.runDetail(id)
-	if err := h.saveRun(ctx, detail); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save run: %v", err))
+	if terminal {
+		// A terminal state was already persisted and its event
+		// published — by the completion watcher for a fast exit, or
+		// by stopRun for a concurrent stop; report the outcome without
+		// a spurious "resumed".
+		h.getRun(w, ctx, id)
 		return
 	}
-	h.publishEvent(ctx, notifications.Event{
-		Type:      notifications.EventRunResumed,
-		UserID:    doraUserID,
-		RunID:     detail.ID.String(),
-		Timestamp: time.Now().UTC(),
-	})
 	h.getRun(w, ctx, id)
 }
 
@@ -2161,7 +2176,9 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail, cal
 	// Flip to "running" BEFORE launching the goroutine: a fast startup
 	// failure can beat resumeRun's own status flip, and the completion
 	// watcher only reports terminal outcomes for runs in the running
-	// state. No-op for RestoreRuns, which only relaunches running rows.
+	// state. When that happens, resumeRun's conditional transition
+	// defers to the classified exit rather than overwriting it. No-op
+	// for RestoreRuns, which only relaunches running rows.
 	h.mu.Lock()
 	detail.Status = "running"
 	detail.UpdatedAt = h.now().UTC()
@@ -2512,11 +2529,13 @@ func (h *Handler) runIsActive(id uuid.UUID) bool {
 // maybePublishNaturalCompletion publishes the terminal run event when the
 // run was active one tick ago but isn't now, and the status is still
 // "running" — the run loop returned without going through stopRun.
-// runExitRecorder stamps d.Error before the run leaves the service
-// registry, so an error exit is reported "failed" (EventRunFailed) and a
-// clean exit "completed" (EventRunCompleted). The observer
-// picks this up once per run. The status is also flipped so runIsActive
-// returns false and the public status
+// runExitRecorder stashes the run loop's exit result in runExitErrs
+// before the run leaves the service registry; this consumes it and only
+// then stamps d.Error, so an error exit is reported "failed"
+// (EventRunFailed) and a clean exit "completed" (EventRunCompleted). The
+// observer picks this up once per run. The status flip also makes the
+// public status terminal, so a concurrent resume cannot resurrect the
+// run as "running".
 func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, id uuid.UUID) {
 	h.mu.Lock()
 	exitErr := h.runExitErrs[id]
