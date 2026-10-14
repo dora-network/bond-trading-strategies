@@ -1980,12 +1980,27 @@ func (h *Handler) resumeRun(w http.ResponseWriter, ctx context.Context, id uuid.
 
 	now := h.now().UTC()
 	h.mu.Lock()
+	// A rebuilt run whose strategy failed fast may already have been
+	// classified terminal by the completion watcher between
+	// resumePersistedRun returning and this transition; overwriting it
+	// would resurrect a dead run as "running" with no observers left.
+	terminal := false
 	if detail, ok := h.runs[id]; ok {
-		detail.Status = "running"
-		detail.UpdatedAt = now
-		detail.StoppedAt = nil
+		terminal = detail.Status == "failed" || detail.Status == "completed"
+		if !terminal {
+			detail.Status = "running"
+			detail.UpdatedAt = now
+			detail.StoppedAt = nil
+		}
 	}
 	h.mu.Unlock()
+	if terminal {
+		// The watcher already persisted the terminal state and
+		// published its event; report the outcome without a spurious
+		// "resumed".
+		h.getRun(w, ctx, id)
+		return
+	}
 
 	if h.orderUpdates != nil {
 		h.orderUpdates.UpdateRunStatus(id, "running")
@@ -2161,7 +2176,9 @@ func (h *Handler) resumePersistedRun(ctx context.Context, detail *RunDetail, cal
 	// Flip to "running" BEFORE launching the goroutine: a fast startup
 	// failure can beat resumeRun's own status flip, and the completion
 	// watcher only reports terminal outcomes for runs in the running
-	// state. No-op for RestoreRuns, which only relaunches running rows.
+	// state. When that happens, resumeRun's conditional transition
+	// defers to the classified exit rather than overwriting it. No-op
+	// for RestoreRuns, which only relaunches running rows.
 	h.mu.Lock()
 	detail.Status = "running"
 	detail.UpdatedAt = h.now().UTC()
@@ -2512,11 +2529,13 @@ func (h *Handler) runIsActive(id uuid.UUID) bool {
 // maybePublishNaturalCompletion publishes the terminal run event when the
 // run was active one tick ago but isn't now, and the status is still
 // "running" — the run loop returned without going through stopRun.
-// runExitRecorder stamps d.Error before the run leaves the service
-// registry, so an error exit is reported "failed" (EventRunFailed) and a
-// clean exit "completed" (EventRunCompleted). The observer
-// picks this up once per run. The status is also flipped so runIsActive
-// returns false and the public status
+// runExitRecorder stashes the run loop's exit result in runExitErrs
+// before the run leaves the service registry; this consumes it and only
+// then stamps d.Error, so an error exit is reported "failed"
+// (EventRunFailed) and a clean exit "completed" (EventRunCompleted). The
+// observer picks this up once per run. The status flip also makes the
+// public status terminal, so a concurrent resume cannot resurrect the
+// run as "running".
 func (h *Handler) maybePublishNaturalCompletion(ctx context.Context, id uuid.UUID) {
 	h.mu.Lock()
 	exitErr := h.runExitErrs[id]
